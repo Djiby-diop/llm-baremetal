@@ -4,7 +4,12 @@ param(
 	[string]$Target = 'repl',
 
 	# Default unchanged (110M) unless overridden.
-	[string]$ModelBin = 'stories110M.bin'
+	[string]$ModelBin = 'stories110M.bin',
+
+	# Optional additional models to bundle into the image (copied to /models on the FAT partition).
+	# Example:
+	#   .\build.ps1 -ModelBin stories110M.bin -ExtraModelBins @('my-instruct.bin','another.bin')
+	[string[]]$ExtraModelBins = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,6 +17,10 @@ $ErrorActionPreference = 'Stop'
 Write-Host "`n[Build] Build + Image (WSL)" -ForegroundColor Cyan
 Write-Host "  Target: $Target" -ForegroundColor Gray
 Write-Host "  Model:  $ModelBin" -ForegroundColor Gray
+
+if ($ExtraModelBins.Count -gt 0) {
+	Write-Host "  Extra:  $($ExtraModelBins -join ', ')" -ForegroundColor Gray
+}
 
 # Fail fast with a helpful message when weights are not present.
 $modelHere = Join-Path $PSScriptRoot $ModelBin
@@ -22,6 +31,18 @@ if (-not (Test-Path $modelHere) -and -not (Test-Path $modelParent)) {
 	Write-Host "Place the model file in this folder or one level up, then re-run." -ForegroundColor Yellow
 	Write-Host "Tip: download the model from GitHub Releases (recommended) instead of committing weights." -ForegroundColor Yellow
 	throw "Missing model weights: $ModelBin"
+}
+
+# Validate extra model files (if any)
+foreach ($m in $ExtraModelBins) {
+	if (-not $m) { continue }
+	$mHere = Join-Path $PSScriptRoot $m
+	$mParent = Join-Path (Split-Path $PSScriptRoot -Parent) $m
+	if (-not (Test-Path $mHere) -and -not (Test-Path $mParent)) {
+		Write-Host "" 
+		Write-Host "❌ Missing extra model weights: $m" -ForegroundColor Red
+		throw "Missing extra model weights: $m"
+	}
 }
 
 function ConvertTo-WslPath([string]$winPath) {
@@ -45,7 +66,8 @@ function ConvertTo-WslPath([string]$winPath) {
 
 $wslRepo = ConvertTo-WslPath $PSScriptRoot
 
-$wslScript = "set -e; cd '$wslRepo'; chmod +x create-boot-mtools.sh; make clean; make repl; MODEL_BIN='$ModelBin' ./create-boot-mtools.sh"
+$extra = ($ExtraModelBins | Where-Object { $_ -and $_.Trim().Length -gt 0 }) -join ';'
+$wslScript = "set -e; cd '$wslRepo'; chmod +x create-boot-mtools.sh; make clean; make repl; MODEL_BIN='$ModelBin' EXTRA_MODELS='$extra' ./create-boot-mtools.sh"
 
 wsl bash -lc "$wslScript"
 

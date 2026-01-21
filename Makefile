@@ -18,7 +18,7 @@ LIBS = -lefi -lgnuefi
 TARGET = llama2.efi
 REPL_SRC = llama2_efi_final.c
 REPL_OBJ = llama2_repl.o
-REPL_OBJS = $(REPL_OBJ) llmk_zones.o llmk_log.o llmk_sentinel.o djiblas.o djiblas_avx2.o attention_avx2.o
+REPL_OBJS = $(REPL_OBJ) llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o djiblas.o djiblas_avx2.o attention_avx2.o
 REPL_SO  = llama2_repl.so
 
 all: repl
@@ -38,6 +38,9 @@ llmk_log.o: llmk_log.c llmk_log.h llmk_zones.h
 
 llmk_sentinel.o: llmk_sentinel.c llmk_sentinel.h llmk_zones.h llmk_log.h
 	$(CC) $(CFLAGS) -c llmk_sentinel.c -o llmk_sentinel.o
+
+llmk_oo.o: llmk_oo.c llmk_oo.h
+	$(CC) $(CFLAGS) -c llmk_oo.c -o llmk_oo.o
 
 $(REPL_SO): $(REPL_OBJS)
 	ld $(LDFLAGS) $(REPL_OBJS) -o $(REPL_SO) $(LIBS)

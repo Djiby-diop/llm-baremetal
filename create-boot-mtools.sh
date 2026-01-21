@@ -15,6 +15,11 @@ echo ""
 #   MODEL_BIN=stories110M.bin ./create-boot-mtools.sh
 MODEL_BIN="${MODEL_BIN:-stories15M.bin}"
 
+# Optional additional models (copied to /models on the FAT partition)
+# Usage:
+#   EXTRA_MODELS='stories110M.bin;my-instruct.bin' MODEL_BIN=stories110M.bin ./create-boot-mtools.sh
+EXTRA_MODELS="${EXTRA_MODELS:-}"
+
 # EFI payload selection (default: llama2.efi)
 # Usage:
 #   EFI_BIN=llmkernel.efi ./create-boot-mtools.sh
@@ -37,15 +42,44 @@ if [ ! -f "$MODEL_SRC" ]; then
     echo "❌ Missing model: $MODEL_BIN (looked in current dir and parent dir)"
     exit 1
 fi
+
+# Resolve + validate extra models, and compute total size for auto-sizing.
+EXTRA_SRCS=()
+EXTRA_NAMES=()
+TOTAL_MODEL_BYTES=$(stat -c %s "$MODEL_SRC")
+if [ -n "$EXTRA_MODELS" ]; then
+    IFS=';' read -r -a extra_arr <<< "$EXTRA_MODELS"
+    for m in "${extra_arr[@]}"; do
+        m_trim="${m//[[:space:]]/}"
+        [ -z "$m_trim" ] && continue
+        # Skip if same as primary
+        if [ "$(basename "$m_trim")" = "$(basename "$MODEL_BIN")" ]; then
+            continue
+        fi
+        src="$m_trim"
+        if [ ! -f "$src" ] && [ -f "../$m_trim" ]; then
+            src="../$m_trim"
+        fi
+        if [ ! -f "$src" ]; then
+            echo "❌ Missing extra model: $m_trim (looked in current dir and parent dir)"
+            exit 1
+        fi
+        EXTRA_SRCS+=("$src")
+        EXTRA_NAMES+=("$(basename "$m_trim")")
+        bytes=$(stat -c %s "$src")
+        TOTAL_MODEL_BYTES=$((TOTAL_MODEL_BYTES + bytes))
+    done
+fi
 echo "✅ All files present"
 
 # Create image file (auto-sized)
 echo ""
 MODEL_BYTES=$(stat -c %s "$MODEL_SRC")
 MODEL_MIB=$(( (MODEL_BYTES + 1024*1024 - 1) / (1024*1024) ))
+TOTAL_MIB=$(( (TOTAL_MODEL_BYTES + 1024*1024 - 1) / (1024*1024) ))
 # Slack for FAT + GPT + EFI + tokenizer + alignment
 SLACK_MIB=80
-IMAGE_MIB=$(( MODEL_MIB + SLACK_MIB ))
+IMAGE_MIB=$(( TOTAL_MIB + SLACK_MIB ))
 if [ $IMAGE_MIB -lt 100 ]; then IMAGE_MIB=100; fi
 
 echo "[2/4] Creating ${IMAGE_MIB}MB FAT32 image..."
@@ -100,6 +134,18 @@ echo "  ✅ Copied KERNEL.EFI"
 
 mcopy "$MODEL_SRC" z:/"$(basename "$MODEL_BIN")"
 echo "  ✅ Copied $(basename "$MODEL_BIN") (${MODEL_MIB} MB)"
+
+if [ ${#EXTRA_SRCS[@]} -gt 0 ]; then
+    mmd z:/models
+    echo "  ✅ Created /models"
+    for i in "${!EXTRA_SRCS[@]}"; do
+        src="${EXTRA_SRCS[$i]}"
+        name="${EXTRA_NAMES[$i]}"
+        mcopy "$src" z:/models/"$name"
+        mib=$(( ( $(stat -c %s "$src") + 1024*1024 - 1) / (1024*1024) ))
+        echo "  ✅ Copied models/$name (${mib} MB)"
+    done
+fi
 
 mcopy tokenizer.bin z:/
 echo "  ✅ Copied tokenizer.bin"

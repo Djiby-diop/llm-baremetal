@@ -20,6 +20,9 @@
 #include "llmk_log.h"
 #include "llmk_sentinel.h"
 
+// LLM-OO runtime (organism-oriented entities)
+#include "llmk_oo.h"
+
 // DjibMark - Omnipresent execution tracing (Made in Senegal 🇸🇳)
 #include "djibmark.h"
 
@@ -416,6 +419,13 @@ static char g_capture_buf[2048];
 static int g_capture_len = 0;
 static int g_capture_truncated = 0;
 
+// /oo_auto persistent state (runs multiple think cycles back-to-back)
+static int g_oo_auto_active = 0;
+static int g_oo_auto_id = 0;
+static int g_oo_auto_remaining = 0;
+static int g_oo_auto_total = 0;
+static char g_oo_auto_user[256];
+
 static void llmk_capture_reset(void) {
     g_capture_len = 0;
     g_capture_truncated = 0;
@@ -473,8 +483,106 @@ static void llmk_capture_sanitize_inplace(void) {
     g_capture_buf[g_capture_len] = 0;
 }
 
+static int llmk_oo_build_think_prompt(int id, const char *user, char *out, int out_cap) {
+    if (!out || out_cap <= 4) return 0;
+    out[0] = 0;
+
+    char goal[160];
+    char dig[256];
+    char tail[256];
+    char next_action[96];
+    goal[0] = 0;
+    dig[0] = 0;
+    tail[0] = 0;
+    next_action[0] = 0;
+
+    if (!llmk_oo_get_brief(id, goal, (int)sizeof(goal), dig, (int)sizeof(dig))) {
+        return 0;
+    }
+    llmk_oo_get_notes_tail(id, tail, (int)sizeof(tail), 240);
+    llmk_oo_agenda_peek(id, next_action, (int)sizeof(next_action));
+    int todo = llmk_oo_agenda_count(id);
+
+    int p = 0;
+    const char *prefix = "OO_THINK. Respond concisely. Goal: ";
+    for (const char *s = prefix; *s && p + 1 < out_cap; s++) out[p++] = *s;
+    for (int k = 0; goal[k] && p + 1 < out_cap; k++) out[p++] = goal[k];
+
+    if (dig[0]) {
+        const char *d1 = "\nDigest: ";
+        for (const char *s = d1; *s && p + 1 < out_cap; s++) out[p++] = *s;
+        for (int k = 0; dig[k] && p + 1 < out_cap; k++) out[p++] = dig[k];
+    }
+    if (tail[0]) {
+        const char *n1 = "\nNotes: ";
+        for (const char *s = n1; *s && p + 1 < out_cap; s++) out[p++] = *s;
+        for (int k = 0; tail[k] && p + 1 < out_cap; k++) out[p++] = tail[k];
+    }
+
+    if (next_action[0]) {
+        const char *a1 = "\nNext action: ";
+        for (const char *s = a1; *s && p + 1 < out_cap; s++) out[p++] = *s;
+        for (int k = 0; next_action[k] && p + 1 < out_cap; k++) out[p++] = next_action[k];
+        if (todo > 1) {
+            const char *a2 = " (";
+            for (const char *s = a2; *s && p + 1 < out_cap; s++) out[p++] = *s;
+            // small itoa
+            int v = todo;
+            char rev[16];
+            int rn = 0;
+            while (v > 0 && rn < (int)sizeof(rev)) { rev[rn++] = (char)('0' + (v % 10)); v /= 10; }
+            while (rn > 0 && p + 1 < out_cap) out[p++] = rev[--rn];
+            const char *a3 = " total)";
+            for (const char *s = a3; *s && p + 1 < out_cap; s++) out[p++] = *s;
+        }
+    }
+
+    const char *u1 = "\nUser: ";
+    for (const char *s = u1; *s && p + 1 < out_cap; s++) out[p++] = *s;
+    if (user && user[0]) {
+        for (const char *s = user; *s && p + 1 < out_cap; s++) out[p++] = *s;
+    } else {
+        const char *def = "next concrete action";
+        for (const char *s = def; *s && p + 1 < out_cap; s++) out[p++] = *s;
+    }
+
+    const char *suf = "\nAnswer:\n";
+    for (const char *s = suf; *s && p + 1 < out_cap; s++) out[p++] = *s;
+    out[p] = 0;
+    return 1;
+}
+
 static int llmk_ascii_is_space(char c) {
     return (c == ' ' || c == '\t' || c == '\r' || c == '\n');
+}
+
+// Parse an entity id from prompt, starting at *io_i.
+// Accepts either "1" or "<1>" (optional whitespace inside the brackets).
+// Updates *io_i to the first non-space char after the id (and optional '>').
+static int llmk_parse_entity_id_allow_brackets(const char *prompt, int *io_i) {
+    if (!prompt || !io_i) return 0;
+    int i = *io_i;
+    while (prompt[i] == ' ' || prompt[i] == '\t') i++;
+
+    int had_bracket = 0;
+    if (prompt[i] == '<') {
+        had_bracket = 1;
+        i++;
+        while (prompt[i] == ' ' || prompt[i] == '\t') i++;
+    }
+
+    int id = 0;
+    while (prompt[i] >= '0' && prompt[i] <= '9') {
+        id = id * 10 + (prompt[i] - '0');
+        i++;
+    }
+
+    while (prompt[i] == ' ' || prompt[i] == '\t') i++;
+    if (had_bracket && prompt[i] == '>') i++;
+    while (prompt[i] == ' ' || prompt[i] == '\t') i++;
+
+    *io_i = i;
+    return id;
 }
 
 static UINT32 llmk_u32_ctz(UINT32 x) {
@@ -525,6 +633,27 @@ static EFI_STATUS llmk_gop_init_best_effort(void) {
         // Still allow writes, but clamp later.
     }
     return EFI_SUCCESS;
+}
+
+// Force screen update after rendering (some firmware needs this trigger)
+static void llmk_gop_force_update(void) {
+    if (!g_gop || !g_gop_fb32) return;
+    // Touch a single pixel at 0,0 to trigger screen refresh
+    volatile UINT32 *fb = (volatile UINT32 *)g_gop_fb32;
+    UINT32 old = fb[0];
+    fb[0] = old ^ 0x00000001;  // Flip LSB
+    fb[0] = old;               // Restore original
+}
+
+static void llmk_gop_put_pixel(UINT32 x, UINT32 y, UINT8 r, UINT8 g, UINT8 b);
+
+static void llmk_oo_on_step_gop(int id, int tick, int energy) {
+    (void)energy;
+    if (!g_gop_fb32 || !g_gop_w || !g_gop_h) return;
+    UINT32 x = (UINT32)((tick * 13 + id * 31) % (int)g_gop_w);
+    UINT32 y = (UINT32)((tick * 7 + id * 17) % (int)g_gop_h);
+    llmk_gop_put_pixel(x, y, 0, 255, 0);
+    llmk_gop_force_update();
 }
 
 static void llmk_gop_put_pixel(UINT32 x, UINT32 y, UINT8 r, UINT8 g, UINT8 b) {
@@ -670,11 +799,72 @@ static int llmk_streq(const char *a, const char *b) {
     return (*a == 0 && *b == 0);
 }
 
-static int llmk_render_scene_dsl(const char *dsl) {
-    if (!dsl) return 0;
-    if (!g_gop_fb32) return 0;
+// Last DSL parse error (ASCII). Used to provide useful feedback for /render and /draw.
+static char g_last_dsl_error[96];
 
+static void llmk_set_dsl_error(const char *msg, const char *arg) {
+    // Store a short ASCII error message (best-effort).
+    int p = 0;
+    for (const char *s = msg; s && *s && p + 1 < (int)sizeof(g_last_dsl_error); s++) g_last_dsl_error[p++] = *s;
+    if (arg) {
+        if (p + 2 < (int)sizeof(g_last_dsl_error)) { g_last_dsl_error[p++] = ':'; g_last_dsl_error[p++] = ' '; }
+        for (const char *s = arg; *s && p + 1 < (int)sizeof(g_last_dsl_error); s++) {
+            char c = *s;
+            if (c < 0x20 || c > 0x7E) c = '?';
+            g_last_dsl_error[p++] = c;
+        }
+    }
+    g_last_dsl_error[p] = 0;
+}
+
+static const char* llmk_find_first_op(const char *s) {
+    if (!s) return NULL;
+    // Try to find a plausible start of DSL inside a larger prose blob.
+    for (const char *p = s; *p; p++) {
+        if ((p[0] == 'c' && p[1] == 'l' && p[2] == 'e' && p[3] == 'a' && p[4] == 'r') ||
+            (p[0] == 'r' && p[1] == 'e' && p[2] == 'c' && p[3] == 't') ||
+            (p[0] == 'p' && p[1] == 'i' && p[2] == 'x' && p[3] == 'e' && p[4] == 'l')) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+static void llmk_apply_simple_autocorrect(char *buf) {
+    // Best-effort fix for common typo seen in logs: "react" -> "rect".
+    if (!buf) return;
+    for (char *p = buf; p[0] && p[1] && p[2] && p[3] && p[4]; p++) {
+        if (p[0] == 'r' && p[1] == 'e' && p[2] == 'a' && p[3] == 'c' && p[4] == 't') {
+            p[2] = 'c';
+            // p[3],p[4] already 'c','t' from "react"; make it "rect" by shifting left one.
+            p[3] = 't';
+            p[4] = ' ';
+        }
+    }
+}
+
+static void llmk_draw_fallback_center_square(int white) {
+    if (!g_gop_fb32) return;
+    llmk_gop_clear(0, 0, 0);
+    UINT32 size = g_gop_w < g_gop_h ? g_gop_w : g_gop_h;
+    size = size / 4;
+    if (size < 32) size = 32;
+    UINT32 x = (g_gop_w > size) ? ((g_gop_w - size) / 2) : 0;
+    UINT32 y = (g_gop_h > size) ? ((g_gop_h - size) / 2) : 0;
+    if (white) llmk_gop_fill_rect(x, y, size, size, 255, 255, 255);
+    else llmk_gop_fill_rect(x, y, size, size, 255, 0, 0);
+}
+
+static int llmk_render_scene_dsl_ex(const char *dsl, int strict) {
+    g_last_dsl_error[0] = 0;
+    if (!dsl) { llmk_set_dsl_error("null dsl", NULL); return 0; }
+    if (!g_gop_fb32) { llmk_set_dsl_error("no gop", NULL); return 0; }
+
+    // If this is a prose blob, try to find the first DSL op.
     const char *s = dsl;
+    const char *first = llmk_find_first_op(dsl);
+    if (first) s = first;
+
     int any = 0;
     while (*s) {
         while (*s && (llmk_ascii_is_space(*s) || *s == ';')) s++;
@@ -682,14 +872,14 @@ static int llmk_render_scene_dsl(const char *dsl) {
 
         char op[16];
         const char *ns = llmk_parse_word(s, op, (int)sizeof(op));
-        if (!ns) return 0;
+        if (!ns) { llmk_set_dsl_error("parse op", NULL); return 0; }
         s = ns;
 
         if (llmk_streq(op, "clear")) {
             int r, g, b;
-            s = llmk_parse_i32(s, &r); if (!s) return 0;
-            s = llmk_parse_i32(s, &g); if (!s) return 0;
-            s = llmk_parse_i32(s, &b); if (!s) return 0;
+            s = llmk_parse_i32(s, &r); if (!s) { llmk_set_dsl_error("parse clear", NULL); return 0; }
+            s = llmk_parse_i32(s, &g); if (!s) { llmk_set_dsl_error("parse clear", NULL); return 0; }
+            s = llmk_parse_i32(s, &b); if (!s) { llmk_set_dsl_error("parse clear", NULL); return 0; }
             if (r < 0) r = 0; if (r > 255) r = 255;
             if (g < 0) g = 0; if (g > 255) g = 255;
             if (b < 0) b = 0; if (b > 255) b = 255;
@@ -698,13 +888,13 @@ static int llmk_render_scene_dsl(const char *dsl) {
             s = llmk_skip_to_stmt_end(s);
         } else if (llmk_streq(op, "rect")) {
             int x, y, w, h, r, g, b;
-            s = llmk_parse_i32(s, &x); if (!s) return 0;
-            s = llmk_parse_i32(s, &y); if (!s) return 0;
-            s = llmk_parse_i32(s, &w); if (!s) return 0;
-            s = llmk_parse_i32(s, &h); if (!s) return 0;
-            s = llmk_parse_i32(s, &r); if (!s) return 0;
-            s = llmk_parse_i32(s, &g); if (!s) return 0;
-            s = llmk_parse_i32(s, &b); if (!s) return 0;
+            s = llmk_parse_i32(s, &x); if (!s) { llmk_set_dsl_error("parse rect", NULL); return 0; }
+            s = llmk_parse_i32(s, &y); if (!s) { llmk_set_dsl_error("parse rect", NULL); return 0; }
+            s = llmk_parse_i32(s, &w); if (!s) { llmk_set_dsl_error("parse rect", NULL); return 0; }
+            s = llmk_parse_i32(s, &h); if (!s) { llmk_set_dsl_error("parse rect", NULL); return 0; }
+            s = llmk_parse_i32(s, &r); if (!s) { llmk_set_dsl_error("parse rect", NULL); return 0; }
+            s = llmk_parse_i32(s, &g); if (!s) { llmk_set_dsl_error("parse rect", NULL); return 0; }
+            s = llmk_parse_i32(s, &b); if (!s) { llmk_set_dsl_error("parse rect", NULL); return 0; }
             if (x < 0) x = 0; if (y < 0) y = 0;
             if (w < 0) w = 0; if (h < 0) h = 0;
             if (r < 0) r = 0; if (r > 255) r = 255;
@@ -715,11 +905,11 @@ static int llmk_render_scene_dsl(const char *dsl) {
             s = llmk_skip_to_stmt_end(s);
         } else if (llmk_streq(op, "pixel")) {
             int x, y, r, g, b;
-            s = llmk_parse_i32(s, &x); if (!s) return 0;
-            s = llmk_parse_i32(s, &y); if (!s) return 0;
-            s = llmk_parse_i32(s, &r); if (!s) return 0;
-            s = llmk_parse_i32(s, &g); if (!s) return 0;
-            s = llmk_parse_i32(s, &b); if (!s) return 0;
+            s = llmk_parse_i32(s, &x); if (!s) { llmk_set_dsl_error("parse pixel", NULL); return 0; }
+            s = llmk_parse_i32(s, &y); if (!s) { llmk_set_dsl_error("parse pixel", NULL); return 0; }
+            s = llmk_parse_i32(s, &r); if (!s) { llmk_set_dsl_error("parse pixel", NULL); return 0; }
+            s = llmk_parse_i32(s, &g); if (!s) { llmk_set_dsl_error("parse pixel", NULL); return 0; }
+            s = llmk_parse_i32(s, &b); if (!s) { llmk_set_dsl_error("parse pixel", NULL); return 0; }
             if (x < 0) x = 0; if (y < 0) y = 0;
             if (r < 0) r = 0; if (r > 255) r = 255;
             if (g < 0) g = 0; if (g > 255) g = 255;
@@ -728,11 +918,20 @@ static int llmk_render_scene_dsl(const char *dsl) {
             any = 1;
             s = llmk_skip_to_stmt_end(s);
         } else {
-            // Unknown op: skip to ';' to avoid getting stuck.
+            if (strict) {
+                llmk_set_dsl_error("unknown op", op);
+                return 0;
+            }
+            // Non-strict: skip to ';' to avoid getting stuck.
             s = llmk_skip_to_stmt_end(s);
         }
     }
+    if (!any && !g_last_dsl_error[0]) llmk_set_dsl_error("no ops", NULL);
     return any;
+}
+
+static int llmk_render_scene_dsl(const char *dsl) {
+    return llmk_render_scene_dsl_ex(dsl, 0);
 }
 
 static EFI_STATUS llmk_open_binary_file(EFI_FILE_HANDLE *out, const CHAR16 *name) {
@@ -762,6 +961,62 @@ static EFI_STATUS llmk_file_write_bytes(EFI_FILE_HANDLE f, const void *buf, UINT
     if (!f || (!buf && nb)) return EFI_INVALID_PARAMETER;
     if (nb == 0) return EFI_SUCCESS;
     return uefi_call_wrapper(f->Write, 3, f, &nb, (void *)buf);
+}
+
+static EFI_STATUS llmk_read_entire_file_best_effort(const CHAR16 *name, void **out_buf, UINTN *out_len) {
+    if (out_buf) *out_buf = NULL;
+    if (out_len) *out_len = 0;
+    if (!g_root || !name || !out_buf || !out_len) return EFI_INVALID_PARAMETER;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &f, (CHAR16 *)name, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(st)) return st;
+
+    // Get file size
+    UINT64 file_size = 0;
+    {
+        EFI_GUID FileInfoGuid = EFI_FILE_INFO_ID;
+        UINTN info_size = 0;
+        EFI_STATUS s2 = uefi_call_wrapper(f->GetInfo, 4, f, &FileInfoGuid, &info_size, NULL);
+        if (s2 == EFI_BUFFER_TOO_SMALL && info_size > 0) {
+            EFI_FILE_INFO *info = NULL;
+            s2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, info_size, (void **)&info);
+            if (!EFI_ERROR(s2) && info) {
+                s2 = uefi_call_wrapper(f->GetInfo, 4, f, &FileInfoGuid, &info_size, info);
+                if (!EFI_ERROR(s2)) file_size = info->FileSize;
+                uefi_call_wrapper(BS->FreePool, 1, info);
+            }
+        }
+    }
+
+    if (file_size == 0) {
+        uefi_call_wrapper(f->Close, 1, f);
+        return EFI_END_OF_FILE;
+    }
+    if (file_size > 1024 * 1024) {
+        // Safety cap (1 MiB)
+        uefi_call_wrapper(f->Close, 1, f);
+        return EFI_OUT_OF_RESOURCES;
+    }
+
+    void *buf = NULL;
+    st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, (UINTN)file_size, (void **)&buf);
+    if (EFI_ERROR(st) || !buf) {
+        uefi_call_wrapper(f->Close, 1, f);
+        return EFI_OUT_OF_RESOURCES;
+    }
+
+    UINTN nb = (UINTN)file_size;
+    st = uefi_call_wrapper(f->Read, 3, f, &nb, buf);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || nb != (UINTN)file_size) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        return EFI_LOAD_ERROR;
+    }
+
+    *out_buf = buf;
+    *out_len = nb;
+    return EFI_SUCCESS;
 }
 
 static int llmk_ascii_append_u32(char *dst, int cap, int pos, UINT32 v) {
@@ -851,6 +1106,8 @@ static UINT32 g_budget_overruns_decode = 0;
 
 // Forward decl (used by repl.cfg loader before definition)
 static void set_seed(unsigned int seed);
+// Forward decl (used by model override reader before definition)
+static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 
 static void llmk_reset_runtime_state(void) {
     // Budgets
@@ -1020,6 +1277,64 @@ static int llmk_cfg_streq_ci(const char *a, const char *b) {
         b++;
     }
     return (*a == 0 && *b == 0);
+}
+
+static int llmk_read_cfg_model_best_effort(EFI_FILE_HANDLE Root, CHAR16 *out, int out_cap) {
+    if (!out || out_cap <= 0) return 0;
+    out[0] = 0;
+    if (!Root) return 0;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &f, L"repl.cfg", EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(st) || !f) return 0;
+
+    char buf[2048];
+    UINTN sz = sizeof(buf) - 1;
+    st = uefi_call_wrapper(f->Read, 3, f, &sz, buf);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || sz == 0) return 0;
+    buf[sz] = 0;
+
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+        if (line[0] == '#' || line[0] == ';') continue;
+
+        // Strip inline comment.
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0 || val[0] == 0) continue;
+
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        if (llmk_cfg_streq_ci(key, "model") || llmk_cfg_streq_ci(key, "model_file") || llmk_cfg_streq_ci(key, "weights")) {
+            ascii_to_char16(out, val, out_cap);
+            // Trim again (defensive against trailing spaces).
+            while (out[0] == L' ' || out[0] == L'\t') {
+                for (int i = 0; i + 1 < out_cap; i++) out[i] = out[i + 1];
+            }
+            return (out[0] != 0);
+        }
+    }
+
+    return 0;
 }
 
 static int llmk_cfg_parse_u64(const char *s, UINT64 *out) {
@@ -1280,6 +1595,132 @@ static void llmk_load_repl_cfg_best_effort(
     if (applied) {
         Print(L"[cfg] repl.cfg loaded\r\n");
     }
+}
+
+static void llmk_cfg_copy_ascii_token(char *dst, int cap, const char *src) {
+    if (!dst || cap <= 0) return;
+    dst[0] = 0;
+    if (!src) return;
+
+    while (*src && llmk_cfg_is_space(*src)) src++;
+    int quoted = 0;
+    if (*src == '"') {
+        quoted = 1;
+        src++;
+    }
+
+    int p = 0;
+    for (const char *s = src; *s && p + 1 < cap; s++) {
+        if (quoted && *s == '"') break;
+        char c = *s;
+        if (c == '\r' || c == '\n') break;
+        if ((unsigned char)c < 0x20) c = ' ';
+        dst[p++] = c;
+    }
+    dst[p] = 0;
+
+    while (p > 0 && llmk_cfg_is_space(dst[p - 1])) dst[--p] = 0;
+}
+
+static void llmk_load_repl_cfg_oo_best_effort(
+    int *oo_autoload,
+    int *oo_autosave_every,
+    char *oo_file_out,
+    int oo_file_cap
+) {
+    if (oo_autoload) *oo_autoload = 0;
+    if (oo_autosave_every) *oo_autosave_every = 0;
+    if (oo_file_out && oo_file_cap > 0) oo_file_out[0] = 0;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_read_file(&f, L"repl.cfg");
+    if (EFI_ERROR(st)) return;
+
+    char buf[4096];
+    UINTN sz = sizeof(buf) - 1;
+    st = uefi_call_wrapper(f->Read, 3, f, &sz, buf);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || sz == 0) return;
+    buf[sz] = 0;
+
+    int autosave_set = 0;
+
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+        if (line[0] == '#' || line[0] == ';') continue;
+
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0) continue;
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        if (llmk_cfg_streq_ci(key, "oo_autoload") || llmk_cfg_streq_ci(key, "oo_load_on_boot")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                if (oo_autoload) *oo_autoload = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_file") || llmk_cfg_streq_ci(key, "oo_state_file") || llmk_cfg_streq_ci(key, "oo_autoload_file")) {
+            if (oo_file_out && oo_file_cap > 0) {
+                llmk_cfg_copy_ascii_token(oo_file_out, oo_file_cap, val);
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_autosave") || llmk_cfg_streq_ci(key, "oo_autosave_on")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                if (!autosave_set && oo_autosave_every) {
+                    *oo_autosave_every = (b != 0) ? 1 : 0;
+                }
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_autosave_every") || llmk_cfg_streq_ci(key, "oo_autosave_n")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > 1000) v = 1000;
+                if (oo_autosave_every) *oo_autosave_every = v;
+                autosave_set = 1;
+            }
+        }
+    }
+}
+
+static EFI_STATUS llmk_oo_save_to_file_best_effort(const CHAR16 *name, int *out_bytes) {
+    if (out_bytes) *out_bytes = 0;
+    if (!name) return EFI_INVALID_PARAMETER;
+
+    char *blob = (char *)simple_alloc(32768);
+    if (!blob) return EFI_OUT_OF_RESOURCES;
+
+    int n = llmk_oo_export(blob, 32768);
+    if (n < 0) return EFI_BUFFER_TOO_SMALL;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_binary_file(&f, name);
+    if (EFI_ERROR(st)) return st;
+
+    st = llmk_file_write_bytes(f, blob, (UINTN)n);
+    EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (out_bytes) *out_bytes = n;
+    if (EFI_ERROR(st)) return st;
+    if (EFI_ERROR(flush_st)) return flush_st;
+    return EFI_SUCCESS;
 }
 
 static EFI_STATUS llmk_file_write_u16(EFI_FILE_HANDLE f, const CHAR16 *s) {
@@ -2172,6 +2613,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             Print(L"[GOP] Not available (%r)\r\n\r\n", gst);
         }
     }
+
+    // LLM-OO runtime: init early, then optionally hook to GOP for heartbeat.
+    llmk_oo_init();
+    llmk_oo_set_on_step(llmk_oo_on_step_gop);
     
     // ========================================================================
     // [2/7] Load Model Header
@@ -2182,6 +2627,37 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     EFI_FILE_HANDLE ModelFile;
     CHAR16 *model_filename = NULL;
     {
+        // Optional: allow repl.cfg to override which model file to open.
+        // Example in repl.cfg:
+        //   model=models\\my-instruct.bin
+        //   model=stories110M.bin
+        CHAR16 cfg_model[128];
+        cfg_model[0] = 0;
+        if (llmk_read_cfg_model_best_effort(Root, cfg_model, (int)(sizeof(cfg_model) / sizeof(cfg_model[0])))) {
+            EFI_FILE_HANDLE f = 0;
+            EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &f, cfg_model, EFI_FILE_MODE_READ, 0);
+            if (!EFI_ERROR(st) && f) {
+                // Copy path to a stable buffer (stack buffer would not survive).
+                UINTN n = StrLen(cfg_model) + 1;
+                CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
+                if (stable) {
+                    StrCpy(stable, cfg_model);
+                    model_filename = stable;
+                } else {
+                    model_filename = cfg_model;
+                }
+                ModelFile = f;
+                status = st;
+            } else {
+                Print(L"[cfg] WARNING: model override not found: %s\r\n", cfg_model);
+            }
+        }
+
+        if (model_filename != NULL) {
+            // Using cfg override.
+            goto model_selected;
+        }
+
         // Try larger models first when present. Keep the list small and explicit
         // (UEFI shell users can rename the file to match one of these).
         CHAR16 *candidates[] = {
@@ -2203,12 +2679,37 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 status = st;
                 break;
             }
+            // Also allow placing models under a /models directory.
+            {
+                CHAR16 path[96];
+                StrCpy(path, L"models\\");
+                StrCat(path, candidates[i]);
+                st = uefi_call_wrapper(Root->Open, 5, Root, &f, path, EFI_FILE_MODE_READ, 0);
+                if (!EFI_ERROR(st) && f) {
+                    ModelFile = f;
+                    // Copy to stable buffer for later printing.
+                    UINTN n = StrLen(path) + 1;
+                    CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
+                    if (stable) {
+                        StrCpy(stable, path);
+                        model_filename = stable;
+                    } else {
+                        model_filename = candidates[i];
+                    }
+                    status = st;
+                    break;
+                }
+            }
             last = st;
         }
         if (model_filename == NULL) {
-            Print(L"ERROR: Model file not found. Expected one of: stories300M.bin stories260M.bin stories200M.bin stories110M.bin stories15M.bin model.bin\r\n");
+            Print(L"ERROR: Model file not found.\r\n");
+            Print(L"Expected one of (root or models\\): stories300M.bin stories260M.bin stories200M.bin stories110M.bin stories15M.bin model.bin\r\n");
+            Print(L"Or set repl.cfg: model=<path>\r\n");
             return last;
         }
+model_selected:
+        ;
     }
     
     Config config;
@@ -2514,7 +3015,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     Print(L"  CHAT MODE ACTIVE\r\n");
     Print(L"  Type 'quit' or 'exit' to stop\r\n");
     Print(L"  Multi-line: end line with '\\' to continue; ';;' alone submits\r\n");
-    Print(L"  Commands: /temp /min_p /top_p /top_k /norepeat /repeat /max_tokens /seed /stats /stop_you /stop_nl /model /cpu /zones /budget /attn /test_failsafe /ctx /log /save_log /save_dump /gop /render /save_img /draw /reset /version /help\r\n");
+    Print(L"  Commands: /temp /min_p /top_p /top_k /norepeat /repeat /max_tokens /seed /stats /stop_you /stop_nl /model /cpu /zones /budget /attn /test_failsafe /ctx /log /save_log /save_dump /gop /render /save_img /draw /oo_new /oo_list /oo_step /oo_run /oo_kill /oo_note /oo_plan /oo_agenda /oo_next /oo_done /oo_prio /oo_edit /oo_show /oo_digest /oo_save /oo_load /oo_think /oo_auto /oo_auto_stop /reset /version /help\r\n");
     Print(L"----------------------------------------\r\n\r\n");
     
     // Sampling parameters
@@ -2543,6 +3044,37 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         &stop_on_you,
         &stop_on_double_nl
     );
+
+    // OO config defaults (best-effort from repl.cfg)
+    int oo_autoload = 0;
+    int oo_autosave_every = 0;
+    char oo_file_ascii[96];
+    oo_file_ascii[0] = 0;
+    llmk_load_repl_cfg_oo_best_effort(&oo_autoload, &oo_autosave_every, oo_file_ascii, (int)sizeof(oo_file_ascii));
+
+    CHAR16 oo_state_file[96];
+    if (oo_file_ascii[0]) {
+        ascii_to_char16(oo_state_file, oo_file_ascii, (int)(sizeof(oo_state_file) / sizeof(oo_state_file[0])));
+    } else {
+        StrCpy(oo_state_file, L"oo-state.bin");
+    }
+
+    if (oo_autoload) {
+        void *buf = NULL;
+        UINTN len = 0;
+        EFI_STATUS st = llmk_read_entire_file_best_effort(oo_state_file, &buf, &len);
+        if (EFI_ERROR(st)) {
+            Print(L"[oo] autoload skipped (%r)\r\n", st);
+        } else {
+            int imported = llmk_oo_import((const char *)buf, (int)len);
+            uefi_call_wrapper(BS->FreePool, 1, buf);
+            if (imported < 0) {
+                Print(L"[oo] autoload failed (parse)\r\n");
+            } else {
+                Print(L"[oo] autoloaded %d entr%s from %s\r\n", imported, (imported == 1) ? L"y" : L"ies", oo_state_file);
+            }
+        }
+    }
     
     int conversation_count = 0;
     
@@ -2553,20 +3085,124 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     while (1) {
         conversation_count++;
 
-        // /draw capture-mode state (per-turn)
+        // capture-mode state (per-turn)
+        // capture_kind: 0=none, 1=/draw, 2=/oo_think, 3=/oo_auto
+        int capture_kind = 0;
         int draw_mode = 0;
+        int oo_think_id = 0;
+        int oo_auto_planning = 0;
+        int oo_auto_action_k = 0;
+        char oo_think_user[256];
+        oo_think_user[0] = 0;
         int saved_stop_on_you = stop_on_you;
         int saved_stop_on_double_nl = stop_on_double_nl;
         int saved_max_gen_tokens = max_gen_tokens;
-        
-        // Read user input
-        CHAR16 user_input[512];
-        Print(L"You: ");
-        read_user_input(user_input, 512);
-        
-        // Convert to char
+        int draw_saved_sampling = 0;
+        float saved_temperature = temperature;
+        float saved_min_p = min_p;
+        float saved_top_p = top_p;
+        int saved_top_k = top_k;
+        float saved_repeat_penalty = repeat_penalty;
+        char draw_user_prompt[256];
+        draw_user_prompt[0] = 0;
+
+        // Current turn prompt (either user input or synthesized for /oo_auto)
         char prompt[512];
-        char16_to_char(prompt, user_input, 512);
+        prompt[0] = 0;
+
+        if (g_oo_auto_active && g_oo_auto_id > 0 && g_oo_auto_remaining > 0) {
+            // Allow user to interrupt auto mode between cycles.
+            // Note: we poll once per cycle; keypresses are consumed here.
+            {
+                EFI_INPUT_KEY key;
+                EFI_STATUS kst = uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &key);
+                if (!EFI_ERROR(kst)) {
+                    if (key.UnicodeChar == L'q' || key.UnicodeChar == L'Q' || key.ScanCode == SCAN_ESC) {
+                        Print(L"\r\n[oo_auto] interrupted by user\r\n\r\n");
+                        g_oo_auto_active = 0;
+                        g_oo_auto_id = 0;
+                        g_oo_auto_remaining = 0;
+                        g_oo_auto_total = 0;
+                        g_oo_auto_user[0] = 0;
+                    }
+                }
+            }
+        }
+
+        if (g_oo_auto_active && g_oo_auto_id > 0 && g_oo_auto_remaining > 0) {
+            int cycle = (g_oo_auto_total - g_oo_auto_remaining) + 1;
+            if (cycle < 1) cycle = 1;
+            Print(L"\r\n[oo_auto] cycle %d/%d...\r\n", cycle, (g_oo_auto_total > 0) ? g_oo_auto_total : cycle);
+
+            // Auto-consume agenda: if an action exists, select it and mark it DOING.
+            // Falls back to the configured /oo_auto prompt when agenda is empty.
+            const char *cycle_user = g_oo_auto_user;
+            char cycle_action[96];
+            cycle_action[0] = 0;
+            int picked_k = 0;
+            if (llmk_oo_agenda_next_ex(g_oo_auto_id, &picked_k, cycle_action, (int)sizeof(cycle_action))) {
+                cycle_user = cycle_action;
+                oo_auto_action_k = picked_k;
+                {
+                    CHAR16 a16[120];
+                    ascii_to_char16(a16, cycle_action, (int)(sizeof(a16) / sizeof(a16[0])));
+                    Print(L"[oo_auto] action #%d: %s\r\n", picked_k, a16);
+                }
+                oo_auto_planning = 0;
+            } else {
+                // No agenda to execute: ask the model for exactly one next action and push it.
+                // This does NOT consume a cycle (remaining is unchanged).
+                oo_auto_planning = 1;
+                oo_auto_action_k = 0;
+                cycle_user = "Propose ONE next concrete action (single line, no bullets, no extra text).";
+                Print(L"[oo_auto] agenda empty -> planning next action\r\n");
+            }
+
+            char new_prompt[512];
+            if (!llmk_oo_build_think_prompt(g_oo_auto_id, cycle_user, new_prompt, (int)sizeof(new_prompt))) {
+                Print(L"[oo_auto] ERROR: unknown entity id=%d (stopping)\r\n\r\n", g_oo_auto_id);
+                g_oo_auto_active = 0;
+                g_oo_auto_id = 0;
+                g_oo_auto_remaining = 0;
+                g_oo_auto_total = 0;
+            } else {
+                // /oo_auto builds a fresh prompt every cycle; keep model context clean per-cycle.
+                reset_kv_cache(&state, &config);
+                kv_pos = 0;
+
+                for (int k = 0; k < (int)sizeof(prompt); k++) {
+                    prompt[k] = new_prompt[k];
+                    if (new_prompt[k] == 0) break;
+                }
+                // Per-cycle state for capture handler
+                oo_think_id = g_oo_auto_id;
+                {
+                    int up = 0;
+                    if (cycle_user && cycle_user[0]) {
+                        for (const char *s = cycle_user; *s && up + 1 < (int)sizeof(oo_think_user); s++) oo_think_user[up++] = *s;
+                    }
+                    oo_think_user[up] = 0;
+                }
+                oo_think_user[(int)sizeof(oo_think_user) - 1] = 0;
+
+                g_capture_mode = 1;
+                capture_kind = 3; // /oo_auto cycle
+                llmk_capture_reset();
+                stop_on_you = 0;
+                stop_on_double_nl = 1;
+                if (max_gen_tokens > 64) max_gen_tokens = 64;
+            }
+        }
+
+        if (prompt[0] == 0) {
+            // Read user input
+            CHAR16 user_input[512];
+            Print(L"You: ");
+            read_user_input(user_input, 512);
+            
+            // Convert to char
+            char16_to_char(prompt, user_input, 512);
+        }
 
         // Special command: /draw uses the model to generate render DSL, captures it, then runs /render.
         // It intentionally consumes context like any other prompt; use /clear if you want a clean slate.
@@ -2584,22 +3220,31 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 continue;
             }
 
+            // Immediate feedback: /draw can be slow under TCG, so show progress + clear screen.
+            Print(L"\r\n[draw] generating DSL (may take a while under emulation) ...\r\n");
+            llmk_gop_clear(0, 0, 0);
+            llmk_gop_force_update();
+
+            // Save the user's raw request for fallback rendering.
+            {
+                int up = 0;
+                for (const char *s = q; *s && up + 1 < (int)sizeof(draw_user_prompt); s++) {
+                    draw_user_prompt[up++] = *s;
+                }
+                draw_user_prompt[up] = 0;
+            }
+
             // Build a compact instruction prompt.
             // Keep it short (prompt buffer is 512 bytes).
+            // Use concrete examples to override narrative bias from stories model.
             char new_prompt[512];
             int p = 0;
-            const char *prefix = "Output ONLY render DSL (no prose). Ops: clear R G B; rect X Y W H R G B; pixel X Y R G B; ints; ';' sep. End with END. Canvas:";
+            const char *prefix = "INSTRUCTION: Output render DSL code only. Format: clear R G B; rect X Y W H R G B; pixel X Y R G B; Example: clear 0 0 0; rect 100 100 50 50 255 255 255; END. Now:";
             for (const char *s = prefix; *s && p + 1 < (int)sizeof(new_prompt); s++) new_prompt[p++] = *s;
-            // Append W/H
-            new_prompt[p++] = ' ';
-            p = llmk_ascii_append_u32(new_prompt, (int)sizeof(new_prompt), p, g_gop_w);
-            if (p + 1 < (int)sizeof(new_prompt)) new_prompt[p++] = 'x';
-            p = llmk_ascii_append_u32(new_prompt, (int)sizeof(new_prompt), p, g_gop_h);
-            if (p + 1 < (int)sizeof(new_prompt)) new_prompt[p++] = '.';
             if (p + 1 < (int)sizeof(new_prompt)) new_prompt[p++] = ' ';
-            const char *mid = "Prompt: ";
-            for (const char *s = mid; *s && p + 1 < (int)sizeof(new_prompt); s++) new_prompt[p++] = *s;
             for (const char *s = q; *s && p + 1 < (int)sizeof(new_prompt); s++) new_prompt[p++] = *s;
+            const char *suffix = " OUTPUT:";
+            for (const char *s = suffix; *s && p + 1 < (int)sizeof(new_prompt); s++) new_prompt[p++] = *s;
             if (p + 2 < (int)sizeof(new_prompt)) { new_prompt[p++] = '\n'; new_prompt[p++] = 0; }
             else new_prompt[(int)sizeof(new_prompt) - 1] = 0;
 
@@ -2612,12 +3257,26 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             // Configure capture mode.
             draw_mode = 1;
             g_capture_mode = 1;
+            capture_kind = 1;
             llmk_capture_reset();
+
+            // Force deterministic sampling for /draw (TinyStories models tend to drift into prose).
+            draw_saved_sampling = 1;
+            saved_temperature = temperature;
+            saved_min_p = min_p;
+            saved_top_p = top_p;
+            saved_top_k = top_k;
+            saved_repeat_penalty = repeat_penalty;
+            temperature = 0.0f;
+            min_p = 0.0f;
+            top_p = 0.0f;
+            top_k = 1;
+            repeat_penalty = 1.0f;
 
             // Prefer to stop on double newline in case END never appears.
             stop_on_you = 0;
             stop_on_double_nl = 1;
-            if (max_gen_tokens > 96) max_gen_tokens = 96;
+            if (max_gen_tokens > 48) max_gen_tokens = 48;
         }
         
         // Check for quit
@@ -2627,6 +3286,70 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             Print(L"  Goodbye! Had %d conversations.\r\n", conversation_count - 1);
             Print(L"----------------------------------------\r\n\r\n");
             break;
+        }
+
+        // UX: accept common commands even if user forgets the leading '/'.
+        // Example: "oo_note 1 hello" becomes "/oo_note 1 hello".
+        // Also: typing "reset" (no slash) should not accidentally trigger generation.
+        if (!draw_mode && prompt[0] != '/') {
+            const char *s = prompt;
+            while (*s == ' ' || *s == '\t') s++;
+
+            int do_rewrite = 0;
+            const char *rewrite_from = s;
+
+            // Accept OO commands with args.
+            if (my_strncmp(s, "oo_", 3) == 0) {
+                do_rewrite = 1;
+            } else {
+                // Accept a small whitelist of exact commands (no args), ignoring leading/trailing whitespace.
+                const char *cmd = NULL;
+                int cmd_len = 0;
+                if (my_strncmp(s, "reset", 5) == 0) {
+                    cmd = "reset";
+                    cmd_len = 5;
+                } else if (my_strncmp(s, "help", 4) == 0) {
+                    cmd = "help";
+                    cmd_len = 4;
+                } else if (my_strncmp(s, "version", 7) == 0) {
+                    cmd = "version";
+                    cmd_len = 7;
+                } else if (my_strncmp(s, "ctx", 3) == 0) {
+                    cmd = "ctx";
+                    cmd_len = 3;
+                } else if (my_strncmp(s, "log", 3) == 0) {
+                    cmd = "log";
+                    cmd_len = 3;
+                } else if (my_strncmp(s, "zones", 5) == 0) {
+                    cmd = "zones";
+                    cmd_len = 5;
+                } else if (my_strncmp(s, "cpu", 3) == 0) {
+                    cmd = "cpu";
+                    cmd_len = 3;
+                }
+
+                if (cmd) {
+                    const char *t = s + cmd_len;
+                    while (*t == ' ' || *t == '\t') t++;
+                    if (*t == 0) {
+                        do_rewrite = 1;
+                        rewrite_from = cmd; // normalize: drop extra whitespace
+                    }
+                }
+            }
+
+            if (do_rewrite) {
+                char tmp2[512];
+                int p2 = 0;
+                tmp2[p2++] = '/';
+                for (int i = 0; rewrite_from[i] && p2 + 1 < (int)sizeof(tmp2); i++) tmp2[p2++] = rewrite_from[i];
+                tmp2[p2] = 0;
+
+                for (int i = 0; i < (int)sizeof(prompt); i++) {
+                    prompt[i] = tmp2[i];
+                    if (tmp2[i] == 0) break;
+                }
+            }
         }
         
         // Check for commands (except /draw which is handled above and falls through into generation)
@@ -3096,9 +3819,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                     Print(L"    clear R G B; rect X Y W H R G B; pixel X Y R G B\r\n\r\n");
                     continue;
                 }
-                int ok = llmk_render_scene_dsl(dsl);
-                if (ok) Print(L"\r\nOK: rendered\r\n\r\n");
-                else Print(L"\r\nERROR: render failed\r\n\r\n");
+                int ok = llmk_render_scene_dsl_ex(dsl, 1);
+                if (ok) {
+                    llmk_gop_force_update();
+                    Print(L"\r\nOK: rendered (check screen above)\r\n\r\n");
+                } else {
+                    CHAR16 msg[140];
+                    ascii_to_char16(msg, g_last_dsl_error, (int)(sizeof(msg) / sizeof(msg[0])));
+                    Print(L"\r\nERROR: render failed (%s)\r\n", msg);
+                    Print(L"Hint: use 'rect' not 'react'\r\n\r\n");
+                }
                 continue;
             } else if (my_strncmp(prompt, "/save_img", 9) == 0) {
                 if (!g_gop_fb32) {
@@ -3121,6 +3851,500 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 } else {
                     Print(L"\r\nOK: wrote %s (PPM, flushed)\r\n\r\n", out_name);
                 }
+                continue;
+            } else if (my_strncmp(prompt, "/oo_new", 7) == 0) {
+                const char *goal = prompt + 7;
+                while (*goal == ' ' || *goal == '\t') goal++;
+                if (*goal == 0) {
+                    Print(L"\r\nUsage: /oo_new <goal>\r\n\r\n");
+                    continue;
+                }
+                int id = llmk_oo_new(goal);
+                if (id < 0) {
+                    Print(L"\r\nERROR: cannot create entity (full?)\r\n\r\n");
+                } else {
+                    Print(L"\r\nOK: created entity id=%d\r\n\r\n", id);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/oo_list", 8) == 0) {
+                llmk_oo_list_print();
+                continue;
+            } else if (my_strncmp(prompt, "/oo_kill", 8) == 0) {
+                int i = 8;
+                while (prompt[i] == ' ') i++;
+                int id = 0;
+                while (prompt[i] >= '0' && prompt[i] <= '9') {
+                    id = id * 10 + (prompt[i] - '0');
+                    i++;
+                }
+                if (id <= 0) {
+                    Print(L"\r\nUsage: /oo_kill <id>\r\n\r\n");
+                    continue;
+                }
+                if (!llmk_oo_kill(id)) {
+                    Print(L"\r\nERROR: unknown entity id=%d\r\n\r\n", id);
+                    continue;
+                }
+                Print(L"\r\nOK: killed entity id=%d\r\n\r\n", id);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_step", 8) == 0) {
+                int i = 8;
+                while (prompt[i] == ' ') i++;
+                int id = 0;
+                while (prompt[i] >= '0' && prompt[i] <= '9') {
+                    id = id * 10 + (prompt[i] - '0');
+                    i++;
+                }
+                if (id <= 0) {
+                    Print(L"\r\nUsage: /oo_step <id>\r\n\r\n");
+                    continue;
+                }
+                if (!llmk_oo_step(id)) {
+                    Print(L"\r\nERROR: unknown entity id=%d\r\n\r\n", id);
+                    continue;
+                }
+                Print(L"\r\nOK: stepped entity id=%d\r\n\r\n", id);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_run", 7) == 0) {
+                int steps = 1;
+                if (prompt[7] == ' ') {
+                    int i = 8;
+                    int val = 0;
+                    while (prompt[i] >= '0' && prompt[i] <= '9') {
+                        val = val * 10 + (prompt[i] - '0');
+                        i++;
+                    }
+                    if (val > 0) steps = val;
+                }
+                int ran = llmk_oo_run(steps);
+
+                Print(L"\r\nOK: ran %d step(s)\r\n\r\n", ran);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_note", 8) == 0) {
+                // Usage: /oo_note <id> <text...>
+                int i = 8;
+                while (prompt[i] == ' ') i++;
+                int id = 0;
+                while (prompt[i] >= '0' && prompt[i] <= '9') {
+                    id = id * 10 + (prompt[i] - '0');
+                    i++;
+                }
+                while (prompt[i] == ' ') i++;
+                const char *text = prompt + i;
+                if (id <= 0 || !text || !text[0]) {
+                    Print(L"\r\nUsage: /oo_note <id> <text>\r\n\r\n");
+                    continue;
+                }
+                if (!llmk_oo_note(id, text)) {
+                    Print(L"\r\nERROR: unknown entity id=%d\r\n\r\n", id);
+                    continue;
+                }
+                Print(L"\r\nOK: noted entity id=%d\r\n\r\n", id);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_show", 8) == 0) {
+                int i = 8;
+                int id = llmk_parse_entity_id_allow_brackets(prompt, &i);
+                if (id <= 0) {
+                    Print(L"\r\nUsage: /oo_show <id>\r\n\r\n");
+                    continue;
+                }
+                if (!llmk_oo_show_print(id)) {
+                    Print(L"\r\nERROR: unknown entity id=%d\r\n\r\n", id);
+                    continue;
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/oo_digest", 10) == 0) {
+                int i = 10;
+                int id = llmk_parse_entity_id_allow_brackets(prompt, &i);
+                if (id <= 0) {
+                    Print(L"\r\nUsage: /oo_digest <id>\r\n\r\n");
+                    continue;
+                }
+                if (!llmk_oo_digest(id)) {
+                    Print(L"\r\nERROR: unknown entity id=%d\r\n\r\n", id);
+                    continue;
+                }
+                Print(L"\r\nOK: digested entity id=%d\r\n\r\n", id);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_plan", 8) == 0) {
+                // Usage: /oo_plan <id> [prio] <action...>  (optionally: a1; a2; a3)
+                // prio forms: +3, -1, p=2
+                int i = 8;
+                int id = llmk_parse_entity_id_allow_brackets(prompt, &i);
+                while (prompt[i] == ' ') i++;
+
+                int prio = 0;
+                // Optional priority token
+                if ((prompt[i] == '+' || prompt[i] == '-') && (prompt[i + 1] >= '0' && prompt[i + 1] <= '9')) {
+                    int sign = (prompt[i] == '-') ? -1 : 1;
+                    i++;
+                    int v = 0;
+                    while (prompt[i] >= '0' && prompt[i] <= '9') {
+                        v = v * 10 + (prompt[i] - '0');
+                        i++;
+                    }
+                    prio = v * sign;
+                    while (prompt[i] == ' ') i++;
+                } else if (prompt[i] == 'p' && prompt[i + 1] == '=' && (prompt[i + 2] >= '0' && prompt[i + 2] <= '9')) {
+                    i += 2;
+                    int v = 0;
+                    while (prompt[i] >= '0' && prompt[i] <= '9') {
+                        v = v * 10 + (prompt[i] - '0');
+                        i++;
+                    }
+                    prio = v;
+                    while (prompt[i] == ' ') i++;
+                }
+
+                const char *text = prompt + i;
+                if (id <= 0 || !text || !text[0]) {
+                    Print(L"\r\nUsage: /oo_plan <id> <action>\r\n");
+                    Print(L"  Example: /oo_plan 1 do X; do Y\r\n");
+                    Print(L"  Priority: /oo_plan 1 +2 urgent thing\r\n");
+                    Print(L"  Tip: you can also write: /oo_plan <1> ...\r\n\r\n");
+                    continue;
+                }
+
+                // Split on ';' (simple)
+                int added = 0;
+                char tmp[128];
+                int tp = 0;
+                for (const char *s = text; ; s++) {
+                    char c = *s;
+                    if (c == 0 || c == ';') {
+                        tmp[tp] = 0;
+                        // trim
+                        const char *t = tmp;
+                        while (*t == ' ' || *t == '\t') t++;
+                        int end = 0;
+                        while (t[end]) end++;
+                        while (end > 0 && (t[end - 1] == ' ' || t[end - 1] == '\t')) end--;
+                        char one[128];
+                        int op = 0;
+                        for (int k = 0; k < end && op + 1 < (int)sizeof(one); k++) one[op++] = t[k];
+                        one[op] = 0;
+
+                        if (one[0]) {
+                            if (llmk_oo_agenda_add_ex(id, one, prio)) added++;
+                        }
+                        tp = 0;
+                        if (c == 0) break;
+                    } else {
+                        if (tp + 1 < (int)sizeof(tmp)) tmp[tp++] = c;
+                    }
+                }
+
+                if (added <= 0) {
+                    Print(L"\r\nERROR: failed to add action(s) (unknown id or agenda full)\r\n\r\n");
+                } else {
+                    Print(L"\r\nOK: added %d action(s) to id=%d\r\n\r\n", added, id);
+                    llmk_oo_digest(id);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/oo_agenda", 10) == 0) {
+                int i = 10;
+                int id = llmk_parse_entity_id_allow_brackets(prompt, &i);
+                if (id <= 0) {
+                    Print(L"\r\nUsage: /oo_agenda <id>\r\n");
+                    Print(L"  Example: /oo_agenda 1\r\n\r\n");
+                    continue;
+                }
+                if (!llmk_oo_get_brief(id, NULL, 0, NULL, 0)) {
+                    Print(L"\r\nERROR: unknown entity id=%d\r\n\r\n", id);
+                    continue;
+                }
+                Print(L"\r\nOO agenda for id=%d:\r\n", id);
+                llmk_oo_agenda_print(id);
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/oo_next", 8) == 0) {
+                int i = 8;
+                int id = llmk_parse_entity_id_allow_brackets(prompt, &i);
+                if (id <= 0) {
+                    Print(L"\r\nUsage: /oo_next <id>\r\n");
+                    Print(L"  Example: /oo_next 1\r\n\r\n");
+                    continue;
+                }
+                char act[96];
+                act[0] = 0;
+                int k = 0;
+                if (!llmk_oo_agenda_next_ex(id, &k, act, (int)sizeof(act))) {
+                    Print(L"\r\nOK: agenda empty (or unknown id=%d)\r\n\r\n", id);
+                    continue;
+                }
+                CHAR16 a16[110];
+                ascii_to_char16(a16, act, (int)(sizeof(a16) / sizeof(a16[0])));
+                Print(L"\r\nOK: next action for id=%d (#%d, marked doing):\r\n  %s\r\n\r\n", id, k, a16);
+                llmk_oo_digest(id);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_done", 8) == 0) {
+                // Usage: /oo_done <id> <k>
+                int i = 8;
+                int id = llmk_parse_entity_id_allow_brackets(prompt, &i);
+                while (prompt[i] == ' ') i++;
+                int k = 0;
+                while (prompt[i] >= '0' && prompt[i] <= '9') {
+                    k = k * 10 + (prompt[i] - '0');
+                    i++;
+                }
+                if (id <= 0 || k <= 0) {
+                    Print(L"\r\nUsage: /oo_done <id> <k>\r\n");
+                    Print(L"  Example: /oo_done 1 2\r\n\r\n");
+                    continue;
+                }
+                char txt[96];
+                txt[0] = 0;
+                if (!llmk_oo_action_get(id, k, txt, (int)sizeof(txt), NULL, NULL)) {
+                    Print(L"\r\nERROR: unknown action #%d for id=%d\r\n\r\n", k, id);
+                    continue;
+                }
+                if (!llmk_oo_action_set_state(id, k, 2)) {
+                    Print(L"\r\nERROR: failed to mark done (#%d)\r\n\r\n", k);
+                    continue;
+                }
+                {
+                    char dn[196];
+                    int dp = 0;
+                    const char *h = "done: ";
+                    for (int j = 0; h[j] && dp + 1 < (int)sizeof(dn); j++) dn[dp++] = h[j];
+                    for (int j = 0; txt[j] && dp + 1 < (int)sizeof(dn); j++) dn[dp++] = txt[j];
+                    dn[dp] = 0;
+                    llmk_oo_note(id, dn);
+                }
+                Print(L"\r\nOK: marked done id=%d #%d\r\n\r\n", id, k);
+                llmk_oo_digest(id);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_prio", 8) == 0) {
+                // Usage: /oo_prio <id> <k> <prio>
+                int i = 8;
+                int id = llmk_parse_entity_id_allow_brackets(prompt, &i);
+                while (prompt[i] == ' ') i++;
+                int k = 0;
+                while (prompt[i] >= '0' && prompt[i] <= '9') {
+                    k = k * 10 + (prompt[i] - '0');
+                    i++;
+                }
+                while (prompt[i] == ' ') i++;
+                int sign = 1;
+                if (prompt[i] == '-') { sign = -1; i++; }
+                else if (prompt[i] == '+') { i++; }
+                int pr = 0;
+                int any = 0;
+                while (prompt[i] >= '0' && prompt[i] <= '9') {
+                    pr = pr * 10 + (prompt[i] - '0');
+                    i++;
+                    any = 1;
+                }
+                pr *= sign;
+                if (id <= 0 || k <= 0 || !any) {
+                    Print(L"\r\nUsage: /oo_prio <id> <k> <prio>\r\n");
+                    Print(L"  Example: /oo_prio 1 2 +3\r\n\r\n");
+                    continue;
+                }
+                if (!llmk_oo_action_set_prio(id, k, pr)) {
+                    Print(L"\r\nERROR: failed to set prio id=%d #%d\r\n\r\n", id, k);
+                    continue;
+                }
+                Print(L"\r\nOK: set prio id=%d #%d -> %d\r\n\r\n", id, k, pr);
+                llmk_oo_digest(id);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_edit", 7) == 0) {
+                // Usage: /oo_edit <id> <k> <new text...>
+                int i = 7;
+                int id = llmk_parse_entity_id_allow_brackets(prompt, &i);
+                while (prompt[i] == ' ') i++;
+                int k = 0;
+                while (prompt[i] >= '0' && prompt[i] <= '9') {
+                    k = k * 10 + (prompt[i] - '0');
+                    i++;
+                }
+                while (prompt[i] == ' ') i++;
+                const char *text = prompt + i;
+                if (id <= 0 || k <= 0 || !text || !text[0]) {
+                    Print(L"\r\nUsage: /oo_edit <id> <k> <text>\r\n");
+                    Print(L"  Example: /oo_edit 1 2 rewrite this action\r\n\r\n");
+                    continue;
+                }
+                if (!llmk_oo_action_edit(id, k, text)) {
+                    Print(L"\r\nERROR: failed to edit id=%d #%d\r\n\r\n", id, k);
+                    continue;
+                }
+                Print(L"\r\nOK: edited id=%d #%d\r\n\r\n", id, k);
+                llmk_oo_digest(id);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_save", 8) == 0) {
+                const char *name = prompt + 8;
+                while (*name == ' ' || *name == '\t') name++;
+                CHAR16 out_name[96];
+                if (*name == 0) {
+                    StrCpy(out_name, oo_state_file);
+                } else {
+                    ascii_to_char16(out_name, name, (int)(sizeof(out_name) / sizeof(out_name[0])));
+                }
+
+                int n = 0;
+                EFI_STATUS st = llmk_oo_save_to_file_best_effort(out_name, &n);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: failed to write %s: %r\r\n\r\n", out_name, st);
+                } else {
+                    Print(L"\r\nOK: wrote %s (%d bytes)\r\n\r\n", out_name, n);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/oo_load", 8) == 0) {
+                const char *name = prompt + 8;
+                while (*name == ' ' || *name == '\t') name++;
+                CHAR16 in_name[96];
+                if (*name == 0) {
+                    StrCpy(in_name, oo_state_file);
+                } else {
+                    ascii_to_char16(in_name, name, (int)(sizeof(in_name) / sizeof(in_name[0])));
+                }
+
+                // Stop auto mode (loading changes entity IDs/state)
+                g_oo_auto_active = 0;
+                g_oo_auto_id = 0;
+                g_oo_auto_remaining = 0;
+                g_oo_auto_total = 0;
+                g_oo_auto_user[0] = 0;
+
+                void *buf = NULL;
+                UINTN len = 0;
+                EFI_STATUS st = llmk_read_entire_file_best_effort(in_name, &buf, &len);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: failed to read %s: %r\r\n\r\n", in_name, st);
+                    continue;
+                }
+                int imported = llmk_oo_import((const char *)buf, (int)len);
+                uefi_call_wrapper(BS->FreePool, 1, buf);
+
+                if (imported < 0) {
+                    Print(L"\r\nERROR: parse failed\r\n\r\n");
+                } else {
+                    Print(L"\r\nOK: loaded %d entity(s) from %s\r\n\r\n", imported, in_name);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/oo_think", 9) == 0) {
+                // Usage: /oo_think <id> <prompt...>
+                int i = 9;
+                int id = llmk_parse_entity_id_allow_brackets(prompt, &i);
+                const char *q = prompt + i;
+                if (id <= 0) {
+                    Print(L"\r\nUsage: /oo_think <id> [prompt]\r\n");
+                    Print(L"  Example: /oo_think 1\r\n");
+                    Print(L"           /oo_think 1 how should I proceed?\r\n\r\n");
+                    continue;
+                }
+
+                // Save the user's raw prompt (for logging into entity notes).
+                // If empty, use the default question.
+                const char *user_q = (q && q[0]) ? q : "next concrete action";
+                {
+                    int up = 0;
+                    for (const char *s = user_q; *s && up + 1 < (int)sizeof(oo_think_user); s++) oo_think_user[up++] = *s;
+                    oo_think_user[up] = 0;
+                }
+
+                // Build a compact prompt; includes agenda context.
+                char new_prompt[512];
+                if (!llmk_oo_build_think_prompt(id, oo_think_user, new_prompt, (int)sizeof(new_prompt))) {
+                    Print(L"\r\nERROR: unknown entity id=%d\r\n\r\n", id);
+                    continue;
+                }
+
+                // Swap in synthesized prompt for this turn.
+                for (int k = 0; k < (int)sizeof(prompt); k++) {
+                    prompt[k] = new_prompt[k];
+                    if (new_prompt[k] == 0) break;
+                }
+
+                Print(L"\r\n[oo] thinking...\r\n");
+
+                // Configure capture mode for model output.
+                g_capture_mode = 1;
+                capture_kind = 2;
+                oo_think_id = id;
+                llmk_capture_reset();
+
+                // Keep it short and avoid stopping on the "You:" needle.
+                stop_on_you = 0;
+                stop_on_double_nl = 1;
+                if (max_gen_tokens > 96) max_gen_tokens = 96;
+                continue;
+            } else if (my_strncmp(prompt, "/oo_auto", 8) == 0) {
+                // Usage: /oo_auto <id> [n] [prompt...]
+                // Runs n cycles of: think (LLM capture) -> store notes -> step -> digest
+                int i = 8;
+                while (prompt[i] == ' ') i++;
+                int id = 0;
+                while (prompt[i] >= '0' && prompt[i] <= '9') {
+                    id = id * 10 + (prompt[i] - '0');
+                    i++;
+                }
+                while (prompt[i] == ' ') i++;
+
+                int n = 3;
+                if (prompt[i] >= '0' && prompt[i] <= '9') {
+                    n = 0;
+                    while (prompt[i] >= '0' && prompt[i] <= '9') {
+                        n = n * 10 + (prompt[i] - '0');
+                        i++;
+                    }
+                    while (prompt[i] == ' ') i++;
+                }
+
+                const char *q = prompt + i;
+                if (id <= 0) {
+                    Print(L"\r\nUsage: /oo_auto <id> [n] [prompt]\r\n\r\n");
+                    continue;
+                }
+
+                // Ensure entity exists
+                if (!llmk_oo_get_brief(id, NULL, 0, NULL, 0)) {
+                    Print(L"\r\nERROR: unknown entity id=%d\r\n\r\n", id);
+                    continue;
+                }
+
+                if (n < 1) n = 1;
+                if (n > 16) n = 16;
+
+                // Store the user prompt (optional)
+                g_oo_auto_user[0] = 0;
+                if (q && q[0]) {
+                    int up = 0;
+                    for (const char *s = q; *s && up + 1 < (int)sizeof(g_oo_auto_user); s++) g_oo_auto_user[up++] = *s;
+                    g_oo_auto_user[up] = 0;
+                } else {
+                    const char *def = "next concrete action";
+                    int up = 0;
+                    for (const char *s = def; *s && up + 1 < (int)sizeof(g_oo_auto_user); s++) g_oo_auto_user[up++] = *s;
+                    g_oo_auto_user[up] = 0;
+                }
+
+                g_oo_auto_active = 1;
+                g_oo_auto_id = id;
+                g_oo_auto_remaining = n;
+                g_oo_auto_total = n;
+
+                Print(L"\r\n[oo_auto] started: id=%d cycles=%d\r\n", id, n);
+                {
+                    CHAR16 p16[260];
+                    ascii_to_char16(p16, g_oo_auto_user, (int)(sizeof(p16) / sizeof(p16[0])));
+                    Print(L"[oo_auto] prompt: %s\r\n\r\n", p16);
+                }
+
+                // The actual cycles will run automatically at the top of the loop.
+                continue;
+            } else if (my_strncmp(prompt, "/oo_auto_stop", 13) == 0) {
+                if (g_oo_auto_active) {
+                    Print(L"\r\n[oo_auto] stopping (id=%d remaining=%d)\r\n\r\n", g_oo_auto_id, g_oo_auto_remaining);
+                } else {
+                    Print(L"\r\n[oo_auto] not active\r\n\r\n");
+                }
+                g_oo_auto_active = 0;
+                g_oo_auto_id = 0;
+                g_oo_auto_remaining = 0;
+                g_oo_auto_total = 0;
+                g_oo_auto_user[0] = 0;
                 continue;
             } else if (my_strncmp(prompt, "/reset", 6) == 0) {
                 Print(L"\r\nResetting runtime state...\r\n");
@@ -3245,6 +4469,26 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 Print(L"  /render <dsl> - Render simple shapes to GOP framebuffer\r\n");
                 Print(L"  /save_img [f] - Save GOP framebuffer as PPM (default llmk-img.ppm)\r\n");
                 Print(L"  /draw <text>  - Ask the model to output DSL and render it (GOP required)\r\n");
+                Print(L"\r\nLLM-OO (organism-oriented) commands:\r\n");
+                Print(L"  /oo_new <goal>  - Create an entity (long-lived intention)\r\n");
+                Print(L"  /oo_list        - List entities\r\n");
+                Print(L"  /oo_step <id>   - Advance one entity by one step\r\n");
+                Print(L"  /oo_run [n]     - Run n cooperative steps across entities\r\n");
+                Print(L"  /oo_kill <id>   - Kill an entity\r\n");
+                Print(L"  /oo_note <id> <text> - Append a note to entity memory\r\n");
+                Print(L"  /oo_plan <id> [prio] <a> - Add agenda action(s) (use ';' to add many; prio like +2)\r\n");
+                Print(L"  /oo_agenda <id>      - Show agenda action list\r\n");
+                Print(L"  /oo_next <id>        - Select next action (marks doing)\r\n");
+                Print(L"  /oo_done <id> <k>    - Mark action #k done\r\n");
+                Print(L"  /oo_prio <id> <k> <p> - Set priority for action #k\r\n");
+                Print(L"  /oo_edit <id> <k> <t> - Edit text for action #k\r\n");
+                Print(L"  /oo_show <id>        - Show entity (goal/status/digest/notes tail)\r\n");
+                Print(L"  /oo_digest <id>      - Update digest + compress notes tail\r\n");
+                Print(L"  /oo_save [f]         - Save OO state to file (default oo-state.bin)\r\n");
+                Print(L"  /oo_load [f]         - Load OO state from file (default oo-state.bin)\r\n");
+                Print(L"  /oo_think <id> <p>   - Ask the model, store answer in entity notes\r\n");
+                Print(L"  /oo_auto <id> [n] [p] - Run n think->store->step cycles (auto; press 'q' or Esc to stop)\r\n");
+                Print(L"  /oo_auto_stop         - Stop /oo_auto cycles (also: press 'q' or Esc between cycles)\r\n");
                 Print(L"  /reset        - Clear budgets/log + untrip sentinel\r\n");
                 Print(L"  /clear        - Clear KV cache (reset conversation context)\r\n");
                 Print(L"  /djibmarks    - Show DjibMark execution trace (Made in 🇸🇳)\r\n");
@@ -3617,21 +4861,153 @@ stats_done:
             ;
         }
 
-        // If /draw was active, execute the captured DSL now.
+        // If capture mode was active, handle it now.
         if (g_capture_mode) {
             llmk_capture_sanitize_inplace();
-            Print(L"\r\n[draw] captured %d chars%s\r\n", g_capture_len, g_capture_truncated ? L" (truncated)" : L"");
-            if (g_capture_len == 0) {
-                Print(L"[draw] ERROR: empty output\r\n\r\n");
-            } else {
-                int ok = llmk_render_scene_dsl(g_capture_buf);
-                if (ok) {
-                    Print(L"[draw] OK: rendered (use /save_img to export)\r\n\r\n");
+
+            if (capture_kind == 1) {
+                llmk_apply_simple_autocorrect(g_capture_buf);
+                Print(L"\r\n[draw] captured %d chars%s\r\n", g_capture_len, g_capture_truncated ? L" (truncated)" : L"");
+                if (g_capture_len == 0) {
+                    Print(L"[draw] ERROR: empty output\r\n\r\n");
                 } else {
-                    // Print a short preview to help debugging prompts.
-                    CHAR16 preview[220];
-                    ascii_to_char16(preview, g_capture_buf, (int)(sizeof(preview) / sizeof(preview[0])));
-                    Print(L"[draw] ERROR: render failed. Output preview: %s\r\n\r\n", preview);
+                    int ok = llmk_render_scene_dsl_ex(g_capture_buf, 0);
+                    if (ok) {
+                        llmk_gop_force_update();
+                        Print(L"[draw] OK: rendered (check screen above, use /save_img to export)\r\n\r\n");
+                    } else {
+                        // The stories model often outputs prose. Render a fallback so the user sees something.
+                        llmk_draw_fallback_center_square(1);
+                        llmk_gop_force_update();
+
+                        CHAR16 msg[140];
+                        ascii_to_char16(msg, g_last_dsl_error, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"[draw] WARNING: model output was not valid DSL (%s)\r\n", msg);
+                        Print(L"[draw] Rendered fallback: black background + centered white square\r\n\r\n");
+                    }
+                }
+            } else if (capture_kind == 2) {
+                if (oo_think_id > 0) {
+                    char n1[320];
+                    int p1 = 0;
+                    const char *h1 = "think: ";
+                    for (int k = 0; h1[k] && p1 + 1 < (int)sizeof(n1); k++) n1[p1++] = h1[k];
+                    for (int k = 0; oo_think_user[k] && p1 + 1 < (int)sizeof(n1); k++) n1[p1++] = oo_think_user[k];
+                    n1[p1] = 0;
+                    llmk_oo_note(oo_think_id, n1);
+
+                    char n2[640];
+                    int p2 = 0;
+                    const char *h2 = "answer: ";
+                    for (int k = 0; h2[k] && p2 + 1 < (int)sizeof(n2); k++) n2[p2++] = h2[k];
+                    for (int k = 0; g_capture_buf[k] && p2 + 1 < (int)sizeof(n2); k++) n2[p2++] = g_capture_buf[k];
+                    n2[p2] = 0;
+                    llmk_oo_note(oo_think_id, n2);
+                    llmk_oo_digest(oo_think_id);
+
+                    Print(L"\r\n[oo] stored thought for entity id=%d (%d chars%s)\r\n\r\n",
+                          oo_think_id, g_capture_len, g_capture_truncated ? L"; truncated" : L"");
+                } else {
+                    Print(L"\r\n[oo] ERROR: internal think state\r\n\r\n");
+                }
+            } else if (capture_kind == 3) {
+                if (oo_think_id > 0) {
+                    // Store the cycle's prompt + answer.
+                    char n1[320];
+                    int p1 = 0;
+                    const char *h1 = "auto: ";
+                    for (int k = 0; h1[k] && p1 + 1 < (int)sizeof(n1); k++) n1[p1++] = h1[k];
+                    for (int k = 0; oo_think_user[k] && p1 + 1 < (int)sizeof(n1); k++) n1[p1++] = oo_think_user[k];
+                    n1[p1] = 0;
+                    llmk_oo_note(oo_think_id, n1);
+
+                    char n2[640];
+                    int p2 = 0;
+                    const char *h2 = "answer: ";
+                    for (int k = 0; h2[k] && p2 + 1 < (int)sizeof(n2); k++) n2[p2++] = h2[k];
+                    for (int k = 0; g_capture_buf[k] && p2 + 1 < (int)sizeof(n2); k++) n2[p2++] = g_capture_buf[k];
+                    n2[p2] = 0;
+                    llmk_oo_note(oo_think_id, n2);
+
+                    if (oo_auto_planning) {
+                        // Planning cycle: extract first line as an action and push to agenda.
+                        char act[96];
+                        int ap = 0;
+                        int si = 0;
+                        while (g_capture_buf[si] == ' ' || g_capture_buf[si] == '\t' || g_capture_buf[si] == '\n') si++;
+                        for (; g_capture_buf[si] && g_capture_buf[si] != '\n' && ap + 1 < (int)sizeof(act); si++) {
+                            act[ap++] = g_capture_buf[si];
+                        }
+                        while (ap > 0 && (act[ap - 1] == ' ' || act[ap - 1] == '\t')) ap--;
+                        act[ap] = 0;
+
+                        if (act[0] && llmk_oo_agenda_add(oo_think_id, act)) {
+                            CHAR16 a16[120];
+                            ascii_to_char16(a16, act, (int)(sizeof(a16) / sizeof(a16[0])));
+                            Print(L"\r\n[oo_auto] planned: %s\r\n\r\n", a16);
+                            llmk_oo_digest(oo_think_id);
+                            // Do NOT decrement remaining; next cycle will execute.
+                        } else {
+                            Print(L"\r\n[oo_auto] planning failed; stopping\r\n\r\n");
+                            g_oo_auto_active = 0;
+                            g_oo_auto_id = 0;
+                            g_oo_auto_remaining = 0;
+                            g_oo_auto_total = 0;
+                            g_oo_auto_user[0] = 0;
+                        }
+                    } else {
+                        // Execute cycle: advance entity and refresh digest.
+                        llmk_oo_step(oo_think_id);
+                        llmk_oo_digest(oo_think_id);
+
+                        // If this cycle executed an agenda action, mark it DONE and log it.
+                        if (oo_auto_action_k > 0) {
+                            char done_note[196];
+                            int dp = 0;
+                            const char *h = "done: ";
+                            for (int k = 0; h[k] && dp + 1 < (int)sizeof(done_note); k++) done_note[dp++] = h[k];
+                            for (int k = 0; oo_think_user[k] && dp + 1 < (int)sizeof(done_note); k++) done_note[dp++] = oo_think_user[k];
+                            done_note[dp] = 0;
+                            llmk_oo_note(oo_think_id, done_note);
+                            llmk_oo_action_set_state(oo_think_id, oo_auto_action_k, 2);
+                        }
+
+                        if (g_oo_auto_active && g_oo_auto_id == oo_think_id && g_oo_auto_remaining > 0) {
+                            g_oo_auto_remaining--;
+                            Print(L"\r\n[oo_auto] stored + stepped id=%d (%d chars%s); remaining=%d\r\n\r\n",
+                                  oo_think_id, g_capture_len, g_capture_truncated ? L"; truncated" : L"", g_oo_auto_remaining);
+                            if (g_oo_auto_remaining <= 0) {
+                                Print(L"[oo_auto] done\r\n\r\n");
+                                g_oo_auto_active = 0;
+                                g_oo_auto_id = 0;
+                                g_oo_auto_remaining = 0;
+                                g_oo_auto_total = 0;
+                                g_oo_auto_user[0] = 0;
+                            }
+
+                            // Optional autosave (repl.cfg: oo_autosave_every=N). Best-effort.
+                            if (oo_autosave_every > 0 && oo_state_file[0]) {
+                                int completed = 0;
+                                if (g_oo_auto_total > 0) {
+                                    completed = g_oo_auto_total - g_oo_auto_remaining;
+                                }
+                                if (completed > 0 && (completed % oo_autosave_every) == 0) {
+                                    int nb = 0;
+                                    EFI_STATUS st = llmk_oo_save_to_file_best_effort(oo_state_file, &nb);
+                                    if (!EFI_ERROR(st)) {
+                                        Print(L"[oo_autosave] saved %s (%d bytes)\r\n", oo_state_file, nb);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Print(L"\r\n[oo_auto] ERROR: internal state\r\n\r\n");
+                    g_oo_auto_active = 0;
+                    g_oo_auto_id = 0;
+                    g_oo_auto_remaining = 0;
+                    g_oo_auto_total = 0;
+                    g_oo_auto_user[0] = 0;
                 }
             }
 
@@ -3641,6 +5017,14 @@ stats_done:
             stop_on_you = saved_stop_on_you;
             stop_on_double_nl = saved_stop_on_double_nl;
             max_gen_tokens = saved_max_gen_tokens;
+
+            if (draw_saved_sampling) {
+                temperature = saved_temperature;
+                min_p = saved_min_p;
+                top_p = saved_top_p;
+                top_k = saved_top_k;
+                repeat_penalty = saved_repeat_penalty;
+            }
         }
         
         // Update persistent KV cache position for next generation

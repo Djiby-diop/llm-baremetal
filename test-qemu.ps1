@@ -2,16 +2,21 @@ param(
     # Keep backward compatibility with previous usage.
     [switch]$Headless = $true,
 
+    # If set, run QEMU interactively (do not auto-stop after reaching REPL).
+    # Recommended with -Headless:$false so you can see the GOP framebuffer.
+    [switch]$Interactive,
+
     [ValidateSet('auto','whpx','tcg','none')]
     [string]$Accel = 'tcg',
 
     [ValidateRange(512, 8192)]
     [int]$MemMB = 4096,
 
-    [ValidateRange(10, 600)]
-    [int]$TimeoutSec = 90,
+    # 0 disables the watchdog timeout (wait indefinitely for REPL needle).
+    [ValidateRange(0, 86400)]
+    [int]$TimeoutSec = 0,
 
-    [string]$ModelBin = 'stories15M.bin',
+    [string]$ModelBin = 'stories110M.bin',
     [switch]$SkipBuild,
 
     [string]$QemuPath,
@@ -86,6 +91,16 @@ function Resolve-ImagePath([string]$override) {
 
 Write-Host "`n[Test] QEMU smoke test" -ForegroundColor Cyan
 
+if ($Interactive) {
+    Write-Host "[Test] Interactive mode: QEMU will stay running (Ctrl+C to stop)" -ForegroundColor Yellow
+    if (-not $PSBoundParameters.ContainsKey('Headless')) {
+        $Headless = $false
+        Write-Host "[Test] Interactive mode => Headless disabled (showing SDL window)" -ForegroundColor Yellow
+    } elseif ($Headless) {
+        Write-Host "[Test] Note: -Headless is enabled; no window will be shown" -ForegroundColor Yellow
+    }
+}
+
 if (-not $SkipBuild) {
     Write-Host "[Test] Building + creating image..." -ForegroundColor Cyan
     & (Join-Path $PSScriptRoot 'build.ps1') -ModelBin $ModelBin
@@ -133,7 +148,19 @@ Write-Host "  QEMU:    $QEMU" -ForegroundColor Gray
 Write-Host "  OVMF:    $OVMF" -ForegroundColor Gray
 Write-Host "  Image:   $IMAGE" -ForegroundColor Gray
 Write-Host "  Accel:   $Accel" -ForegroundColor Gray
-Write-Host "  Timeout: ${TimeoutSec}s" -ForegroundColor Gray
+if ($TimeoutSec -le 0) {
+    Write-Host "  Timeout: disabled" -ForegroundColor Gray
+} else {
+    Write-Host "  Timeout: ${TimeoutSec}s" -ForegroundColor Gray
+}
+
+if ($Interactive) {
+    # Interactive: keep stdio attached (do NOT redirect to file) and just run QEMU.
+    # This is the easiest way to type commands and observe GOP output.
+    Write-Host "[Test] Starting QEMU (interactive)..." -ForegroundColor Cyan
+    & $QEMU @args
+    exit $LASTEXITCODE
+}
 
 $needles = @('Entering chat loop', 'CHAT MODE ACTIVE')
 $tmpOut = Join-Path $env:TEMP ("llm-baremetal-qemu-out-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
@@ -164,7 +191,10 @@ $p = Start-Process -FilePath $QEMU -ArgumentList $argString -PassThru -NoNewWind
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 try {
-    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+    while ($true) {
+        if ($TimeoutSec -gt 0 -and $sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
+            break
+        }
         if ($p.HasExited) {
             $tailOut = @()
             $tailErr = @()
@@ -196,6 +226,10 @@ try {
         }
 
         Start-Sleep -Milliseconds 200
+    }
+
+    if ($TimeoutSec -le 0) {
+        throw "QEMU exited or was interrupted before reaching REPL"
     }
 
     $tailSerial = @()
