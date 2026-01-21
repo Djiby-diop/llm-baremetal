@@ -24,6 +24,15 @@ Made in Senegal 🇸🇳 by Djiby Diop
 - Model weights are intentionally not tracked in git; use GitHub Releases or your own files.
 - Optional config: copy `repl.cfg.example` → `repl.cfg` (not committed) and rebuild.
 
+## Inspect OO save files (host-side)
+
+If you use `/oo_save` in the UEFI REPL, you can inspect and CRC-verify the save file on your host:
+
+```powershell
+python .\tools\oo_inspect.py .\oo_save.txt
+python .\tools\oo_inspect.py --full .\oo_save.txt
+```
+
 ## DjibQuant (optional)
 
 If you want smaller weights files, DjibQuant tooling/docs live in this repo (see DJIBQUANT.md).
