@@ -32,7 +32,3 @@ If you use `/oo_save` in the UEFI REPL, you can inspect and CRC-verify the save 
 python .\tools\oo_inspect.py .\oo_save.txt
 python .\tools\oo_inspect.py --full .\oo_save.txt
 ```
-
-## DjibQuant (optional)
-
-If you want smaller weights files, DjibQuant tooling/docs live in this repo (see DJIBQUANT.md).
