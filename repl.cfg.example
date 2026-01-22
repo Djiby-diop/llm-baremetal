@@ -21,6 +21,10 @@ stop_nl=0               # Stop on double newline (0=off, 1=on)
 attn=auto               # Attention SIMD (auto|sse2|avx2)
 strict_budget=0         # Hard-stop on budget overrun (0=log only, 1=trip sentinel)
 
+# Autorun (disabled by default)
+# If you want to auto-run a script at boot, set this and provide llmk-autorun.txt on the boot volume.
+# autorun_autostart=1
+
 # Cycle budgets (tune per machine; higher = more tolerance, lower = earlier overrun detect)
 # Start conservative and adjust based on /ctx overrun counts.
 budget_prefill=80000000000

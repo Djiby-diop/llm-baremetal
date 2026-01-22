@@ -1230,6 +1230,10 @@ static EFI_STATUS llmk_save_ppm(const CHAR16 *name) {
 static UINT64 g_budget_prefill_cycles = 0;
 static UINT64 g_budget_decode_cycles = 0;
 
+// Config (repl.cfg)
+// By default, we do NOT auto-run llmk-autorun.txt at boot (to keep QEMU interactive).
+static int g_cfg_autorun_autostart = 0;
+
 // Rate-limit budget overrun prints (avoid flooding console).
 static UINT32 g_budget_overruns_prefill = 0;
 static UINT32 g_budget_overruns_decode = 0;
@@ -1718,6 +1722,12 @@ static void llmk_load_repl_cfg_best_effort(
                     g_attn_force = 1;
                     applied = 1;
                 }
+            }
+        } else if (llmk_cfg_streq_ci(key, "autorun_autostart") || llmk_cfg_streq_ci(key, "autorun")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_autorun_autostart = (b != 0);
+                applied = 1;
             }
         }
     }
@@ -3206,9 +3216,10 @@ model_selected:
         }
     }
 
-    // Best-effort autorun: if llmk-autorun.txt is present on the boot volume,
-    // execute its commands as if typed, then shutdown when finished.
-    llmk_autorun_start(L"llmk-autorun.txt", 1);
+    // Optional autorun: only if enabled in repl.cfg (autorun_autostart=1).
+    if (g_cfg_autorun_autostart) {
+        llmk_autorun_start(L"llmk-autorun.txt", 1);
+    }
     
     int conversation_count = 0;
     
