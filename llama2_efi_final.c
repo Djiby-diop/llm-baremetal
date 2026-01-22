@@ -2789,6 +2789,187 @@ static void llmk_ascii_copy_cap(char *dst, int dst_cap, const char *src) {
     dst[i] = 0;
 }
 
+static void llmk_print_ascii(const char *s) {
+    if (!s) return;
+    for (const char *p = s; *p; p++) {
+        Print(L"%c", (CHAR16)(unsigned char)(*p));
+    }
+}
+
+static int llmk_parse_optional_prefix(const char *prompt, int cmd_len, char *out, int out_cap) {
+    if (!out || out_cap <= 0) return 0;
+    out[0] = 0;
+    if (!prompt || cmd_len <= 0) return 0;
+
+    const char *p = prompt + cmd_len;
+    while (*p && llmk_ascii_is_space(*p)) p++;
+    if (*p == 0) return 0;
+
+    int n = 0;
+    while (*p && !llmk_ascii_is_space(*p) && n + 1 < out_cap) {
+        out[n++] = *p++;
+    }
+    out[n] = 0;
+    if (n <= 0) return 0;
+
+    // Accept "help oo" as shorthand for "/oo".
+    if (out[0] != '/') {
+        if (n + 1 >= out_cap) {
+            out[0] = 0;
+            return 0;
+        }
+        for (int i = n; i >= 1; i--) {
+            out[i] = out[i - 1];
+        }
+        out[0] = '/';
+        out[n + 1] = 0;
+    }
+    return 1;
+}
+
+typedef struct {
+    const char *name;         // ASCII command, e.g. "/temp"
+    const CHAR16 *desc;       // Wide description
+} llmk_cmd_help_entry;
+
+static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
+    { "/temp", L"Set temperature (0.0=greedy, 1.0=creative)" },
+    { "/min_p", L"Set min_p (0.0-1.0, 0=off)" },
+    { "/top_p", L"Set nucleus sampling (0.0-1.0)" },
+    { "/top_k", L"Set top-k (0=off, typical 40-200)" },
+    { "/norepeat", L"No-repeat ngram (0=off, typical 3-6)" },
+    { "/repeat", L"Set repetition penalty (1.0=none, 1.5=strong)" },
+    { "/max_tokens", L"Max generation tokens (1-256)" },
+    { "/seed", L"RNG seed" },
+    { "/stats", L"Print generation stats (0/1)" },
+    { "/stop_you", L"Stop on \\nYou: pattern (0/1)" },
+    { "/stop_nl", L"Stop on double newline (0/1)" },
+    { "/model", L"Show loaded model config" },
+    { "/cpu", L"Show CPU SIMD status" },
+    { "/zones", L"Dump allocator zones + sentinel" },
+    { "/budget", L"Set budgets in cycles (p=prefill, d=decode)" },
+    { "/attn", L"Force attention SIMD path: auto|sse2|avx2" },
+    { "/test_failsafe", L"One-shot strict budget trip" },
+    { "/ctx", L"Show model + sampling + budgets" },
+    { "/log", L"Dump last n log entries" },
+    { "/save_log", L"Write last n log entries to llmk-log.txt" },
+    { "/save_dump", L"Write ctx+zones+sentinel+log to llmk-dump.txt" },
+    { "/gop", L"Show GOP framebuffer info" },
+    { "/render", L"Render simple shapes to GOP framebuffer" },
+    { "/save_img", L"Save GOP framebuffer as PPM (default llmk-img.ppm)" },
+    { "/draw", L"Ask the model to output DSL and render it (GOP required)" },
+
+    { "/oo_new", L"Create an entity (long-lived intention)" },
+    { "/oo_list", L"List entities" },
+    { "/oo_step", L"Advance one entity by one step" },
+    { "/oo_run", L"Run n cooperative steps across entities" },
+    { "/oo_kill", L"Kill an entity" },
+    { "/oo_note", L"Append a note to entity memory" },
+    { "/oo_plan", L"Add agenda action(s) (use ';' to add many; prio like +2)" },
+    { "/oo_agenda", L"Show agenda action list" },
+    { "/oo_next", L"Select next action (marks doing)" },
+    { "/oo_done", L"Mark action #k done" },
+    { "/oo_prio", L"Set priority for action #k" },
+    { "/oo_edit", L"Edit text for action #k" },
+    { "/oo_show", L"Show entity (goal/status/digest/notes tail)" },
+    { "/oo_digest", L"Update digest + compress notes tail" },
+    { "/oo_save", L"Save OO state to file (default oo-state.bin)" },
+    { "/oo_load", L"Load OO state from file (default oo-state.bin)" },
+    { "/oo_think", L"Ask the model, store answer in entity notes" },
+    { "/oo_auto", L"Run n think->store->step cycles (auto; press 'q' or Esc to stop)" },
+    { "/oo_auto_stop", L"Stop /oo_auto cycles" },
+
+    { "/autorun", L"Run scripted REPL commands from file (default from repl.cfg)" },
+    { "/autorun_stop", L"Stop autorun" },
+
+    { "/reset", L"Clear budgets/log + untrip sentinel" },
+    { "/clear", L"Clear KV cache (reset conversation context)" },
+    { "/djibmarks", L"Show DjibMark execution trace" },
+    { "/djibperf", L"DjibMark performance analysis by phase" },
+    { "/version", L"Show build version + features" },
+    { "/commands", L"List commands (optionally filtered)" },
+    { "/help", L"Show help (optionally filtered)" },
+};
+
+static void llmk_print_commands_filtered(const char *prefix) {
+    int printed = 0;
+    for (UINTN i = 0; i < (sizeof(g_llmk_cmd_help) / sizeof(g_llmk_cmd_help[0])); i++) {
+        const char *name = g_llmk_cmd_help[i].name;
+        if (!name) continue;
+        if (prefix && prefix[0] && !llmk_ascii_startswith(name, prefix)) continue;
+        Print(L"  ");
+        llmk_print_ascii(name);
+        Print(L"\r\n");
+        printed++;
+    }
+    if (printed == 0) {
+        Print(L"  (no matches)\r\n");
+    }
+}
+
+static void llmk_print_help_filtered(const char *prefix,
+                                    float temperature, float min_p, float top_p,
+                                    int top_k, int no_repeat_ngram, int max_gen_tokens,
+                                    int stats_enabled, int stop_on_you, int stop_on_double_nl,
+                                    float repeat_penalty) {
+    Print(L"\r\nCommands:\r\n");
+    if (prefix && prefix[0]) {
+        Print(L"  (filter: ");
+        llmk_print_ascii(prefix);
+        Print(L")\r\n");
+    }
+
+    int printed = 0;
+    for (UINTN i = 0; i < (sizeof(g_llmk_cmd_help) / sizeof(g_llmk_cmd_help[0])); i++) {
+        const char *name = g_llmk_cmd_help[i].name;
+        const CHAR16 *desc = g_llmk_cmd_help[i].desc;
+        if (!name || !desc) continue;
+        if (prefix && prefix[0] && !llmk_ascii_startswith(name, prefix)) continue;
+
+        Print(L"  ");
+        llmk_print_ascii(name);
+        Print(L" - %s\r\n", (CHAR16 *)desc);
+        printed++;
+    }
+
+    if (printed == 0) {
+        Print(L"  (no matches)\r\n");
+    }
+
+    Print(L"\r\nUsage:\r\n");
+    Print(L"  /help [prefix]     - Example: /help oo\r\n");
+    Print(L"  /commands [prefix] - Example: /commands /oo_\r\n\r\n");
+
+    // Keep the long sections only for unfiltered help.
+    if (!(prefix && prefix[0])) {
+        Print(L"Multi-line input:\r\n");
+        Print(L"  End a line with '\\' to continue; type ';;' on its own line to submit.\r\n");
+        Print(L"  Use '\\\\' at end of line for a literal backslash.\r\n\r\n");
+        Print(L"Render DSL:\r\n");
+        Print(L"  clear R G B; rect X Y W H R G B; pixel X Y R G B\r\n\r\n");
+
+        Print(L"Current settings:\r\n");
+        Print(L"  Temperature: ");
+        Print(L"%d.", (int)temperature);
+        Print(L"%d\r\n", (int)((temperature - (int)temperature) * 100.0f));
+        Print(L"  Min-p: ");
+        Print(L"%d.", (int)min_p);
+        Print(L"%d\r\n", (int)((min_p - (int)min_p) * 100.0f));
+        Print(L"  Top-p: ");
+        Print(L"%d.", (int)top_p);
+        Print(L"%d\r\n", (int)((top_p - (int)top_p) * 100.0f));
+        Print(L"  Top-k: %d\r\n", top_k);
+        Print(L"  No-repeat ngram: %d\r\n", no_repeat_ngram);
+        Print(L"  Max tokens: %d\r\n", max_gen_tokens);
+        Print(L"  Stats: %s\r\n", stats_enabled ? L"on" : L"off");
+        Print(L"  Stop on \\nYou:: %s\r\n", stop_on_you ? L"on" : L"off");
+        Print(L"  Stop on double newline: %s\r\n", stop_on_double_nl ? L"on" : L"off");
+        Print(L"  Repeat penalty: ");
+        Print(L"%d.", (int)repeat_penalty);
+        Print(L"%d\r\n\r\n", (int)((repeat_penalty - (int)repeat_penalty) * 100.0f));
+    }
+}
+
 static int llmk_cmd_common_prefix_len(const char *a, const char *b) {
     int n = 0;
     if (!a || !b) return 0;
@@ -2863,6 +3044,7 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/version",
         "/djibmarks",
         "/djibperf",
+        "/commands",
         "/help",
     };
 
@@ -3631,7 +3813,7 @@ model_selected:
     Print(L"  CHAT MODE ACTIVE\r\n");
     Print(L"  Type 'quit' or 'exit' to stop\r\n");
     Print(L"  Multi-line: end line with '\\' to continue; ';;' alone submits\r\n");
-    Print(L"  Commands: /temp /min_p /top_p /top_k /norepeat /repeat /max_tokens /seed /stats /stop_you /stop_nl /model /cpu /zones /budget /attn /test_failsafe /ctx /log /save_log /save_dump /gop /render /save_img /draw /oo_new /oo_list /oo_step /oo_run /oo_kill /oo_note /oo_plan /oo_agenda /oo_next /oo_done /oo_prio /oo_edit /oo_show /oo_digest /oo_save /oo_load /oo_think /oo_auto /oo_auto_stop /autorun /autorun_stop /reset /version /help\r\n");
+    Print(L"  Commands: /temp /min_p /top_p /top_k /norepeat /repeat /max_tokens /seed /stats /stop_you /stop_nl /model /cpu /zones /budget /attn /test_failsafe /ctx /log /save_log /save_dump /gop /render /save_img /draw /oo_new /oo_list /oo_step /oo_run /oo_kill /oo_note /oo_plan /oo_agenda /oo_next /oo_done /oo_prio /oo_edit /oo_show /oo_digest /oo_save /oo_load /oo_think /oo_auto /oo_auto_stop /autorun /autorun_stop /reset /clear /djibmarks /djibperf /version /commands /help\r\n");
     Print(L"----------------------------------------\r\n\r\n");
     
     // Sampling parameters
@@ -5219,86 +5401,32 @@ model_selected:
                 }
                 Print(L"\r\n");
                 continue;
-            } else if (my_strncmp(prompt, "/help", 5) == 0) {
+            } else if (my_strncmp(prompt, "/commands", 9) == 0) {
+                char pref[64];
+                pref[0] = 0;
+                llmk_parse_optional_prefix(prompt, 9, pref, (int)sizeof(pref));
+
                 Print(L"\r\nCommands:\r\n");
-                Print(L"  /temp <val>   - Set temperature (0.0=greedy, 1.0=creative)\r\n");
-                Print(L"  /min_p <val>  - Set min_p (0.0-1.0, 0=off)\r\n");
-                Print(L"  /top_p <val>  - Set nucleus sampling (0.0-1.0)\r\n");
-                Print(L"  /top_k <int>  - Set top-k (0=off, typical 40-200)\r\n");
-                Print(L"  /norepeat <n> - No-repeat ngram (0=off, typical 3-6)\r\n");
-                Print(L"  /max_tokens <n> - Max generation tokens (1-256)\r\n");
-                Print(L"  /seed <n>       - RNG seed\r\n");
-                Print(L"  /stats <0|1>    - Print generation stats\r\n");
-                Print(L"  /stop_you <0|1> - Stop on \\nYou: pattern\r\n");
-                Print(L"  /stop_nl <0|1>  - Stop on double newline\r\n");
-                Print(L"  /repeat <val> - Set repetition penalty (1.0=none, 1.5=strong)\r\n");
-                Print(L"  /model        - Show loaded model config\r\n");
-                Print(L"  /cpu          - Show CPU SIMD status\r\n");
-                Print(L"  /zones        - Dump allocator zones + sentinel\r\n");
-                Print(L"  /budget [p] [d] - Set budgets in cycles (p=prefill, d=decode)\r\n");
-                Print(L"  /attn [auto|sse2|avx2] - Force attention SIMD path\r\n");
-                Print(L"  /test_failsafe [prefill|decode|both] [cycles] - One-shot strict budget trip\r\n");
-                Print(L"  /ctx          - Show model + sampling + budgets\r\n");
-                Print(L"  /log [n]      - Dump last n log entries\r\n");
-                Print(L"  /save_log [n] - Write last n log entries to llmk-log.txt\r\n");
-                Print(L"  /save_dump    - Write ctx+zones+sentinel+log to llmk-dump.txt\r\n");
-                Print(L"  /gop          - Show GOP framebuffer info\r\n");
-                Print(L"  /render <dsl> - Render simple shapes to GOP framebuffer\r\n");
-                Print(L"  /save_img [f] - Save GOP framebuffer as PPM (default llmk-img.ppm)\r\n");
-                Print(L"  /draw <text>  - Ask the model to output DSL and render it (GOP required)\r\n");
-                Print(L"\r\nLLM-OO (organism-oriented) commands:\r\n");
-                Print(L"  /oo_new <goal>  - Create an entity (long-lived intention)\r\n");
-                Print(L"  /oo_list        - List entities\r\n");
-                Print(L"  /oo_step <id>   - Advance one entity by one step\r\n");
-                Print(L"  /oo_run [n]     - Run n cooperative steps across entities\r\n");
-                Print(L"  /oo_kill <id>   - Kill an entity\r\n");
-                Print(L"  /oo_note <id> <text> - Append a note to entity memory\r\n");
-                Print(L"  /oo_plan <id> [prio] <a> - Add agenda action(s) (use ';' to add many; prio like +2)\r\n");
-                Print(L"  /oo_agenda <id>      - Show agenda action list\r\n");
-                Print(L"  /oo_next <id>        - Select next action (marks doing)\r\n");
-                Print(L"  /oo_done <id> <k>    - Mark action #k done\r\n");
-                Print(L"  /oo_prio <id> <k> <p> - Set priority for action #k\r\n");
-                Print(L"  /oo_edit <id> <k> <t> - Edit text for action #k\r\n");
-                Print(L"  /oo_show <id>        - Show entity (goal/status/digest/notes tail)\r\n");
-                Print(L"  /oo_digest <id>      - Update digest + compress notes tail\r\n");
-                Print(L"  /oo_save [f]         - Save OO state to file (default oo-state.bin)\r\n");
-                Print(L"  /oo_load [f]         - Load OO state from file (default oo-state.bin)\r\n");
-                Print(L"  /oo_think <id> <p>   - Ask the model, store answer in entity notes\r\n");
-                Print(L"  /oo_auto <id> [n] [p] - Run n think->store->step cycles (auto; press 'q' or Esc to stop)\r\n");
-                Print(L"  /oo_auto_stop         - Stop /oo_auto cycles (also: press 'q' or Esc between cycles)\r\n");
-                Print(L"  /autorun [--print] [--shutdown|--no-shutdown] [f]\r\n");
-                Print(L"                - Run scripted REPL commands from file (default from repl.cfg)\r\n");
-                Print(L"  /autorun_stop         - Stop autorun\r\n");
-                Print(L"  /reset        - Clear budgets/log + untrip sentinel\r\n");
-                Print(L"  /clear        - Clear KV cache (reset conversation context)\r\n");
-                Print(L"  /djibmarks    - Show DjibMark execution trace (Made in 🇸🇳)\r\n");
-                Print(L"  /djibperf     - DjibMark performance analysis by phase\r\n");
-                Print(L"  /version      - Show build version + features\r\n");
-                Print(L"  /help         - Show this help\r\n\r\n");
-                Print(L"Multi-line input:\r\n");
-                Print(L"  End a line with '\\' to continue; type ';;' on its own line to submit.\r\n");
-                Print(L"  Use '\\\\' at end of line for a literal backslash.\r\n\r\n");
-                Print(L"Render DSL:\r\n");
-                Print(L"  clear R G B; rect X Y W H R G B; pixel X Y R G B\r\n\r\n");
-                Print(L"Current settings:\r\n");
-                Print(L"  Temperature: ");
-                Print(L"%d.", (int)temperature);
-                Print(L"%d\r\n", (int)((temperature - (int)temperature) * 100.0f));
-                Print(L"  Min-p: ");
-                Print(L"%d.", (int)min_p);
-                Print(L"%d\r\n", (int)((min_p - (int)min_p) * 100.0f));
-                Print(L"  Top-p: ");
-                Print(L"%d.", (int)top_p);
-                Print(L"%d\r\n", (int)((top_p - (int)top_p) * 100.0f));
-                Print(L"  Top-k: %d\r\n", top_k);
-                Print(L"  No-repeat ngram: %d\r\n", no_repeat_ngram);
-                Print(L"  Max tokens: %d\r\n", max_gen_tokens);
-                Print(L"  Stats: %s\r\n", stats_enabled ? L"on" : L"off");
-                Print(L"  Stop on \\nYou:: %s\r\n", stop_on_you ? L"on" : L"off");
-                Print(L"  Stop on double newline: %s\r\n", stop_on_double_nl ? L"on" : L"off");
-                Print(L"  Repeat penalty: ");
-                Print(L"%d.", (int)repeat_penalty);
-                Print(L"%d\r\n\r\n", (int)((repeat_penalty - (int)repeat_penalty) * 100.0f));
+                if (pref[0]) {
+                    Print(L"  (filter: ");
+                    llmk_print_ascii(pref);
+                    Print(L")\r\n");
+                }
+                llmk_print_commands_filtered(pref[0] ? pref : NULL);
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/help", 5) == 0) {
+                char pref[64];
+                pref[0] = 0;
+                llmk_parse_optional_prefix(prompt, 5, pref, (int)sizeof(pref));
+
+                llmk_print_help_filtered(
+                    pref[0] ? pref : NULL,
+                    temperature, min_p, top_p,
+                    top_k, no_repeat_ngram, max_gen_tokens,
+                    stats_enabled, stop_on_you, stop_on_double_nl,
+                    repeat_penalty
+                );
                 continue;
             }
         }

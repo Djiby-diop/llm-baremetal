@@ -7,6 +7,7 @@ This file is a “complete” cheat-sheet of the commands available in the UEFI 
 - **Enter**: submit the line (or the full prompt)
 - **Backspace**: delete one character
 - **Up / Down arrows**: command history (single-line only)
+- **Tab**: auto-complete `/...` commands (press repeatedly to cycle matches, single-line only)
 
 ## Multi-line input
 
@@ -38,6 +39,8 @@ This file is a “complete” cheat-sheet of the commands available in the UEFI 
 - `/zones`: dump allocator zones + sentinel
 - `/budget [p] [d]`: budgets in cycles (prefill, decode)
 - `/test_failsafe [prefill|decode|both] [cycles]`: one-shot strict_budget trip
+- `/commands [prefix]`: list commands (optionally filtered; examples: `/commands oo`, `/commands /oo_`)
+- `/help [prefix]`: help (optionally filtered; examples: `/help oo`, `/help /save`)
 
 ## Logs / dumps
 
