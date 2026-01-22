@@ -39,8 +39,10 @@ This file is a “complete” cheat-sheet of the commands available in the UEFI 
 - `/zones`: dump allocator zones + sentinel
 - `/budget [p] [d]`: budgets in cycles (prefill, decode)
 - `/test_failsafe [prefill|decode|both] [cycles]`: one-shot strict_budget trip
-- `/commands [prefix]`: list commands (optionally filtered; examples: `/commands oo`, `/commands /oo_`)
-- `/help [prefix]`: help (optionally filtered; examples: `/help oo`, `/help /save`)
+- `/commands [filter]`: list commands (filter is case-insensitive substring; if it starts with `/` it's a prefix)
+  - examples: `/commands dump` (matches `/save_dump`), `/commands /oo_`
+- `/help [filter]`: help (same filtering rules)
+  - examples: `/help save`, `/help /oo_`
 
 ## Logs / dumps
 

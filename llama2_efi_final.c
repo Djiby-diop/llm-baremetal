@@ -2776,6 +2776,53 @@ static int llmk_ascii_startswith(const char *s, const char *prefix) {
     return 1;
 }
 
+static char llmk_ascii_tolower(char c) {
+    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
+    return c;
+}
+
+static int llmk_ascii_startswith_ci(const char *s, const char *prefix) {
+    if (!s || !prefix) return 0;
+    while (*prefix) {
+        char a = llmk_ascii_tolower(*s);
+        char b = llmk_ascii_tolower(*prefix);
+        if (a != b) return 0;
+        s++;
+        prefix++;
+    }
+    return 1;
+}
+
+static int llmk_ascii_contains_ci(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return 0;
+    if (needle[0] == 0) return 1;
+
+    for (int i = 0; haystack[i]; i++) {
+        int j = 0;
+        while (needle[j] && haystack[i + j]) {
+            char a = llmk_ascii_tolower(haystack[i + j]);
+            char b = llmk_ascii_tolower(needle[j]);
+            if (a != b) break;
+            j++;
+        }
+        if (needle[j] == 0) return 1;
+    }
+    return 0;
+}
+
+static int llmk_cmd_matches_filter(const char *name, const char *filter) {
+    if (!name) return 0;
+    if (!filter || !filter[0]) return 1;
+
+    // If filter starts with '/', treat as a (case-insensitive) prefix.
+    if (filter[0] == '/') {
+        return llmk_ascii_startswith_ci(name, filter);
+    }
+
+    // Otherwise, treat as a (case-insensitive) substring.
+    return llmk_ascii_contains_ci(name, filter);
+}
+
 static void llmk_ascii_copy_cap(char *dst, int dst_cap, const char *src) {
     if (!dst || dst_cap <= 0) return;
     if (!src) {
@@ -2811,19 +2858,6 @@ static int llmk_parse_optional_prefix(const char *prompt, int cmd_len, char *out
     }
     out[n] = 0;
     if (n <= 0) return 0;
-
-    // Accept "help oo" as shorthand for "/oo".
-    if (out[0] != '/') {
-        if (n + 1 >= out_cap) {
-            out[0] = 0;
-            return 0;
-        }
-        for (int i = n; i >= 1; i--) {
-            out[i] = out[i - 1];
-        }
-        out[0] = '/';
-        out[n + 1] = 0;
-    }
     return 1;
 }
 
@@ -2891,12 +2925,12 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/help", L"Show help (optionally filtered)" },
 };
 
-static void llmk_print_commands_filtered(const char *prefix) {
+static void llmk_print_commands_filtered(const char *filter) {
     int printed = 0;
     for (UINTN i = 0; i < (sizeof(g_llmk_cmd_help) / sizeof(g_llmk_cmd_help[0])); i++) {
         const char *name = g_llmk_cmd_help[i].name;
         if (!name) continue;
-        if (prefix && prefix[0] && !llmk_ascii_startswith(name, prefix)) continue;
+        if (!llmk_cmd_matches_filter(name, filter)) continue;
         Print(L"  ");
         llmk_print_ascii(name);
         Print(L"\r\n");
@@ -2907,15 +2941,15 @@ static void llmk_print_commands_filtered(const char *prefix) {
     }
 }
 
-static void llmk_print_help_filtered(const char *prefix,
+static void llmk_print_help_filtered(const char *filter,
                                     float temperature, float min_p, float top_p,
                                     int top_k, int no_repeat_ngram, int max_gen_tokens,
                                     int stats_enabled, int stop_on_you, int stop_on_double_nl,
                                     float repeat_penalty) {
     Print(L"\r\nCommands:\r\n");
-    if (prefix && prefix[0]) {
+    if (filter && filter[0]) {
         Print(L"  (filter: ");
-        llmk_print_ascii(prefix);
+        llmk_print_ascii(filter);
         Print(L")\r\n");
     }
 
@@ -2924,7 +2958,7 @@ static void llmk_print_help_filtered(const char *prefix,
         const char *name = g_llmk_cmd_help[i].name;
         const CHAR16 *desc = g_llmk_cmd_help[i].desc;
         if (!name || !desc) continue;
-        if (prefix && prefix[0] && !llmk_ascii_startswith(name, prefix)) continue;
+        if (!llmk_cmd_matches_filter(name, filter)) continue;
 
         Print(L"  ");
         llmk_print_ascii(name);
@@ -2937,11 +2971,11 @@ static void llmk_print_help_filtered(const char *prefix,
     }
 
     Print(L"\r\nUsage:\r\n");
-    Print(L"  /help [prefix]     - Example: /help oo\r\n");
-    Print(L"  /commands [prefix] - Example: /commands /oo_\r\n\r\n");
+    Print(L"  /help [filter]     - Examples: /help dump ; /help /oo_\r\n");
+    Print(L"  /commands [filter] - Examples: /commands save ; /commands /oo_\r\n\r\n");
 
     // Keep the long sections only for unfiltered help.
-    if (!(prefix && prefix[0])) {
+    if (!(filter && filter[0])) {
         Print(L"Multi-line input:\r\n");
         Print(L"  End a line with '\\' to continue; type ';;' on its own line to submit.\r\n");
         Print(L"  Use '\\\\' at end of line for a literal backslash.\r\n\r\n");
