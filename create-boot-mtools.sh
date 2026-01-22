@@ -156,6 +156,13 @@ if [ -f repl.cfg ]; then
     echo "  ✅ Copied repl.cfg"
 fi
 
+# Optional autorun script. If present, copy to root.
+# This lets QEMU/CI run scripted REPL commands without manual typing.
+if [ -f llmk-autorun.txt ]; then
+    mcopy llmk-autorun.txt z:/
+    echo "  ✅ Copied llmk-autorun.txt"
+fi
+
 # Create startup.nsh for auto-boot.
 # Keep the UEFI shell alive after BOOTX64.EFI returns (avoids landing in the firmware boot manager UI).
 cat > startup.nsh <<'EOF'

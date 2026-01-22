@@ -1019,6 +1019,136 @@ static EFI_STATUS llmk_read_entire_file_best_effort(const CHAR16 *name, void **o
     return EFI_SUCCESS;
 }
 
+// ============================================================================
+// AUTORUN SCRIPT (best-effort)
+// ============================================================================
+
+static int g_autorun_active = 0;
+static int g_autorun_shutdown_when_done = 0;
+static char *g_autorun_buf = NULL;
+static UINTN g_autorun_len = 0;
+static UINTN g_autorun_pos = 0;
+
+static void llmk_autorun_stop(void) {
+    g_autorun_active = 0;
+    g_autorun_shutdown_when_done = 0;
+    g_autorun_pos = 0;
+    g_autorun_len = 0;
+    if (g_autorun_buf) {
+        uefi_call_wrapper(BS->FreePool, 1, g_autorun_buf);
+        g_autorun_buf = NULL;
+    }
+}
+
+static int llmk_autorun_decode_to_ascii(void *raw, UINTN raw_len, char **out_ascii, UINTN *out_len) {
+    if (out_ascii) *out_ascii = NULL;
+    if (out_len) *out_len = 0;
+    if (!raw || raw_len == 0 || !out_ascii || !out_len) return 0;
+
+    UINT8 *b = (UINT8 *)raw;
+    // Detect UTF-16 BOM (LE/BE). If present, down-convert to 7-bit ASCII best-effort.
+    if (raw_len >= 2 && ((b[0] == 0xFF && b[1] == 0xFE) || (b[0] == 0xFE && b[1] == 0xFF))) {
+        int is_le = (b[0] == 0xFF);
+        UINTN chars = (raw_len - 2) / 2;
+        char *txt = NULL;
+        EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, chars + 1, (void **)&txt);
+        if (EFI_ERROR(st) || !txt) return 0;
+        for (UINTN i = 0; i < chars; i++) {
+            UINT8 lo = b[2 + i * 2 + 0];
+            UINT8 hi = b[2 + i * 2 + 1];
+            UINT16 ch = is_le ? (UINT16)(lo | ((UINT16)hi << 8)) : (UINT16)(hi | ((UINT16)lo << 8));
+            if (ch == 0) { txt[i] = 0; *out_ascii = txt; *out_len = i; return 1; }
+            txt[i] = (ch < 0x80) ? (char)ch : '?';
+        }
+        txt[chars] = 0;
+        *out_ascii = txt;
+        *out_len = chars;
+        return 1;
+    }
+
+    // Assume ASCII/UTF-8 bytes; copy and NUL-terminate.
+    char *txt = NULL;
+    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&txt);
+    if (EFI_ERROR(st) || !txt) return 0;
+    for (UINTN i = 0; i < raw_len; i++) txt[i] = (char)b[i];
+    txt[raw_len] = 0;
+    *out_ascii = txt;
+    *out_len = raw_len;
+    return 1;
+}
+
+static int llmk_autorun_start(const CHAR16 *name, int shutdown_when_done) {
+    if (!name) return 0;
+    llmk_autorun_stop();
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(name, &raw, &raw_len);
+    if (EFI_ERROR(st) || !raw || raw_len == 0) {
+        if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+        return 0;
+    }
+
+    char *txt = NULL;
+    UINTN txt_len = 0;
+    int ok = llmk_autorun_decode_to_ascii(raw, raw_len, &txt, &txt_len);
+    uefi_call_wrapper(BS->FreePool, 1, raw);
+    if (!ok || !txt) {
+        if (txt) uefi_call_wrapper(BS->FreePool, 1, txt);
+        return 0;
+    }
+
+    g_autorun_buf = txt;
+    g_autorun_len = txt_len;
+    g_autorun_pos = 0;
+    g_autorun_active = 1;
+    g_autorun_shutdown_when_done = shutdown_when_done ? 1 : 0;
+    Print(L"[autorun] loaded %s (%d bytes)\r\n", name, (int)txt_len);
+    return 1;
+}
+
+static void llmk_autorun_trim(char *s) {
+    if (!s) return;
+    // left trim
+    int i = 0;
+    while (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') i++;
+    if (i > 0) {
+        int j = 0;
+        while (s[i]) s[j++] = s[i++];
+        s[j] = 0;
+    }
+    // right trim
+    int n = 0;
+    while (s[n]) n++;
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r' || s[n - 1] == '\n')) n--;
+    s[n] = 0;
+}
+
+static int llmk_autorun_next_line(char *out, int out_cap) {
+    if (out && out_cap > 0) out[0] = 0;
+    if (!g_autorun_active || !g_autorun_buf || g_autorun_pos >= g_autorun_len) return 0;
+    if (!out || out_cap <= 1) return 0;
+
+    // Skip empty lines and comments.
+    while (g_autorun_pos < g_autorun_len) {
+        int op = 0;
+        // Read one line
+        while (g_autorun_pos < g_autorun_len) {
+            char c = g_autorun_buf[g_autorun_pos++];
+            if (c == '\n') break;
+            if (c == '\r') continue;
+            if (op + 1 < out_cap) out[op++] = c;
+        }
+        out[op] = 0;
+        llmk_autorun_trim(out);
+        if (out[0] == 0) continue;
+        if (out[0] == '#' || out[0] == ';') continue;
+        return 1;
+    }
+
+    return 0;
+}
+
 static int llmk_ascii_append_u32(char *dst, int cap, int pos, UINT32 v) {
     if (!dst || cap <= 0) return pos;
     if (pos < 0) pos = 0;
@@ -3015,7 +3145,7 @@ model_selected:
     Print(L"  CHAT MODE ACTIVE\r\n");
     Print(L"  Type 'quit' or 'exit' to stop\r\n");
     Print(L"  Multi-line: end line with '\\' to continue; ';;' alone submits\r\n");
-    Print(L"  Commands: /temp /min_p /top_p /top_k /norepeat /repeat /max_tokens /seed /stats /stop_you /stop_nl /model /cpu /zones /budget /attn /test_failsafe /ctx /log /save_log /save_dump /gop /render /save_img /draw /oo_new /oo_list /oo_step /oo_run /oo_kill /oo_note /oo_plan /oo_agenda /oo_next /oo_done /oo_prio /oo_edit /oo_show /oo_digest /oo_save /oo_load /oo_think /oo_auto /oo_auto_stop /reset /version /help\r\n");
+    Print(L"  Commands: /temp /min_p /top_p /top_k /norepeat /repeat /max_tokens /seed /stats /stop_you /stop_nl /model /cpu /zones /budget /attn /test_failsafe /ctx /log /save_log /save_dump /gop /render /save_img /draw /oo_new /oo_list /oo_step /oo_run /oo_kill /oo_note /oo_plan /oo_agenda /oo_next /oo_done /oo_prio /oo_edit /oo_show /oo_digest /oo_save /oo_load /oo_think /oo_auto /oo_auto_stop /autorun /autorun_stop /reset /version /help\r\n");
     Print(L"----------------------------------------\r\n\r\n");
     
     // Sampling parameters
@@ -3075,6 +3205,10 @@ model_selected:
             }
         }
     }
+
+    // Best-effort autorun: if llmk-autorun.txt is present on the boot volume,
+    // execute its commands as if typed, then shutdown when finished.
+    llmk_autorun_start(L"llmk-autorun.txt", 1);
     
     int conversation_count = 0;
     
@@ -3195,13 +3329,32 @@ model_selected:
         }
 
         if (prompt[0] == 0) {
+            // Autorun: consume next scripted line instead of blocking for keyboard input.
+            if (g_autorun_active) {
+                if (llmk_autorun_next_line(prompt, (int)sizeof(prompt))) {
+                    CHAR16 p16[540];
+                    ascii_to_char16(p16, prompt, (int)(sizeof(p16) / sizeof(p16[0])));
+                    Print(L"You (autorun): %s\r\n", p16);
+                } else {
+                    Print(L"[autorun] done\r\n");
+                    int shutdown = g_autorun_shutdown_when_done;
+                    llmk_autorun_stop();
+                    if (shutdown) {
+                        Print(L"[autorun] shutting down\r\n");
+                        uefi_call_wrapper(RT->ResetSystem, 4, EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+                    }
+                }
+            }
+
             // Read user input
-            CHAR16 user_input[512];
-            Print(L"You: ");
-            read_user_input(user_input, 512);
-            
-            // Convert to char
-            char16_to_char(prompt, user_input, 512);
+            if (prompt[0] == 0) {
+                CHAR16 user_input[512];
+                Print(L"You: ");
+                read_user_input(user_input, 512);
+
+                // Convert to char
+                char16_to_char(prompt, user_input, 512);
+            }
         }
 
         // Special command: /draw uses the model to generate render DSL, captures it, then runs /render.
@@ -4346,6 +4499,29 @@ model_selected:
                 g_oo_auto_total = 0;
                 g_oo_auto_user[0] = 0;
                 continue;
+            } else if (my_strncmp(prompt, "/autorun_stop", 13) == 0) {
+                if (g_autorun_active) {
+                    Print(L"\r\n[autorun] stopping\r\n\r\n");
+                    llmk_autorun_stop();
+                } else {
+                    Print(L"\r\n[autorun] not active\r\n\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/autorun", 8) == 0) {
+                const char *name = prompt + 8;
+                while (*name == ' ' || *name == '\t') name++;
+                CHAR16 in_name[96];
+                if (*name == 0) {
+                    StrCpy(in_name, L"llmk-autorun.txt");
+                } else {
+                    ascii_to_char16(in_name, name, (int)(sizeof(in_name) / sizeof(in_name[0])));
+                }
+                if (!llmk_autorun_start(in_name, 0)) {
+                    Print(L"\r\nERROR: failed to start autorun from %s\r\n\r\n", in_name);
+                } else {
+                    Print(L"\r\nOK: autorun started from %s\r\n\r\n", in_name);
+                }
+                continue;
             } else if (my_strncmp(prompt, "/reset", 6) == 0) {
                 Print(L"\r\nResetting runtime state...\r\n");
                 if (g_llmk_ready) {
@@ -4489,6 +4665,8 @@ model_selected:
                 Print(L"  /oo_think <id> <p>   - Ask the model, store answer in entity notes\r\n");
                 Print(L"  /oo_auto <id> [n] [p] - Run n think->store->step cycles (auto; press 'q' or Esc to stop)\r\n");
                 Print(L"  /oo_auto_stop         - Stop /oo_auto cycles (also: press 'q' or Esc between cycles)\r\n");
+                Print(L"  /autorun [f]          - Run scripted REPL commands from file (default llmk-autorun.txt)\r\n");
+                Print(L"  /autorun_stop         - Stop autorun\r\n");
                 Print(L"  /reset        - Clear budgets/log + untrip sentinel\r\n");
                 Print(L"  /clear        - Clear KV cache (reset conversation context)\r\n");
                 Print(L"  /djibmarks    - Show DjibMark execution trace (Made in 🇸🇳)\r\n");
