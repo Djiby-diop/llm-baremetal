@@ -132,6 +132,10 @@ function Dump-Tails([string]$serialLog, [string]$tmpErr, [string]$tmpOut) {
 
 Write-Host "`n[Test] QEMU autorun smoke test" -ForegroundColor Cyan
 
+$serialLog = $null
+$tmpOut = $null
+$tmpErr = $null
+
 # Create an autorun script in the repo root so build.ps1 (WSL) can copy it into the image.
 $autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
 $autorun = @(
@@ -175,6 +179,8 @@ try {
     $serialLog = Join-Path $env:TEMP ("llm-baremetal-serial-autorun-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
     $tmpOut = Join-Path $env:TEMP ("llm-baremetal-qemu-out-autorun-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
     $tmpErr = Join-Path $env:TEMP ("llm-baremetal-qemu-err-autorun-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
+
+    Write-Host "  Serial: $serialLog" -ForegroundColor Gray
 
     $args = @(
         '-display', 'none',
@@ -296,6 +302,16 @@ try {
     }
 
     exit 0
+} catch {
+    Write-Host "`n[FAIL] Autorun test failed." -ForegroundColor Red
+    if ($serialLog -or $tmpErr -or $tmpOut) {
+        Write-Host "[Debug] Logs:" -ForegroundColor Yellow
+        Write-Host "  Serial: $serialLog" -ForegroundColor Yellow
+        Write-Host "  stderr: $tmpErr" -ForegroundColor Yellow
+        Write-Host "  stdout: $tmpOut" -ForegroundColor Yellow
+        Dump-Tails $serialLog $tmpErr $tmpOut
+    }
+    throw
 } finally {
     # Keep repo clean; file is ignored but we remove it anyway.
     try {
