@@ -25,6 +25,10 @@ strict_budget=0         # Hard-stop on budget overrun (0=log only, 1=trip sentin
 # If you want to auto-run a script at boot, set this and provide llmk-autorun.txt on the boot volume.
 # autorun_autostart=1
 
+# Optional autorun behavior
+# autorun_file=llmk-autorun.txt
+# autorun_shutdown_when_done=0
+
 # Cycle budgets (tune per machine; higher = more tolerance, lower = earlier overrun detect)
 # Start conservative and adjust based on /ctx overrun counts.
 budget_prefill=80000000000

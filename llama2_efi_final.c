@@ -1019,9 +1019,58 @@ static EFI_STATUS llmk_read_entire_file_best_effort(const CHAR16 *name, void **o
     return EFI_SUCCESS;
 }
 
+static void llmk_make_bak_name(const CHAR16 *src, CHAR16 *dst, int dst_cap) {
+    if (!dst || dst_cap <= 0) return;
+    dst[0] = 0;
+    if (!src) return;
+
+    int n = 0;
+    while (src[n] && n + 1 < dst_cap) {
+        dst[n] = src[n];
+        n++;
+    }
+    dst[n] = 0;
+
+    const CHAR16 *suffix = L".bak";
+    int s = 0;
+    while (suffix[s]) s++;
+    if (n + s + 1 >= dst_cap) return;
+    for (int i = 0; i < s; i++) dst[n + i] = suffix[i];
+    dst[n + s] = 0;
+}
+
+static EFI_STATUS llmk_copy_file_best_effort(const CHAR16 *src, const CHAR16 *dst) {
+    if (!src || !dst) return EFI_INVALID_PARAMETER;
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(src, &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        return st;
+    }
+
+    EFI_FILE_HANDLE f = NULL;
+    st = llmk_open_binary_file(&f, dst);
+    if (EFI_ERROR(st) || !f) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        return st;
+    }
+
+    st = llmk_file_write_bytes(f, (const void *)buf, len);
+    EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+    uefi_call_wrapper(f->Close, 1, f);
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    if (EFI_ERROR(st)) return st;
+    if (EFI_ERROR(flush_st)) return flush_st;
+    return EFI_SUCCESS;
+}
+
 // ============================================================================
 // AUTORUN SCRIPT (best-effort)
 // ============================================================================
+
+// Forward decl (autorun helpers use it before definition)
+static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 
 static int g_autorun_active = 0;
 static int g_autorun_shutdown_when_done = 0;
@@ -1149,6 +1198,62 @@ static int llmk_autorun_next_line(char *out, int out_cap) {
     return 0;
 }
 
+static void llmk_autorun_print_file_best_effort(const CHAR16 *name, int max_lines) {
+    if (!name) name = L"llmk-autorun.txt";
+    if (max_lines <= 0) max_lines = 200;
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(name, &raw, &raw_len);
+    if (EFI_ERROR(st) || !raw || raw_len == 0) {
+        if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+        Print(L"\r\n[autorun] cannot read %s (%r)\r\n\r\n", name, st);
+        return;
+    }
+
+    char *txt = NULL;
+    UINTN txt_len = 0;
+    int ok = llmk_autorun_decode_to_ascii(raw, raw_len, &txt, &txt_len);
+    uefi_call_wrapper(BS->FreePool, 1, raw);
+    if (!ok || !txt) {
+        if (txt) uefi_call_wrapper(BS->FreePool, 1, txt);
+        Print(L"\r\n[autorun] decode failed\r\n\r\n");
+        return;
+    }
+
+    Print(L"\r\n[autorun] %s:\r\n", name);
+    UINTN pos = 0;
+    int lines = 0;
+    char linebuf[256];
+
+    while (pos < txt_len && lines < max_lines) {
+        int op = 0;
+        while (pos < txt_len) {
+            char c = txt[pos++];
+            if (c == '\n') break;
+            if (c == '\r') continue;
+            if (op + 1 < (int)sizeof(linebuf)) linebuf[op++] = c;
+        }
+        linebuf[op] = 0;
+        llmk_autorun_trim(linebuf);
+        if (linebuf[0] == 0) continue;
+        if (linebuf[0] == '#' || linebuf[0] == ';') continue;
+
+        CHAR16 p16[300];
+        ascii_to_char16(p16, linebuf, (int)(sizeof(p16) / sizeof(p16[0])));
+        Print(L"  %s\r\n", p16);
+        lines++;
+    }
+
+    if (lines == 0) {
+        Print(L"  (no runnable lines)\r\n");
+    } else if (pos < txt_len) {
+        Print(L"  ... (truncated)\r\n");
+    }
+    Print(L"\r\n");
+    uefi_call_wrapper(BS->FreePool, 1, txt);
+}
+
 static int llmk_ascii_append_u32(char *dst, int cap, int pos, UINT32 v) {
     if (!dst || cap <= 0) return pos;
     if (pos < 0) pos = 0;
@@ -1233,6 +1338,9 @@ static UINT64 g_budget_decode_cycles = 0;
 // Config (repl.cfg)
 // By default, we do NOT auto-run llmk-autorun.txt at boot (to keep QEMU interactive).
 static int g_cfg_autorun_autostart = 0;
+static int g_cfg_autorun_shutdown_when_done = 0;
+static CHAR16 g_cfg_autorun_file[96] = L"llmk-autorun.txt";
+static int g_cfg_loaded = 0;
 
 // Rate-limit budget overrun prints (avoid flooding console).
 static UINT32 g_budget_overruns_prefill = 0;
@@ -1729,10 +1837,22 @@ static void llmk_load_repl_cfg_best_effort(
                 g_cfg_autorun_autostart = (b != 0);
                 applied = 1;
             }
+        } else if (llmk_cfg_streq_ci(key, "autorun_shutdown") || llmk_cfg_streq_ci(key, "autorun_shutdown_when_done")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_autorun_shutdown_when_done = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "autorun_file") || llmk_cfg_streq_ci(key, "autorun_script")) {
+            if (val && val[0]) {
+                ascii_to_char16(g_cfg_autorun_file, val, (int)(sizeof(g_cfg_autorun_file) / sizeof(g_cfg_autorun_file[0])));
+                applied = 1;
+            }
         }
     }
 
     if (applied) {
+        g_cfg_loaded = 1;
         Print(L"[cfg] repl.cfg loaded\r\n");
     }
 }
@@ -2568,10 +2688,81 @@ void encode(char* text, int* tokens, int* n_tokens, int max_tokens, Tokenizer* t
 // KEYBOARD INPUT
 // ============================================================================
 
+#define LLMK_INPUT_HIST_MAX 32
+#define LLMK_INPUT_HIST_MAXLEN 256
+
+static CHAR16 g_input_hist[LLMK_INPUT_HIST_MAX][LLMK_INPUT_HIST_MAXLEN];
+static int g_input_hist_count = 0; // <= LLMK_INPUT_HIST_MAX
+static int g_input_hist_head = 0;  // next insert index (ring)
+
+static int llmk_str16_len_cap(const CHAR16 *s, int cap) {
+    if (!s || cap <= 0) return 0;
+    int n = 0;
+    while (n < cap && s[n]) n++;
+    return n;
+}
+
+static void llmk_str16_copy_cap(CHAR16 *dst, int dst_cap, const CHAR16 *src) {
+    if (!dst || dst_cap <= 0) return;
+    dst[0] = 0;
+    if (!src) return;
+    int n = 0;
+    while (n + 1 < dst_cap && src[n]) {
+        dst[n] = src[n];
+        n++;
+    }
+    dst[n] = 0;
+}
+
+static int llmk_str16_has_newline(const CHAR16 *s) {
+    if (!s) return 0;
+    for (const CHAR16 *p = s; *p; p++) {
+        if (*p == L'\n' || *p == L'\r') return 1;
+    }
+    return 0;
+}
+
+static const CHAR16 *llmk_hist_get_nth_from_last(int n_from_last) {
+    if (n_from_last < 0) return NULL;
+    if (g_input_hist_count <= 0) return NULL;
+    if (n_from_last >= g_input_hist_count) return NULL;
+
+    int idx = g_input_hist_head - 1 - n_from_last;
+    while (idx < 0) idx += LLMK_INPUT_HIST_MAX;
+    idx %= LLMK_INPUT_HIST_MAX;
+    return g_input_hist[idx];
+}
+
+static void llmk_hist_add_line(const CHAR16 *line) {
+    if (!line || line[0] == 0) return;
+    if (llmk_str16_has_newline(line)) return; // keep history simple (single-line only)
+
+    // Avoid duplicates vs the last entry.
+    if (g_input_hist_count > 0) {
+        const CHAR16 *last = llmk_hist_get_nth_from_last(0);
+        if (last && StrCmp((CHAR16 *)last, (CHAR16 *)line) == 0) return;
+    }
+
+    llmk_str16_copy_cap(g_input_hist[g_input_hist_head], LLMK_INPUT_HIST_MAXLEN, line);
+    g_input_hist_head = (g_input_hist_head + 1) % LLMK_INPUT_HIST_MAX;
+    if (g_input_hist_count < LLMK_INPUT_HIST_MAX) g_input_hist_count++;
+}
+
+static void llmk_console_erase_chars(int n) {
+    for (int i = 0; i < n; i++) {
+        Print(L"\b \b");
+    }
+}
+
 void read_user_input(CHAR16* buffer, int max_len) {
     int pos = 0;
     EFI_INPUT_KEY Key;
     int line_start = 0;
+
+    // History browsing (single-line only, for simplicity).
+    int hist_n = -1; // -1 = draft, 0 = last entry, 1 = one before...
+    CHAR16 draft[LLMK_INPUT_HIST_MAXLEN];
+    draft[0] = 0;
     
     while (pos < max_len - 1) {
         // Wait for key
@@ -2579,6 +2770,48 @@ void read_user_input(CHAR16* buffer, int max_len) {
         uefi_call_wrapper(BS->WaitForEvent, 3, 1, &ST->ConIn->WaitForKey, &index);
         uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &Key);
         
+        // History navigation (only when still on the first line).
+        if ((Key.ScanCode == SCAN_UP || Key.ScanCode == SCAN_DOWN) && line_start == 0) {
+            if (g_input_hist_count <= 0) continue;
+
+            if (Key.ScanCode == SCAN_UP) {
+                if (hist_n + 1 >= g_input_hist_count) continue;
+                if (hist_n < 0) {
+                    // Save current draft on first UP.
+                    llmk_str16_copy_cap(draft, (int)(sizeof(draft) / sizeof(draft[0])), buffer);
+                }
+                hist_n++;
+            } else {
+                // SCAN_DOWN
+                if (hist_n < 0) continue;
+                hist_n--;
+            }
+
+            // Erase current line and replace with history/draft.
+            llmk_console_erase_chars(pos);
+            pos = 0;
+
+            const CHAR16 *src = NULL;
+            if (hist_n >= 0) {
+                src = llmk_hist_get_nth_from_last(hist_n);
+            } else {
+                src = draft;
+            }
+            if (!src) src = L"";
+
+            // Copy + print.
+            int slen = llmk_str16_len_cap(src, max_len - 1);
+            for (int i = 0; i < slen; i++) {
+                buffer[i] = src[i];
+            }
+            pos = slen;
+            buffer[pos] = 0;
+            if (pos > 0) {
+                Print(L"%s", buffer);
+            }
+            continue;
+        }
+
         if (Key.UnicodeChar == 0x000D) {  // Enter
             // If the user ends the line with "\\\\", treat it as a literal "\\" and do NOT continue.
             if (pos >= 2 && buffer[pos - 2] == L'\\' && buffer[pos - 1] == L'\\') {
@@ -2621,6 +2854,11 @@ void read_user_input(CHAR16* buffer, int max_len) {
     }
     
     buffer[pos] = 0;
+
+    // Add to history (single-line only, non-empty).
+    if (line_start == 0 && pos > 0 && !llmk_str16_has_newline(buffer)) {
+        llmk_hist_add_line(buffer);
+    }
 }
 
 void char16_to_char(char* dest, CHAR16* src, int max_len) {
@@ -3185,6 +3423,13 @@ model_selected:
         &stop_on_double_nl
     );
 
+    if (g_cfg_loaded) {
+        Print(L"[cfg] autorun_autostart=%d file=%s shutdown_when_done=%d\r\n",
+              g_cfg_autorun_autostart,
+              g_cfg_autorun_file,
+              g_cfg_autorun_shutdown_when_done);
+    }
+
     // OO config defaults (best-effort from repl.cfg)
     int oo_autoload = 0;
     int oo_autosave_every = 0;
@@ -3203,13 +3448,40 @@ model_selected:
         void *buf = NULL;
         UINTN len = 0;
         EFI_STATUS st = llmk_read_entire_file_best_effort(oo_state_file, &buf, &len);
+        CHAR16 bak[120];
+        llmk_make_bak_name(oo_state_file, bak, (int)(sizeof(bak) / sizeof(bak[0])));
+
         if (EFI_ERROR(st)) {
-            Print(L"[oo] autoload skipped (%r)\r\n", st);
+            // Fallback to .bak
+            EFI_STATUS st2 = llmk_read_entire_file_best_effort(bak, &buf, &len);
+            if (EFI_ERROR(st2)) {
+                Print(L"[oo] autoload skipped (%r)\r\n", st);
+            } else {
+                int imported = llmk_oo_import((const char *)buf, (int)len);
+                uefi_call_wrapper(BS->FreePool, 1, buf);
+                if (imported < 0) {
+                    Print(L"[oo] autoload failed (parse)\r\n");
+                } else {
+                    Print(L"[oo] autoloaded %d entr%s from %s\r\n", imported, (imported == 1) ? L"y" : L"ies", bak);
+                }
+            }
         } else {
             int imported = llmk_oo_import((const char *)buf, (int)len);
             uefi_call_wrapper(BS->FreePool, 1, buf);
             if (imported < 0) {
-                Print(L"[oo] autoload failed (parse)\r\n");
+                // Fallback to .bak if main parse failed.
+                EFI_STATUS st2 = llmk_read_entire_file_best_effort(bak, &buf, &len);
+                if (EFI_ERROR(st2)) {
+                    Print(L"[oo] autoload failed (parse)\r\n");
+                } else {
+                    imported = llmk_oo_import((const char *)buf, (int)len);
+                    uefi_call_wrapper(BS->FreePool, 1, buf);
+                    if (imported < 0) {
+                        Print(L"[oo] autoload failed (parse)\r\n");
+                    } else {
+                        Print(L"[oo] autoloaded %d entr%s from %s\r\n", imported, (imported == 1) ? L"y" : L"ies", bak);
+                    }
+                }
             } else {
                 Print(L"[oo] autoloaded %d entr%s from %s\r\n", imported, (imported == 1) ? L"y" : L"ies", oo_state_file);
             }
@@ -3218,7 +3490,7 @@ model_selected:
 
     // Optional autorun: only if enabled in repl.cfg (autorun_autostart=1).
     if (g_cfg_autorun_autostart) {
-        llmk_autorun_start(L"llmk-autorun.txt", 1);
+        llmk_autorun_start(g_cfg_autorun_file, g_cfg_autorun_shutdown_when_done);
     }
     
     int conversation_count = 0;
@@ -4346,6 +4618,13 @@ model_selected:
                     ascii_to_char16(out_name, name, (int)(sizeof(out_name) / sizeof(out_name[0])));
                 }
 
+                // Best-effort backup (copy previous target -> .bak) before overwriting.
+                {
+                    CHAR16 bak[120];
+                    llmk_make_bak_name(out_name, bak, (int)(sizeof(bak) / sizeof(bak[0])));
+                    llmk_copy_file_best_effort(out_name, bak);
+                }
+
                 int n = 0;
                 EFI_STATUS st = llmk_oo_save_to_file_best_effort(out_name, &n);
                 if (EFI_ERROR(st)) {
@@ -4374,15 +4653,43 @@ model_selected:
                 void *buf = NULL;
                 UINTN len = 0;
                 EFI_STATUS st = llmk_read_entire_file_best_effort(in_name, &buf, &len);
+                CHAR16 bak[120];
+                llmk_make_bak_name(in_name, bak, (int)(sizeof(bak) / sizeof(bak[0])));
+
                 if (EFI_ERROR(st)) {
-                    Print(L"\r\nERROR: failed to read %s: %r\r\n\r\n", in_name, st);
+                    // Fallback: try .bak
+                    EFI_STATUS st2 = llmk_read_entire_file_best_effort(bak, &buf, &len);
+                    if (EFI_ERROR(st2)) {
+                        Print(L"\r\nERROR: failed to read %s: %r\r\n\r\n", in_name, st);
+                        continue;
+                    }
+                    int imported = llmk_oo_import((const char *)buf, (int)len);
+                    uefi_call_wrapper(BS->FreePool, 1, buf);
+                    if (imported < 0) {
+                        Print(L"\r\nERROR: parse failed\r\n\r\n");
+                    } else {
+                        Print(L"\r\nOK: loaded %d entity(s) from %s\r\n\r\n", imported, bak);
+                    }
                     continue;
                 }
+
                 int imported = llmk_oo_import((const char *)buf, (int)len);
                 uefi_call_wrapper(BS->FreePool, 1, buf);
 
                 if (imported < 0) {
-                    Print(L"\r\nERROR: parse failed\r\n\r\n");
+                    // Fallback: try .bak
+                    EFI_STATUS st2 = llmk_read_entire_file_best_effort(bak, &buf, &len);
+                    if (EFI_ERROR(st2)) {
+                        Print(L"\r\nERROR: parse failed\r\n\r\n");
+                    } else {
+                        imported = llmk_oo_import((const char *)buf, (int)len);
+                        uefi_call_wrapper(BS->FreePool, 1, buf);
+                        if (imported < 0) {
+                            Print(L"\r\nERROR: parse failed\r\n\r\n");
+                        } else {
+                            Print(L"\r\nOK: loaded %d entity(s) from %s\r\n\r\n", imported, bak);
+                        }
+                    }
                 } else {
                     Print(L"\r\nOK: loaded %d entity(s) from %s\r\n\r\n", imported, in_name);
                 }
@@ -4519,18 +4826,63 @@ model_selected:
                 }
                 continue;
             } else if (my_strncmp(prompt, "/autorun", 8) == 0) {
-                const char *name = prompt + 8;
-                while (*name == ' ' || *name == '\t') name++;
+                // Usage:
+                //   /autorun [--print] [--shutdown|--no-shutdown] [file]
+                // Defaults come from repl.cfg (autorun_file, autorun_shutdown_when_done).
+                int do_print = 0;
+                int shutdown = g_cfg_autorun_shutdown_when_done;
                 CHAR16 in_name[96];
-                if (*name == 0) {
-                    StrCpy(in_name, L"llmk-autorun.txt");
-                } else {
-                    ascii_to_char16(in_name, name, (int)(sizeof(in_name) / sizeof(in_name[0])));
+                StrCpy(in_name, g_cfg_autorun_file);
+
+                const char *p = prompt + 8;
+                while (*p == ' ' || *p == '\t') p++;
+
+                while (*p) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p == 0) break;
+
+                    char tok[96];
+                    int tp = 0;
+                    while (*p && *p != ' ' && *p != '\t' && tp + 1 < (int)sizeof(tok)) {
+                        tok[tp++] = *p++;
+                    }
+                    tok[tp] = 0;
+                    if (tok[0] == 0) break;
+
+                    if (llmk_cfg_streq_ci(tok, "--print") || llmk_cfg_streq_ci(tok, "--dry") || llmk_cfg_streq_ci(tok, "--dry-run")) {
+                        do_print = 1;
+                        continue;
+                    }
+                    if (llmk_cfg_streq_ci(tok, "--shutdown")) {
+                        shutdown = 1;
+                        continue;
+                    }
+                    if (llmk_cfg_streq_ci(tok, "--no-shutdown")) {
+                        shutdown = 0;
+                        continue;
+                    }
+
+                    // First non-flag token is treated as file name.
+                    if (tok[0] != '-') {
+                        ascii_to_char16(in_name, tok, (int)(sizeof(in_name) / sizeof(in_name[0])));
+                        continue;
+                    }
+
+                    Print(L"\r\nUsage: /autorun [--print] [--shutdown|--no-shutdown] [file]\r\n\r\n");
+                    do_print = -1;
+                    break;
                 }
-                if (!llmk_autorun_start(in_name, 0)) {
+
+                if (do_print == -1) continue;
+                if (do_print) {
+                    llmk_autorun_print_file_best_effort(in_name, 200);
+                    continue;
+                }
+
+                if (!llmk_autorun_start(in_name, shutdown)) {
                     Print(L"\r\nERROR: failed to start autorun from %s\r\n\r\n", in_name);
                 } else {
-                    Print(L"\r\nOK: autorun started from %s\r\n\r\n", in_name);
+                    Print(L"\r\nOK: autorun started from %s (shutdown_when_done=%d)\r\n\r\n", in_name, shutdown);
                 }
                 continue;
             } else if (my_strncmp(prompt, "/reset", 6) == 0) {
@@ -4676,7 +5028,8 @@ model_selected:
                 Print(L"  /oo_think <id> <p>   - Ask the model, store answer in entity notes\r\n");
                 Print(L"  /oo_auto <id> [n] [p] - Run n think->store->step cycles (auto; press 'q' or Esc to stop)\r\n");
                 Print(L"  /oo_auto_stop         - Stop /oo_auto cycles (also: press 'q' or Esc between cycles)\r\n");
-                Print(L"  /autorun [f]          - Run scripted REPL commands from file (default llmk-autorun.txt)\r\n");
+                Print(L"  /autorun [--print] [--shutdown|--no-shutdown] [f]\r\n");
+                Print(L"                - Run scripted REPL commands from file (default from repl.cfg)\r\n");
                 Print(L"  /autorun_stop         - Stop autorun\r\n");
                 Print(L"  /reset        - Clear budgets/log + untrip sentinel\r\n");
                 Print(L"  /clear        - Clear KV cache (reset conversation context)\r\n");
