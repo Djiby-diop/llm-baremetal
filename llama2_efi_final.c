@@ -2754,6 +2754,18 @@ static void llmk_console_erase_chars(int n) {
     }
 }
 
+static int g_tab_cycle_active = 0;
+static int g_tab_cycle_index = -1;
+static int g_tab_cycle_token_start = 0;
+static char g_tab_cycle_prefix[64];
+
+static void llmk_tab_cycle_reset(void) {
+    g_tab_cycle_active = 0;
+    g_tab_cycle_index = -1;
+    g_tab_cycle_token_start = 0;
+    g_tab_cycle_prefix[0] = 0;
+}
+
 static int llmk_ascii_startswith(const char *s, const char *prefix) {
     if (!s || !prefix) return 0;
     while (*prefix) {
@@ -2762,6 +2774,19 @@ static int llmk_ascii_startswith(const char *s, const char *prefix) {
         prefix++;
     }
     return 1;
+}
+
+static void llmk_ascii_copy_cap(char *dst, int dst_cap, const char *src) {
+    if (!dst || dst_cap <= 0) return;
+    if (!src) {
+        dst[0] = 0;
+        return;
+    }
+    int i = 0;
+    for (; i < dst_cap - 1 && src[i]; i++) {
+        dst[i] = src[i];
+    }
+    dst[i] = 0;
 }
 
 static int llmk_cmd_common_prefix_len(const char *a, const char *b) {
@@ -2776,7 +2801,7 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
     int pos = *io_pos;
     if (pos <= 0) return;
 
-    // Find current token start.
+    // Find current token start (we only complete the token that ends at the cursor).
     int token_start = pos;
     while (token_start > 0) {
         CHAR16 c = buffer[token_start - 1];
@@ -2785,17 +2810,6 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
     }
     if (token_start >= pos) return;
     if (buffer[token_start] != L'/') return;
-
-    // Copy token to ASCII prefix.
-    char prefix[64];
-    int p = 0;
-    for (int i = token_start; i < pos && p + 1 < (int)sizeof(prefix); i++) {
-        CHAR16 c = buffer[i];
-        if (c < 0x20 || c > 0x7E) return;
-        prefix[p++] = (char)c;
-    }
-    prefix[p] = 0;
-    if (p <= 1) return; // just "/" -> do nothing
 
     static const char *cmds[] = {
         "/draw",
@@ -2852,41 +2866,116 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/help",
     };
 
-    int matches = 0;
-    const char *first = NULL;
-    const char *second = NULL;
-    for (UINTN i = 0; i < (sizeof(cmds) / sizeof(cmds[0])); i++) {
-        if (llmk_ascii_startswith(cmds[i], prefix)) {
-            matches++;
-            if (!first) first = cmds[i];
-            else if (!second) second = cmds[i];
+    // If there's no active session (or token start changed), seed a new cycling session
+    // from the token currently under the cursor.
+    if (!g_tab_cycle_active || g_tab_cycle_token_start != token_start) {
+        llmk_tab_cycle_reset();
+
+        char prefix[64];
+        int p = 0;
+        for (int i = token_start; i < pos && p + 1 < (int)sizeof(prefix); i++) {
+            CHAR16 c = buffer[i];
+            if (c < 0x20 || c > 0x7E) return;
+            prefix[p++] = (char)c;
+        }
+        prefix[p] = 0;
+        if (p <= 1) return; // just "/" -> do nothing
+
+        llmk_ascii_copy_cap(g_tab_cycle_prefix, (int)sizeof(g_tab_cycle_prefix), prefix);
+        g_tab_cycle_active = 1;
+        g_tab_cycle_index = -1;
+        g_tab_cycle_token_start = token_start;
+    } else {
+        // Ensure the current token still begins with the session prefix. If not, restart.
+        int p = (int)my_strlen(g_tab_cycle_prefix);
+        if (p <= 1) {
+            llmk_tab_cycle_reset();
+            return;
+        }
+        if (pos - token_start < p) {
+            llmk_tab_cycle_reset();
+            return;
+        }
+        for (int i = 0; i < p; i++) {
+            CHAR16 c = buffer[token_start + i];
+            if ((c < 0x20 || c > 0x7E) || (char)c != g_tab_cycle_prefix[i]) {
+                llmk_tab_cycle_reset();
+                // Re-run once from scratch (no recursion).
+                char prefix[64];
+                int pp = 0;
+                for (int j = token_start; j < pos && pp + 1 < (int)sizeof(prefix); j++) {
+                    CHAR16 cj = buffer[j];
+                    if (cj < 0x20 || cj > 0x7E) return;
+                    prefix[pp++] = (char)cj;
+                }
+                prefix[pp] = 0;
+                if (pp <= 1) return;
+                llmk_ascii_copy_cap(g_tab_cycle_prefix, (int)sizeof(g_tab_cycle_prefix), prefix);
+                g_tab_cycle_active = 1;
+                g_tab_cycle_index = -1;
+                g_tab_cycle_token_start = token_start;
+                break;
+            }
         }
     }
 
-    if (matches <= 0 || !first) return;
-
-    // Extend to common prefix across all matches (cheap: update with each match).
-    int common_len = (int)my_strlen(first);
+    // Build match list from the session prefix.
+    const char *matches[64];
+    int match_count = 0;
+    const char *first = NULL;
     for (UINTN i = 0; i < (sizeof(cmds) / sizeof(cmds[0])); i++) {
-        if (!llmk_ascii_startswith(cmds[i], prefix)) continue;
-        int cpl = llmk_cmd_common_prefix_len(first, cmds[i]);
+        if (llmk_ascii_startswith(cmds[i], g_tab_cycle_prefix)) {
+            if (match_count < (int)(sizeof(matches) / sizeof(matches[0]))) {
+                matches[match_count++] = cmds[i];
+            }
+            if (!first) first = cmds[i];
+        }
+    }
+
+    if (match_count <= 0 || !first) {
+        llmk_tab_cycle_reset();
+        return;
+    }
+
+    int base_len = (int)my_strlen(g_tab_cycle_prefix);
+    if (base_len <= 1) return;
+
+    // Common prefix across matches.
+    int common_len = (int)my_strlen(first);
+    for (int i = 0; i < match_count; i++) {
+        int cpl = llmk_cmd_common_prefix_len(first, matches[i]);
         if (cpl < common_len) common_len = cpl;
     }
 
-    // If common prefix doesn't extend, only complete when unique.
-    int want_len = common_len;
-    if (want_len <= p) {
-        if (matches != 1) return;
-        want_len = (int)my_strlen(first);
-        if (want_len <= p) return;
+    int cur_token_len = pos - token_start;
+
+    // 1) If there's a longer common prefix, extend to it (first Tab behavior).
+    if (common_len > base_len && cur_token_len < common_len) {
+        for (int i = cur_token_len; i < common_len; i++) {
+            if (pos + 1 >= max_len) break;
+            char c = first[i];
+            buffer[pos++] = (CHAR16)c;
+            Print(L"%c", (CHAR16)c);
+        }
+        buffer[pos] = 0;
+        *io_pos = pos;
+        return;
     }
 
-    // Append remaining chars.
-    for (int i = p; i < want_len; i++) {
-        if (pos + 1 >= max_len) break;
-        char c = first[i];
-        buffer[pos++] = (CHAR16)c;
-        Print(L"%c", (CHAR16)c);
+    // 2) Otherwise, cycle through full command candidates.
+    if (g_tab_cycle_index < 0) g_tab_cycle_index = 0;
+    else g_tab_cycle_index = (g_tab_cycle_index + 1) % match_count;
+
+    const char *candidate = matches[g_tab_cycle_index];
+    if (!candidate) return;
+
+    // Replace current token with candidate.
+    llmk_console_erase_chars(cur_token_len);
+    pos = token_start;
+
+    for (int i = 0; candidate[i] && pos + 1 < max_len; i++) {
+        buffer[pos++] = (CHAR16)candidate[i];
+        Print(L"%c", (CHAR16)candidate[i]);
     }
     buffer[pos] = 0;
     *io_pos = pos;
@@ -2907,6 +2996,11 @@ void read_user_input(CHAR16* buffer, int max_len) {
         UINTN index;
         uefi_call_wrapper(BS->WaitForEvent, 3, 1, &ST->ConIn->WaitForKey, &index);
         uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &Key);
+
+        // Any non-Tab key cancels completion cycling.
+        if (Key.UnicodeChar != L'\t') {
+            llmk_tab_cycle_reset();
+        }
         
         // History navigation (only when still on the first line).
         if ((Key.ScanCode == SCAN_UP || Key.ScanCode == SCAN_DOWN) && line_start == 0) {
