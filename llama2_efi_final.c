@@ -2754,6 +2754,144 @@ static void llmk_console_erase_chars(int n) {
     }
 }
 
+static int llmk_ascii_startswith(const char *s, const char *prefix) {
+    if (!s || !prefix) return 0;
+    while (*prefix) {
+        if (*s != *prefix) return 0;
+        s++;
+        prefix++;
+    }
+    return 1;
+}
+
+static int llmk_cmd_common_prefix_len(const char *a, const char *b) {
+    int n = 0;
+    if (!a || !b) return 0;
+    while (a[n] && b[n] && a[n] == b[n]) n++;
+    return n;
+}
+
+static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_pos) {
+    if (!buffer || !io_pos || max_len <= 1) return;
+    int pos = *io_pos;
+    if (pos <= 0) return;
+
+    // Find current token start.
+    int token_start = pos;
+    while (token_start > 0) {
+        CHAR16 c = buffer[token_start - 1];
+        if (c == L' ' || c == L'\t' || c == L'\n' || c == L'\r') break;
+        token_start--;
+    }
+    if (token_start >= pos) return;
+    if (buffer[token_start] != L'/') return;
+
+    // Copy token to ASCII prefix.
+    char prefix[64];
+    int p = 0;
+    for (int i = token_start; i < pos && p + 1 < (int)sizeof(prefix); i++) {
+        CHAR16 c = buffer[i];
+        if (c < 0x20 || c > 0x7E) return;
+        prefix[p++] = (char)c;
+    }
+    prefix[p] = 0;
+    if (p <= 1) return; // just "/" -> do nothing
+
+    static const char *cmds[] = {
+        "/draw",
+        "/temp",
+        "/min_p",
+        "/top_p",
+        "/top_k",
+        "/max_tokens",
+        "/seed",
+        "/stats",
+        "/stop_you",
+        "/stop_nl",
+        "/norepeat",
+        "/repeat",
+        "/model",
+        "/cpu",
+        "/zones",
+        "/budget",
+        "/attn",
+        "/test_failsafe",
+        "/ctx",
+        "/log",
+        "/save_log",
+        "/save_dump",
+        "/gop",
+        "/render",
+        "/save_img",
+        "/oo_new",
+        "/oo_list",
+        "/oo_kill",
+        "/oo_step",
+        "/oo_run",
+        "/oo_note",
+        "/oo_show",
+        "/oo_digest",
+        "/oo_plan",
+        "/oo_agenda",
+        "/oo_next",
+        "/oo_done",
+        "/oo_prio",
+        "/oo_edit",
+        "/oo_save",
+        "/oo_load",
+        "/oo_think",
+        "/oo_auto",
+        "/oo_auto_stop",
+        "/autorun",
+        "/autorun_stop",
+        "/reset",
+        "/clear",
+        "/version",
+        "/djibmarks",
+        "/djibperf",
+        "/help",
+    };
+
+    int matches = 0;
+    const char *first = NULL;
+    const char *second = NULL;
+    for (UINTN i = 0; i < (sizeof(cmds) / sizeof(cmds[0])); i++) {
+        if (llmk_ascii_startswith(cmds[i], prefix)) {
+            matches++;
+            if (!first) first = cmds[i];
+            else if (!second) second = cmds[i];
+        }
+    }
+
+    if (matches <= 0 || !first) return;
+
+    // Extend to common prefix across all matches (cheap: update with each match).
+    int common_len = (int)my_strlen(first);
+    for (UINTN i = 0; i < (sizeof(cmds) / sizeof(cmds[0])); i++) {
+        if (!llmk_ascii_startswith(cmds[i], prefix)) continue;
+        int cpl = llmk_cmd_common_prefix_len(first, cmds[i]);
+        if (cpl < common_len) common_len = cpl;
+    }
+
+    // If common prefix doesn't extend, only complete when unique.
+    int want_len = common_len;
+    if (want_len <= p) {
+        if (matches != 1) return;
+        want_len = (int)my_strlen(first);
+        if (want_len <= p) return;
+    }
+
+    // Append remaining chars.
+    for (int i = p; i < want_len; i++) {
+        if (pos + 1 >= max_len) break;
+        char c = first[i];
+        buffer[pos++] = (CHAR16)c;
+        Print(L"%c", (CHAR16)c);
+    }
+    buffer[pos] = 0;
+    *io_pos = pos;
+}
+
 void read_user_input(CHAR16* buffer, int max_len) {
     int pos = 0;
     EFI_INPUT_KEY Key;
@@ -2809,6 +2947,12 @@ void read_user_input(CHAR16* buffer, int max_len) {
             if (pos > 0) {
                 Print(L"%s", buffer);
             }
+            continue;
+        }
+
+        // Tab completion (single-line only)
+        if (Key.UnicodeChar == L'\t' && line_start == 0) {
+            llmk_try_tab_complete_command(buffer, max_len, &pos);
             continue;
         }
 
