@@ -45,6 +45,49 @@ foreach ($m in $ExtraModelBins) {
 	}
 }
 
+function Update-SplashBmpFromPng-BestEffort {
+	# The UEFI splash renderer only supports 24-bit uncompressed BMP (splash.bmp).
+	# Keep llm2.png as the editable source asset and generate splash.bmp automatically.
+	$src = Join-Path $PSScriptRoot 'llm2.png'
+	$dst = Join-Path $PSScriptRoot 'splash.bmp'
+	if (-not (Test-Path $src)) { return }
+
+	$need = $false
+	if (-not (Test-Path $dst)) {
+		$need = $true
+	} else {
+		try {
+			$srcTime = (Get-Item $src).LastWriteTimeUtc
+			$dstTime = (Get-Item $dst).LastWriteTimeUtc
+			if ($srcTime -gt $dstTime) { $need = $true }
+		} catch {
+			$need = $true
+		}
+	}
+
+	if (-not $need) { return }
+
+	$py = Join-Path (Split-Path $PSScriptRoot -Parent) '.venv\Scripts\python.exe'
+	if (-not (Test-Path $py)) {
+		$cmd = Get-Command python.exe -ErrorAction SilentlyContinue
+		if ($cmd) { $py = $cmd.Source }
+	}
+	if (-not $py -or -not (Test-Path $py)) {
+		Write-Host "[Build] Splash: python not found; skipping llm2.png -> splash.bmp" -ForegroundColor Yellow
+		return
+	}
+
+	Write-Host "[Build] Splash: generating splash.bmp from llm2.png" -ForegroundColor Gray
+	try {
+		& $py -c "from PIL import Image; import os; src=r'$src'; dst=r'$dst'; im=Image.open(src).convert('RGB'); im=im.resize((1024,1024), Image.Resampling.LANCZOS); im.save(dst, format='BMP')"
+	} catch {
+		Write-Host "[Build] Splash: conversion failed (need 'pillow'): $($_.Exception.Message)" -ForegroundColor Yellow
+		return
+	}
+}
+
+Update-SplashBmpFromPng-BestEffort
+
 function ConvertTo-WslPath([string]$winPath) {
 	# Normalize to forward slashes first.
 	$norm = ($winPath -replace '\\','/')
