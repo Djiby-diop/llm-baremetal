@@ -67,9 +67,28 @@ function ConvertTo-WslPath([string]$winPath) {
 $wslRepo = ConvertTo-WslPath $PSScriptRoot
 
 $extra = ($ExtraModelBins | Where-Object { $_ -and $_.Trim().Length -gt 0 }) -join ';'
-$wslScript = "set -e; cd '$wslRepo'; chmod +x create-boot-mtools.sh; make clean; make repl; MODEL_BIN='$ModelBin' EXTRA_MODELS='$extra' ./create-boot-mtools.sh"
 
-wsl bash -lc "$wslScript"
+# Avoid brittle quoting by writing a temporary script and running it from WSL.
+$tmpSh = Join-Path $env:TEMP ("llmk-build-{0}.sh" -f ([Guid]::NewGuid().ToString('N')))
+$tmpShWsl = ConvertTo-WslPath $tmpSh
+
+$scriptBody = @(
+	'#!/usr/bin/env bash'
+	'set -e'
+	("cd '{0}'" -f $wslRepo)
+	'chmod +x create-boot-mtools.sh'
+	'make clean'
+	'make repl'
+	("MODEL_BIN='{0}' EXTRA_MODELS='{1}' ./create-boot-mtools.sh" -f $ModelBin, $extra)
+) -join "\n"
+
+Set-Content -Path $tmpSh -Value $scriptBody -Encoding ASCII
+
+try {
+	wsl bash "$tmpShWsl"
+} finally {
+	Remove-Item -Force -ErrorAction SilentlyContinue $tmpSh
+}
 
 if ($LASTEXITCODE -ne 0) {
 	throw "WSL build failed with exit code $LASTEXITCODE"

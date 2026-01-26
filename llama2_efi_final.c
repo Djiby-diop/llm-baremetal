@@ -23,10 +23,197 @@
 // LLM-OO runtime (organism-oriented entities)
 #include "llmk_oo.h"
 
+// Djibion meta-engine (laws + triangulation + intent gating)
+#include "djibion-engine/core/djibion.h"
+#include "diopion-engine/core/diopion.h"
+#include "diagnostion-engine/core/diagnostion.h"
+#include "memorion-engine/core/memorion.h"
+#include "orchestrion-engine/core/orchestrion.h"
+#include "calibrion-engine/core/calibrion.h"
+#include "compatibilion-engine/core/compatibilion.h"
+
 // DjibMark - Omnipresent execution tracing (Made in Senegal 🇸🇳)
 #include "djibmark.h"
+#include "interface.h"
 
-// Model config
+static DjibionEngine g_djibion;
+static DiopionEngine g_diopion;
+static DiagnostionEngine g_diagnostion;
+static MemorionEngine g_memorion;
+static OrchestrionEngine g_orchestrion;
+static CalibrionEngine g_calibrion;
+static CompatibilionEngine g_compatibilion;
+
+// Forward declarations (used by early config loaders)
+static EFI_STATUS llmk_open_read_file(EFI_FILE_HANDLE *out, const CHAR16 *name);
+static void llmk_cfg_trim(char **s);
+static char llmk_cfg_tolower(char c);
+static int llmk_cfg_streq_ci(const char *a, const char *b);
+static int llmk_cfg_parse_i32(const char *s, int *out);
+static void llmk_print_ascii(const char *s);
+
+// Diopion burst runtime (sampling knobs override for N generations)
+static int g_diopion_burst_active = 0;
+static int g_diopion_burst_remaining = 0;
+static int g_diopion_saved_max_gen_tokens = 0;
+static int g_diopion_saved_top_k = 0;
+static float g_diopion_saved_temperature = 0.0f;
+
+static float llmk_temp_from_milli(UINT32 milli) {
+    if (milli > 2000u) milli = 2000u;
+    return (float)milli / 1000.0f;
+}
+
+static void llmk_diopion_burst_apply(UINT32 turns, UINT32 max_tokens, UINT32 topk, UINT32 temp_milli,
+                                    int *io_max_gen_tokens, int *io_top_k, float *io_temperature) {
+    if (!io_max_gen_tokens || !io_top_k || !io_temperature) return;
+    if (turns == 0) return;
+
+    if (!g_diopion_burst_active) {
+        g_diopion_saved_max_gen_tokens = *io_max_gen_tokens;
+        g_diopion_saved_top_k = *io_top_k;
+        g_diopion_saved_temperature = *io_temperature;
+        g_diopion_burst_active = 1;
+    }
+
+    g_diopion_burst_remaining = (int)turns;
+    if (max_tokens > 0) *io_max_gen_tokens = (int)max_tokens;
+    if (topk > 0) *io_top_k = (int)topk;
+    if (temp_milli > 0) *io_temperature = llmk_temp_from_milli(temp_milli);
+}
+
+static void llmk_diopion_burst_finish_one(int *io_max_gen_tokens, int *io_top_k, float *io_temperature) {
+    if (!g_diopion_burst_active) return;
+    if (g_diopion_burst_remaining > 0) g_diopion_burst_remaining--;
+    if (g_diopion_burst_remaining > 0) return;
+
+    // Restore saved knobs
+    if (io_max_gen_tokens) *io_max_gen_tokens = g_diopion_saved_max_gen_tokens;
+    if (io_top_k) *io_top_k = g_diopion_saved_top_k;
+    if (io_temperature) *io_temperature = g_diopion_saved_temperature;
+    g_diopion_burst_active = 0;
+}
+
+static void llmk_load_repl_cfg_diopion_best_effort(DiopionEngine *e) {
+    if (!e) return;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_read_file(&f, L"repl.cfg");
+    if (EFI_ERROR(st)) return;
+
+    char buf[4096];
+    UINTN sz = sizeof(buf) - 1;
+    st = uefi_call_wrapper(f->Read, 3, f, &sz, buf);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || sz == 0) return;
+    buf[sz] = 0;
+
+    int applied = 0;
+
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+        if (line[0] == '#' || line[0] == ';') continue;
+
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0) continue;
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        if (llmk_cfg_streq_ci(key, "diopion_mode")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > 2) v = 2;
+                diopion_set_mode(e, (DiopionMode)v);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "diopion_profile")) {
+            if (val && val[0]) {
+                // token -> enum
+                if (llmk_cfg_streq_ci(val, "animal")) diopion_set_profile(e, DIOPION_PROFILE_ANIMAL);
+                else if (llmk_cfg_streq_ci(val, "vegetal")) diopion_set_profile(e, DIOPION_PROFILE_VEGETAL);
+                else if (llmk_cfg_streq_ci(val, "geom") || llmk_cfg_streq_ci(val, "geometric")) diopion_set_profile(e, DIOPION_PROFILE_GEOM);
+                else if (llmk_cfg_streq_ci(val, "bio") || llmk_cfg_streq_ci(val, "biological")) diopion_set_profile(e, DIOPION_PROFILE_BIO);
+                else diopion_set_profile(e, DIOPION_PROFILE_NONE);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "diopion_burst_turns")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > 16) v = 16;
+                e->params.burst_turns_default = (UINT32)v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "diopion_burst_tokens") || llmk_cfg_streq_ci(key, "diopion_burst_max_tokens")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 16) v = 16;
+                if (v > 1024) v = 1024;
+                e->params.burst_max_gen_tokens = (UINT32)v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "diopion_burst_topk")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > 200) v = 200;
+                e->params.burst_top_k = (UINT32)v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "diopion_burst_temp_milli") || llmk_cfg_streq_ci(key, "diopion_burst_temp")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 50) v = 50;
+                if (v > 2000) v = 2000;
+                e->params.burst_temp_milli = (UINT32)v;
+                applied = 1;
+            }
+        }
+    }
+
+    if (applied) {
+        Print(L"[cfg] diopion: mode=");
+        llmk_print_ascii(diopion_mode_name_ascii(e->mode));
+        Print(L" profile=");
+        llmk_print_ascii(diopion_profile_name_ascii(e->profile));
+        Print(L"\r\n");
+    }
+}
+
+static const CHAR16 *djibion_mode_name(DjibionMode m) {
+    if (m == DJIBION_MODE_OFF) return L"off";
+    if (m == DJIBION_MODE_OBSERVE) return L"observe";
+    if (m == DJIBION_MODE_ENFORCE) return L"enforce";
+    return L"?";
+}
+
+// Forward decl: used by early repl.cfg loaders before definition.
+static int llmk_cfg_parse_bool(const char *s, int *out);
+
+static int djibion_should_block(const DjibionEngine *e, const DjibionDecision *d) {
+    if (!e || !d) return 0;
+    if (e->mode != DJIBION_MODE_ENFORCE) return 0;
+    return (d->verdict == DJIBION_VERDICT_REJECT || d->verdict == DJIBION_VERDICT_FREEZE);
+}
 #define DIM 288
 #define HIDDEN_DIM 768
 #define N_LAYERS 6
@@ -152,6 +339,10 @@ static void uefi_print_utf8_decode(const unsigned char *p, int len) {
 static unsigned char g_utf8_repair_tail[5];
 static int g_utf8_repair_tail_len = 0;
 
+// GOP transcript (best-effort): capture streamed UTF-8 output into an ASCII-ish ring buffer
+// so we can render it later in the GOP UI.
+static void llmk_tr_append_ascii_bytes(const unsigned char *bytes, int len);
+
 static void uefi_print_utf8_bytes(const char *bytes, int len) {
     if (!bytes || len <= 0) return;
 
@@ -232,6 +423,7 @@ static void uefi_print_utf8_bytes(const char *bytes, int len) {
         for (int i = 0; i < keep; i++) g_utf8_repair_tail[i] = inbuf[upto + i];
 
         // Decode+print processed bytes.
+        llmk_tr_append_ascii_bytes(outbuf, outlen);
         uefi_print_utf8_decode(outbuf, outlen);
 
         // If we ever filled the buffer before consuming all of upto, drop the remainder to avoid
@@ -239,6 +431,7 @@ static void uefi_print_utf8_bytes(const char *bytes, int len) {
         // (We intentionally keep this minimal and avoid heap allocations.)
         if (j < upto) {
             // best-effort: continue printing remaining bytes directly (no repair inside this chunk)
+            llmk_tr_append_ascii_bytes(inbuf + j, upto - j);
             uefi_print_utf8_decode(inbuf + j, upto - j);
         }
     }
@@ -413,6 +606,60 @@ static EFI_GRAPHICS_PIXEL_FORMAT g_gop_pf = PixelFormatMax;
 static EFI_PIXEL_BITMASK g_gop_mask = {0};
 static volatile UINT32 *g_gop_fb32 = NULL;
 
+// Mirror the REPL's KV position into a global so optional systems (like GOP TUI)
+// can read it without threading local state through many functions.
+static int g_llmk_kv_pos = 0;
+
+// Minimal GOP-based TUI overlay (optional).
+static int g_tui_enabled = 0;
+static int g_tui_dirty = 0;
+static int g_tui_last_id = 0;
+static int g_tui_last_tick = 0;
+static int g_tui_last_energy = 0;
+static char g_tui_last_event[64] = "";
+
+// Live generation counters (best-effort): updated during decode loop so the TUI can
+// show progress even while the terminal output is streaming.
+static int g_tui_gen_active = 0;
+static int g_tui_gen_tokens = 0;
+
+// GOP UI modes
+// 0=status panel only (legacy)
+// 1=log view (full-width)
+// 2=split (log + files)
+// 3=files focus (log + files, selection emphasized)
+static int g_ui_mode = 0;
+
+// Transcript ring buffer (ASCII-ish)
+#define LLMK_TR_LINES 192
+#define LLMK_TR_COLS  128
+static char g_tr_lines[LLMK_TR_LINES][LLMK_TR_COLS];
+static UINT32 g_tr_write = 0; // next write slot
+static UINT32 g_tr_count = 0; // number of valid lines
+static char g_tr_cur[LLMK_TR_COLS];
+static int g_tr_cur_len = 0;
+static int g_tr_scroll = 0; // how many lines back from newest
+
+// GOP file browser (command-driven)
+#define LLMK_FB_MAX_ENTRIES 96
+typedef struct {
+    CHAR16 name16[64];
+    char name8[64];
+    int is_dir;
+    UINT64 size;
+} LlmkFbEntry;
+
+static CHAR16 g_fb_path16[128] = L"\\";
+static char g_fb_path8[128] = "\\";
+static LlmkFbEntry g_fb_entries[LLMK_FB_MAX_ENTRIES];
+static int g_fb_count = 0;
+static int g_fb_sel = 0;
+
+#define LLMK_FB_PREVIEW_LINES 12
+#define LLMK_FB_PREVIEW_COLS  96
+static char g_fb_preview[LLMK_FB_PREVIEW_LINES][LLMK_FB_PREVIEW_COLS];
+static int g_fb_preview_count = 0;
+
 // Capture mode: used by /draw to collect model output (DSL) instead of printing it.
 static int g_capture_mode = 0;
 static char g_capture_buf[2048];
@@ -425,6 +672,14 @@ static int g_oo_auto_id = 0;
 static int g_oo_auto_remaining = 0;
 static int g_oo_auto_total = 0;
 static char g_oo_auto_user[256];
+
+// /oo_exec persistent state (agenda runner)
+static int g_oo_exec_active = 0;
+static int g_oo_exec_id = 0;
+static int g_oo_exec_remaining = 0;
+static int g_oo_exec_total = 0;
+static int g_oo_exec_plan_if_empty = 0;
+static char g_oo_exec_hint[256];
 
 static void llmk_capture_reset(void) {
     g_capture_len = 0;
@@ -647,26 +902,53 @@ static void llmk_gop_force_update(void) {
 
 static void llmk_gop_put_pixel(UINT32 x, UINT32 y, UINT8 r, UINT8 g, UINT8 b);
 
-static void llmk_oo_on_step_gop(int id, int tick, int energy) {
-    (void)energy;
-    if (!g_gop_fb32 || !g_gop_w || !g_gop_h) return;
-    UINT32 x = (UINT32)((tick * 13 + id * 31) % (int)g_gop_w);
-    UINT32 y = (UINT32)((tick * 7 + id * 17) % (int)g_gop_h);
-    llmk_gop_put_pixel(x, y, 0, 255, 0);
-    llmk_gop_force_update();
+// Forward decls (used by optional GOP TUI before their definitions).
+static void llmk_ascii_copy_cap(char *dst, int dst_cap, const char *src);
+static int llmk_ascii_append_u32(char *dst, int cap, int pos, UINT32 v);
+static void llmk_print_ascii(const char *s);
+static void llmk_tui_redraw_best_effort(void);
+static EFI_STATUS llmk_open_read_file(EFI_FILE_HANDLE *out, const CHAR16 *name);
+static int llmk_char16_streq(const CHAR16 *a, const CHAR16 *b);
+
+static void djibion_apply_transform_path(char *io_path, int cap, const DjibionDecision *d) {
+    if (!io_path || cap <= 1 || !d) return;
+    if (d->verdict != DJIBION_VERDICT_TRANSFORM) return;
+    if (!d->transformed_arg0[0]) return;
+    llmk_ascii_copy_cap(io_path, cap, d->transformed_arg0);
 }
 
-static void llmk_gop_put_pixel(UINT32 x, UINT32 y, UINT8 r, UINT8 g, UINT8 b) {
-    if (!g_gop_fb32) return;
-    if (x >= g_gop_w || y >= g_gop_h) return;
-    UINTN idx = (UINTN)y * (UINTN)g_gop_ppsl + (UINTN)x;
+static void djibion_log_if_observe(const DjibionEngine *e, const char *act_name, const DjibionDecision *d) {
+    if (!e || !d || !act_name) return;
+    if (e->mode != DJIBION_MODE_OBSERVE) return;
 
-    UINT32 px = 0;
+    Print(L"[djibion] ");
+    llmk_print_ascii(act_name);
+    Print(L" verdict=%d risk=%d tri=%d/%d/%d reason=",
+          (int)d->verdict,
+          (int)d->risk,
+          (int)d->tri.sense.score,
+          (int)d->tri.structure.score,
+          (int)d->tri.reality.score);
+    if (d->reason[0]) llmk_print_ascii(d->reason);
+    else Print(L"(none)");
+    if (d->verdict == DJIBION_VERDICT_TRANSFORM && d->transformed_arg0[0]) {
+        Print(L" transform->");
+        llmk_print_ascii(d->transformed_arg0);
+    }
+    Print(L"\r\n");
+}
+
+static UINT32 llmk_gop_pack_rgb(UINT8 r, UINT8 g, UINT8 b, int *out_ok) {
+    if (out_ok) *out_ok = 0;
     if (g_gop_pf == PixelBlueGreenRedReserved8BitPerColor) {
-        px = ((UINT32)b) | ((UINT32)g << 8) | ((UINT32)r << 16) | (0xFFU << 24);
-    } else if (g_gop_pf == PixelRedGreenBlueReserved8BitPerColor) {
-        px = ((UINT32)r) | ((UINT32)g << 8) | ((UINT32)b << 16) | (0xFFU << 24);
-    } else if (g_gop_pf == PixelBitMask) {
+        if (out_ok) *out_ok = 1;
+        return ((UINT32)b) | ((UINT32)g << 8) | ((UINT32)r << 16) | (0xFFU << 24);
+    }
+    if (g_gop_pf == PixelRedGreenBlueReserved8BitPerColor) {
+        if (out_ok) *out_ok = 1;
+        return ((UINT32)r) | ((UINT32)g << 8) | ((UINT32)b << 16) | (0xFFU << 24);
+    }
+    if (g_gop_pf == PixelBitMask) {
         UINT32 rm = g_gop_mask.RedMask;
         UINT32 gm = g_gop_mask.GreenMask;
         UINT32 bm = g_gop_mask.BlueMask;
@@ -682,10 +964,727 @@ static void llmk_gop_put_pixel(UINT32 x, UINT32 y, UINT8 r, UINT8 g, UINT8 b) {
         UINT32 rv = (rmax == 0) ? 0 : ((UINT32)r * rmax + 127U) / 255U;
         UINT32 gv = (gmax == 0) ? 0 : ((UINT32)g * gmax + 127U) / 255U;
         UINT32 bv = (bmax == 0) ? 0 : ((UINT32)b * bmax + 127U) / 255U;
-        px = ((rv << rs) & rm) | ((gv << gs) & gm) | ((bv << bs) & bm);
-    } else {
+        if (out_ok) *out_ok = 1;
+        return ((rv << rs) & rm) | ((gv << gs) & gm) | ((bv << bs) & bm);
+    }
+    return 0;
+}
+
+static void llmk_gop_fill_rect_solid(UINT32 x, UINT32 y, UINT32 w, UINT32 h, UINT8 r, UINT8 g, UINT8 b) {
+    if (!g_gop_fb32) return;
+    if (w == 0 || h == 0) return;
+    if (x >= g_gop_w || y >= g_gop_h) return;
+    UINT32 x2 = x + w;
+    UINT32 y2 = y + h;
+    if (x2 > g_gop_w) x2 = g_gop_w;
+    if (y2 > g_gop_h) y2 = g_gop_h;
+    int ok = 0;
+    UINT32 px = llmk_gop_pack_rgb(r, g, b, &ok);
+    if (!ok) return;
+    for (UINT32 yy = y; yy < y2; yy++) {
+        UINTN row = (UINTN)yy * (UINTN)g_gop_ppsl;
+        for (UINT32 xx = x; xx < x2; xx++) {
+            g_gop_fb32[row + (UINTN)xx] = px;
+        }
+    }
+}
+
+typedef struct {
+    char c;
+    UINT8 rows[7]; // 5-bit rows, MSB on the left (bits 4..0)
+} LlmkGlyph5x7;
+
+static const LlmkGlyph5x7 g_font_5x7[] = {
+    { ' ', {0x00,0x00,0x00,0x00,0x00,0x00,0x00} },
+    { '-', {0x00,0x00,0x00,0x1F,0x00,0x00,0x00} },
+    { '_', {0x00,0x00,0x00,0x00,0x00,0x00,0x1F} },
+    { '.', {0x00,0x00,0x00,0x00,0x00,0x06,0x06} },
+    { ':', {0x00,0x06,0x06,0x00,0x06,0x06,0x00} },
+    { '/', {0x01,0x02,0x04,0x08,0x10,0x00,0x00} },
+    { '<', {0x02,0x04,0x08,0x10,0x08,0x04,0x02} },
+    { '>', {0x08,0x04,0x02,0x01,0x02,0x04,0x08} },
+    { '[', {0x0E,0x08,0x08,0x08,0x08,0x08,0x0E} },
+    { ']', {0x0E,0x02,0x02,0x02,0x02,0x02,0x0E} },
+    { '(', {0x02,0x04,0x08,0x08,0x08,0x04,0x02} },
+    { ')', {0x08,0x04,0x02,0x02,0x02,0x04,0x08} },
+    { '*', {0x00,0x0A,0x04,0x1F,0x04,0x0A,0x00} },
+    { '#', {0x0A,0x1F,0x0A,0x0A,0x1F,0x0A,0x00} },
+    { '+', {0x00,0x04,0x04,0x1F,0x04,0x04,0x00} },
+    { '=', {0x00,0x00,0x1F,0x00,0x1F,0x00,0x00} },
+    { '?', {0x0E,0x11,0x01,0x02,0x04,0x00,0x04} },
+    { '0', {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E} },
+    { '1', {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E} },
+    { '2', {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F} },
+    { '3', {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E} },
+    { '4', {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02} },
+    { '5', {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E} },
+    { '6', {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E} },
+    { '7', {0x1F,0x01,0x02,0x04,0x08,0x08,0x08} },
+    { '8', {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E} },
+    { '9', {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C} },
+    { 'A', {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11} },
+    { 'B', {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E} },
+    { 'C', {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E} },
+    { 'D', {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E} },
+    { 'E', {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F} },
+    { 'F', {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10} },
+    { 'G', {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F} },
+    { 'H', {0x11,0x11,0x11,0x1F,0x11,0x11,0x11} },
+    { 'I', {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E} },
+    { 'J', {0x07,0x02,0x02,0x02,0x12,0x12,0x0C} },
+    { 'K', {0x11,0x12,0x14,0x18,0x14,0x12,0x11} },
+    { 'L', {0x10,0x10,0x10,0x10,0x10,0x10,0x1F} },
+    { 'M', {0x11,0x1B,0x15,0x11,0x11,0x11,0x11} },
+    { 'N', {0x11,0x19,0x15,0x13,0x11,0x11,0x11} },
+    { 'O', {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E} },
+    { 'P', {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10} },
+    { 'Q', {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D} },
+    { 'R', {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11} },
+    { 'S', {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E} },
+    { 'T', {0x1F,0x04,0x04,0x04,0x04,0x04,0x04} },
+    { 'U', {0x11,0x11,0x11,0x11,0x11,0x11,0x0E} },
+    { 'V', {0x11,0x11,0x11,0x11,0x11,0x0A,0x04} },
+    { 'W', {0x11,0x11,0x11,0x11,0x15,0x1B,0x11} },
+    { 'X', {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11} },
+    { 'Y', {0x11,0x11,0x0A,0x04,0x04,0x04,0x04} },
+    { 'Z', {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F} },
+};
+
+static const UINT8 *llmk_font5x7_get(char c) {
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    for (UINTN i = 0; i < (sizeof(g_font_5x7) / sizeof(g_font_5x7[0])); i++) {
+        if (g_font_5x7[i].c == c) return g_font_5x7[i].rows;
+    }
+    // fallback
+    for (UINTN i = 0; i < (sizeof(g_font_5x7) / sizeof(g_font_5x7[0])); i++) {
+        if (g_font_5x7[i].c == '?') return g_font_5x7[i].rows;
+    }
+    return NULL;
+}
+
+static void llmk_tui_set_event(const char *msg) {
+    if (!msg) { g_tui_last_event[0] = 0; return; }
+    llmk_ascii_copy_cap(g_tui_last_event, (int)sizeof(g_tui_last_event), msg);
+    g_tui_dirty = 1;
+}
+
+static void llmk_tr_clear(void) {
+    g_tr_write = 0;
+    g_tr_count = 0;
+    g_tr_cur_len = 0;
+    g_tr_scroll = 0;
+    g_tr_cur[0] = 0;
+    for (UINT32 i = 0; i < LLMK_TR_LINES; i++) g_tr_lines[i][0] = 0;
+    g_tui_dirty = 1;
+}
+
+static void llmk_tr_push_line(const char *line) {
+    if (!line) line = "";
+
+    UINT32 idx = g_tr_write % LLMK_TR_LINES;
+    g_tr_write = (g_tr_write + 1) % LLMK_TR_LINES;
+    if (g_tr_count < LLMK_TR_LINES) g_tr_count++;
+
+    int p = 0;
+    for (const char *s = line; *s && p + 1 < (int)LLMK_TR_COLS; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '\r') continue;
+        if (c == '\t') c = ' ';
+        if (c < 0x20 || c > 0x7E) c = '?';
+        g_tr_lines[idx][p++] = (char)c;
+    }
+    g_tr_lines[idx][p] = 0;
+    g_tui_dirty = 1;
+}
+
+static void llmk_tr_flush_cur_line(void) {
+    g_tr_cur[g_tr_cur_len] = 0;
+    llmk_tr_push_line(g_tr_cur);
+    g_tr_cur_len = 0;
+    g_tr_cur[0] = 0;
+}
+
+static void llmk_tr_note(const char *msg) {
+    llmk_tr_push_line(msg);
+}
+
+static void llmk_tr_push_prefixed(const char *prefix, const char *msg) {
+    char line[LLMK_TR_COLS];
+    int p = 0;
+    line[0] = 0;
+    if (!prefix) prefix = "";
+    if (!msg) msg = "";
+    for (const char *s = prefix; *s && p + 1 < (int)sizeof(line); s++) line[p++] = *s;
+    for (const char *s = msg; *s && p + 1 < (int)sizeof(line); s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '\r') continue;
+        if (c == '\t') c = ' ';
+        if (c < 0x20 || c > 0x7E) c = '?';
+        line[p++] = (char)c;
+    }
+    line[p] = 0;
+    llmk_tr_push_line(line);
+}
+
+static const char *llmk_tr_get_line_by_age(UINT32 age_from_newest) {
+    // age_from_newest=0 -> newest line
+    if (g_tr_count == 0) return "";
+    if (age_from_newest >= g_tr_count) age_from_newest = g_tr_count - 1;
+
+    UINT32 newest = (g_tr_write + LLMK_TR_LINES - 1) % LLMK_TR_LINES;
+    UINT32 idx = (newest + LLMK_TR_LINES - (age_from_newest % LLMK_TR_LINES)) % LLMK_TR_LINES;
+    return g_tr_lines[idx];
+}
+
+static void llmk_tr_append_ascii_bytes(const unsigned char *bytes, int len) {
+    if (!bytes || len <= 0) return;
+
+    for (int i = 0; i < len; i++) {
+        unsigned char c = bytes[i];
+        if (c == 0) continue;
+        if (c == '\r' || c == '\n') {
+            llmk_tr_flush_cur_line();
+            continue;
+        }
+        if (c == '\t') c = ' ';
+        if (c < 0x20 || c > 0x7E) c = '?';
+        if (g_tr_cur_len + 1 >= (int)sizeof(g_tr_cur)) {
+            llmk_tr_flush_cur_line();
+        }
+        g_tr_cur[g_tr_cur_len++] = (char)c;
+    }
+    g_tr_cur[g_tr_cur_len] = 0;
+}
+
+static void llmk_tui_on_prompt_best_effort(const char *prompt) {
+    if (!g_tui_enabled || !g_gop_fb32) return;
+    if (!prompt || prompt[0] == 0) {
+        llmk_tui_set_event("(empty)");
+        llmk_tui_redraw_best_effort();
         return;
     }
+
+    if (prompt[0] == '/') {
+        char cmd[64];
+        int n = 0;
+        while (prompt[n] && !llmk_ascii_is_space(prompt[n]) && prompt[n] != ';' && n + 1 < (int)sizeof(cmd)) {
+            cmd[n] = prompt[n];
+            n++;
+        }
+        cmd[n] = 0;
+        llmk_tui_set_event(cmd[0] ? cmd : "/");
+    } else {
+        llmk_tui_set_event("prompt");
+    }
+
+    llmk_tui_redraw_best_effort();
+}
+
+static void llmk_ascii_append_cap(char *dst, int dst_cap, const char *src) {
+    if (!dst || dst_cap <= 0) return;
+    if (!src) return;
+    int n = 0;
+    while (n < dst_cap && dst[n]) n++;
+    if (n >= dst_cap - 1) return;
+    int i = 0;
+    while (src[i] && n + 1 < dst_cap) {
+        dst[n++] = src[i++];
+    }
+    dst[n] = 0;
+}
+
+static void llmk_tui_append_u32(char *dst, int cap, UINT32 v) {
+    if (!dst || cap <= 0) return;
+    int pos = 0;
+    while (pos < cap && dst[pos]) pos++;
+    pos = llmk_ascii_append_u32(dst, cap, pos, v);
+    if (pos < cap) dst[pos] = 0;
+    else dst[cap - 1] = 0;
+}
+
+static void llmk_gop_draw_char5x7(UINT32 x, UINT32 y, UINT32 scale,
+                                 UINT8 fg_r, UINT8 fg_g, UINT8 fg_b,
+                                 UINT8 bg_r, UINT8 bg_g, UINT8 bg_b,
+                                 char c) {
+    const UINT8 *rows = llmk_font5x7_get(c);
+    if (!rows) return;
+
+    // Background cell (5x7 + 1 column gap)
+    llmk_gop_fill_rect_solid(x, y, (5U + 1U) * scale, 7U * scale, bg_r, bg_g, bg_b);
+    for (UINT32 yy = 0; yy < 7; yy++) {
+        UINT8 bits = rows[yy] & 0x1FU;
+        for (UINT32 xx = 0; xx < 5; xx++) {
+            UINT8 on = (UINT8)((bits >> (4 - xx)) & 1U);
+            if (on) {
+                llmk_gop_fill_rect_solid(x + xx * scale, y + yy * scale, scale, scale, fg_r, fg_g, fg_b);
+            }
+        }
+    }
+}
+
+static void llmk_gop_draw_text5x7(UINT32 x, UINT32 y, UINT32 scale,
+                                 UINT8 fg_r, UINT8 fg_g, UINT8 fg_b,
+                                 UINT8 bg_r, UINT8 bg_g, UINT8 bg_b,
+                                 const char *text) {
+    if (!text) return;
+    UINT32 cx = x;
+    for (const char *p = text; *p; p++) {
+        llmk_gop_draw_char5x7(cx, y, scale, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b, *p);
+        cx += (5U + 1U) * scale;
+    }
+}
+
+static void llmk_ui_draw_text_clipped(UINT32 x, UINT32 y, UINT32 scale,
+                                     UINT8 fg_r, UINT8 fg_g, UINT8 fg_b,
+                                     UINT8 bg_r, UINT8 bg_g, UINT8 bg_b,
+                                     const char *text, int max_chars) {
+    if (!text || max_chars <= 0) return;
+    char tmp[256];
+    int p = 0;
+    for (const char *s = text; *s && p + 1 < (int)sizeof(tmp) && p < max_chars; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c < 0x20 || c > 0x7E) c = '?';
+        tmp[p++] = (char)c;
+    }
+    tmp[p] = 0;
+    llmk_gop_draw_text5x7(x, y, scale, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b, tmp);
+}
+
+static void llmk_char16_to_ascii_cap(char *dst, int cap, const CHAR16 *src) {
+    if (!dst || cap <= 0) return;
+    dst[0] = 0;
+    if (!src) return;
+    int p = 0;
+    for (int i = 0; src[i] && p + 1 < cap; i++) {
+        UINT16 ch = (UINT16)src[i];
+        char c = (ch < 0x80) ? (char)ch : '?';
+        if ((unsigned char)c < 0x20) c = ' ';
+        dst[p++] = c;
+    }
+    dst[p] = 0;
+}
+
+static void llmk_fb_clear_preview(void) {
+    g_fb_preview_count = 0;
+    for (int i = 0; i < LLMK_FB_PREVIEW_LINES; i++) g_fb_preview[i][0] = 0;
+}
+
+static int llmk_read_file_prefix_best_effort(const CHAR16 *path, UINTN max_bytes, void **out_buf, UINTN *out_len) {
+    if (out_buf) *out_buf = NULL;
+    if (out_len) *out_len = 0;
+    if (!path || !out_buf || !out_len) return 0;
+    if (!g_root) return 0;
+    if (max_bytes == 0) return 0;
+    if (max_bytes > (256U * 1024U)) max_bytes = (256U * 1024U);
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_read_file(&f, path);
+    if (EFI_ERROR(st) || !f) return 0;
+
+    void *buf = NULL;
+    st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, max_bytes + 1, &buf);
+    if (EFI_ERROR(st) || !buf) {
+        uefi_call_wrapper(f->Close, 1, f);
+        return 0;
+    }
+
+    UINTN want = max_bytes;
+    EFI_STATUS st2 = uefi_call_wrapper(f->Read, 3, f, &want, buf);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st2)) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        return 0;
+    }
+    ((UINT8 *)buf)[want] = 0;
+    *out_buf = buf;
+    *out_len = want;
+    return 1;
+}
+
+static void llmk_fb_build_preview_from_bytes(const void *raw, UINTN raw_len) {
+    llmk_fb_clear_preview();
+    if (!raw || raw_len == 0) return;
+
+    const UINT8 *b = (const UINT8 *)raw;
+    UINTN n = raw_len;
+    if (n > (UINTN)(LLMK_FB_PREVIEW_LINES * LLMK_FB_PREVIEW_COLS * 2)) {
+        n = (UINTN)(LLMK_FB_PREVIEW_LINES * LLMK_FB_PREVIEW_COLS * 2);
+    }
+
+    int line = 0;
+    int col = 0;
+
+    // UTF-16 BOM detection (LE/BE). Down-convert to ASCII-ish.
+    if (n >= 2 && ((b[0] == 0xFF && b[1] == 0xFE) || (b[0] == 0xFE && b[1] == 0xFF))) {
+        int is_le = (b[0] == 0xFF);
+        UINTN chars = (n - 2) / 2;
+        for (UINTN i = 0; i < chars; i++) {
+            UINT8 lo = b[2 + i * 2 + 0];
+            UINT8 hi = b[2 + i * 2 + 1];
+            UINT16 ch = is_le ? (UINT16)(lo | ((UINT16)hi << 8)) : (UINT16)(hi | ((UINT16)lo << 8));
+            if (ch == 0) break;
+            char c = (ch < 0x80) ? (char)ch : '?';
+            if (c == '\r') continue;
+            if (c == '\n') { g_fb_preview[line][col] = 0; line++; col = 0; if (line >= LLMK_FB_PREVIEW_LINES) break; continue; }
+            if (c == '\t') c = ' ';
+            if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7E) c = '?';
+            if (col + 1 >= LLMK_FB_PREVIEW_COLS) { g_fb_preview[line][col] = 0; line++; col = 0; if (line >= LLMK_FB_PREVIEW_LINES) break; }
+            g_fb_preview[line][col++] = c;
+        }
+    } else {
+        for (UINTN i = 0; i < n; i++) {
+            UINT8 ch = b[i];
+            if (ch == 0) break;
+            char c = (char)ch;
+            if (c == '\r') continue;
+            if (c == '\n') { g_fb_preview[line][col] = 0; line++; col = 0; if (line >= LLMK_FB_PREVIEW_LINES) break; continue; }
+            if (c == '\t') c = ' ';
+            if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7E) c = '?';
+            if (col + 1 >= LLMK_FB_PREVIEW_COLS) { g_fb_preview[line][col] = 0; line++; col = 0; if (line >= LLMK_FB_PREVIEW_LINES) break; }
+            g_fb_preview[line][col++] = c;
+        }
+    }
+
+    if (line < LLMK_FB_PREVIEW_LINES) {
+        g_fb_preview[line][col] = 0;
+        g_fb_preview_count = line + 1;
+    } else {
+        g_fb_preview_count = LLMK_FB_PREVIEW_LINES;
+    }
+}
+
+static int llmk_fb_refresh_best_effort(void) {
+    if (!g_root) return 0;
+
+    for (int i = 0; i < LLMK_FB_MAX_ENTRIES; i++) {
+        g_fb_entries[i].name16[0] = 0;
+        g_fb_entries[i].name8[0] = 0;
+        g_fb_entries[i].is_dir = 0;
+        g_fb_entries[i].size = 0;
+    }
+    g_fb_count = 0;
+    llmk_fb_clear_preview();
+
+    EFI_FILE_HANDLE dir = NULL;
+    int close_dir = 0;
+
+    if (!g_fb_path16[0] || llmk_char16_streq(g_fb_path16, L".") || llmk_char16_streq(g_fb_path16, L"\\")) {
+        dir = g_root;
+        close_dir = 0;
+    } else {
+        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &dir, (CHAR16 *)g_fb_path16, EFI_FILE_MODE_READ, 0);
+        if (EFI_ERROR(st) || !dir) return 0;
+        close_dir = 1;
+    }
+
+    uefi_call_wrapper(dir->SetPosition, 2, dir, 0);
+
+    UINTN buf_cap = 1024;
+    void *buf = NULL;
+    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, buf_cap, &buf);
+    if (EFI_ERROR(st) || !buf) {
+        if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+        return 0;
+    }
+
+    while (g_fb_count < LLMK_FB_MAX_ENTRIES) {
+        UINTN sz = buf_cap;
+        st = uefi_call_wrapper(dir->Read, 3, dir, &sz, buf);
+        if (EFI_ERROR(st) || sz == 0) break;
+
+        EFI_FILE_INFO *info = (EFI_FILE_INFO *)buf;
+        if (info->FileName && (llmk_char16_streq(info->FileName, L".") || llmk_char16_streq(info->FileName, L".."))) {
+            continue;
+        }
+
+        LlmkFbEntry *e = &g_fb_entries[g_fb_count++];
+        e->is_dir = (info->Attribute & EFI_FILE_DIRECTORY) ? 1 : 0;
+        e->size = info->FileSize;
+        if (info->FileName) {
+            StrnCpy(e->name16, info->FileName, (sizeof(e->name16) / sizeof(e->name16[0])) - 1);
+            e->name16[(sizeof(e->name16) / sizeof(e->name16[0])) - 1] = 0;
+            llmk_char16_to_ascii_cap(e->name8, (int)sizeof(e->name8), e->name16);
+        } else {
+            StrCpy(e->name16, L"(null)");
+            llmk_ascii_copy_cap(e->name8, (int)sizeof(e->name8), "(null)");
+        }
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+
+    if (g_fb_sel < 0) g_fb_sel = 0;
+    if (g_fb_sel >= g_fb_count) g_fb_sel = (g_fb_count > 0) ? (g_fb_count - 1) : 0;
+    return 1;
+}
+
+static void llmk_fb_preview_selected_best_effort(void) {
+    llmk_fb_clear_preview();
+    if (g_fb_count <= 0) return;
+    if (g_fb_sel < 0 || g_fb_sel >= g_fb_count) return;
+    if (g_fb_entries[g_fb_sel].is_dir) return;
+
+    CHAR16 path[192];
+    path[0] = 0;
+    if (!g_fb_path16[0] || llmk_char16_streq(g_fb_path16, L"\\") || llmk_char16_streq(g_fb_path16, L".")) {
+        // Root
+        StrCpy(path, g_fb_entries[g_fb_sel].name16);
+    } else {
+        StrCpy(path, g_fb_path16);
+        UINTN n = StrLen(path);
+        if (n > 0 && path[n - 1] != L'\\') StrCat(path, L"\\");
+        StrCat(path, g_fb_entries[g_fb_sel].name16);
+    }
+
+    void *buf = NULL;
+    UINTN len = 0;
+    if (!llmk_read_file_prefix_best_effort(path, 4096, &buf, &len)) return;
+    llmk_fb_build_preview_from_bytes(buf, len);
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
+static void llmk_tui_redraw_best_effort(void) {
+    if (!g_tui_enabled) return;
+    if (!g_gop_fb32) return;
+
+    const UINT32 scale = 2;
+    const UINT32 char_w = (5U + 1U) * scale;
+    const UINT32 line_h = 8U * scale;
+    const UINT32 pad = 6;
+
+    if (g_ui_mode == 0) {
+        // Legacy status-only panel
+        const UINT32 x = 8;
+        const UINT32 y = 8;
+        const UINT32 panel_w = 360;
+        const UINT32 panel_h = (line_h * 6U) + pad * 2U;
+
+        llmk_gop_fill_rect_solid(x, y, panel_w, panel_h, 0, 0, 32);
+        llmk_gop_fill_rect_solid(x, y, panel_w, 1, 80, 80, 120);
+        llmk_gop_fill_rect_solid(x, y + panel_h - 1, panel_w, 1, 80, 80, 120);
+
+        char line1[96];
+        char line2[96];
+        char line3[96];
+        char line4[96];
+        char line5[96];
+        char line6[96];
+        line1[0] = line2[0] = line3[0] = line4[0] = line5[0] = line6[0] = 0;
+
+        llmk_ascii_copy_cap(line1, (int)sizeof(line1), "LLMK UI [STATUS]");
+
+        llmk_ascii_copy_cap(line2, (int)sizeof(line2), "KV_POS=");
+        if (g_llmk_kv_pos > 0) llmk_tui_append_u32(line2, (int)sizeof(line2), (UINT32)g_llmk_kv_pos);
+        else llmk_ascii_append_cap(line2, (int)sizeof(line2), "0");
+
+        llmk_ascii_copy_cap(line3, (int)sizeof(line3), "OO_AUTO=");
+        llmk_ascii_append_cap(line3, (int)sizeof(line3), g_oo_auto_active ? "1" : "0");
+        llmk_ascii_append_cap(line3, (int)sizeof(line3), " OO_EXEC=");
+        llmk_ascii_append_cap(line3, (int)sizeof(line3), g_oo_exec_active ? "1" : "0");
+
+        llmk_ascii_copy_cap(line4, (int)sizeof(line4), "GEN=");
+        llmk_ascii_append_cap(line4, (int)sizeof(line4), g_tui_gen_active ? "1" : "0");
+        llmk_ascii_append_cap(line4, (int)sizeof(line4), " TOK=");
+        llmk_tui_append_u32(line4, (int)sizeof(line4), (UINT32)g_tui_gen_tokens);
+
+        llmk_ascii_copy_cap(line5, (int)sizeof(line5), "TICK=");
+        llmk_tui_append_u32(line5, (int)sizeof(line5), (UINT32)g_tui_last_tick);
+        llmk_ascii_append_cap(line5, (int)sizeof(line5), " ID=");
+        llmk_tui_append_u32(line5, (int)sizeof(line5), (UINT32)g_tui_last_id);
+
+        llmk_ascii_copy_cap(line6, (int)sizeof(line6), "EVT=");
+        if (g_tui_last_event[0]) llmk_ascii_append_cap(line6, (int)sizeof(line6), g_tui_last_event);
+        else llmk_ascii_append_cap(line6, (int)sizeof(line6), "(none)");
+
+        UINT32 ty = y + pad;
+        llmk_gop_draw_text5x7(x + pad, ty, scale, 255, 255, 255, 0, 0, 32, line1);
+        ty += line_h;
+        llmk_gop_draw_text5x7(x + pad, ty, scale, 220, 220, 255, 0, 0, 32, line2);
+        ty += line_h;
+        llmk_gop_draw_text5x7(x + pad, ty, scale, 220, 255, 220, 0, 0, 32, line3);
+        ty += line_h;
+        llmk_gop_draw_text5x7(x + pad, ty, scale, 255, 220, 220, 0, 0, 32, line4);
+        ty += line_h;
+        llmk_gop_draw_text5x7(x + pad, ty, scale, 220, 220, 220, 0, 0, 32, line5);
+        ty += line_h;
+        llmk_gop_draw_text5x7(x + pad, ty, scale, 220, 220, 220, 0, 0, 32, line6);
+
+        llmk_gop_force_update();
+        g_tui_dirty = 0;
+        return;
+    }
+
+    // Split/log/files UI
+    const UINT32 x0 = 8;
+    const UINT32 y0 = 8;
+    UINT32 w0 = (g_gop_w > 16) ? (g_gop_w - 16) : g_gop_w;
+    UINT32 h0 = (g_gop_h > 16) ? (g_gop_h - 16) : g_gop_h;
+    if (w0 < 320) w0 = 320;
+    if (h0 < 200) h0 = 200;
+
+    // Background (keep it moderate; redraws are throttled)
+    llmk_gop_fill_rect_solid(x0, y0, w0, h0, 0, 0, 0);
+
+    // Header
+    const UINT32 header_h = line_h * 2U + pad * 2U;
+    llmk_gop_fill_rect_solid(x0, y0, w0, header_h, 0, 0, 32);
+    llmk_gop_fill_rect_solid(x0, y0 + header_h, w0, 1, 80, 80, 120);
+
+    char hdr1[128];
+    char hdr2[128];
+    hdr1[0] = hdr2[0] = 0;
+
+    llmk_ascii_copy_cap(hdr1, (int)sizeof(hdr1), "LLMK UI ");
+    if (g_ui_mode == 1) llmk_ascii_append_cap(hdr1, (int)sizeof(hdr1), "[LOG]");
+    else if (g_ui_mode == 2) llmk_ascii_append_cap(hdr1, (int)sizeof(hdr1), "[SPLIT]");
+    else llmk_ascii_append_cap(hdr1, (int)sizeof(hdr1), "[FILES]");
+
+    llmk_ascii_copy_cap(hdr2, (int)sizeof(hdr2), "KV=");
+    llmk_tui_append_u32(hdr2, (int)sizeof(hdr2), (UINT32)g_llmk_kv_pos);
+    llmk_ascii_append_cap(hdr2, (int)sizeof(hdr2), " GEN=");
+    llmk_ascii_append_cap(hdr2, (int)sizeof(hdr2), g_tui_gen_active ? "1" : "0");
+    llmk_ascii_append_cap(hdr2, (int)sizeof(hdr2), " TOK=");
+    llmk_tui_append_u32(hdr2, (int)sizeof(hdr2), (UINT32)g_tui_gen_tokens);
+    llmk_ascii_append_cap(hdr2, (int)sizeof(hdr2), " EVT=");
+    if (g_tui_last_event[0]) llmk_ascii_append_cap(hdr2, (int)sizeof(hdr2), g_tui_last_event);
+    else llmk_ascii_append_cap(hdr2, (int)sizeof(hdr2), "-");
+
+    UINT32 ty = y0 + pad;
+    llmk_ui_draw_text_clipped(x0 + pad, ty, scale, 255, 255, 255, 0, 0, 32, hdr1, (int)((w0 - pad * 2U) / char_w));
+    ty += line_h;
+    llmk_ui_draw_text_clipped(x0 + pad, ty, scale, 220, 220, 220, 0, 0, 32, hdr2, (int)((w0 - pad * 2U) / char_w));
+
+    // Body panes
+    UINT32 body_y = y0 + header_h + 1;
+    UINT32 body_h = (y0 + h0 > body_y) ? ((y0 + h0) - body_y) : 0;
+    if (body_h < line_h * 2U) {
+        llmk_gop_force_update();
+        g_tui_dirty = 0;
+        return;
+    }
+
+    UINT32 log_x = x0;
+    UINT32 log_y = body_y;
+    UINT32 log_w = w0;
+    UINT32 log_h = body_h;
+
+    UINT32 files_x = 0, files_y = 0, files_w = 0, files_h = 0;
+    int show_files = (g_ui_mode >= 2);
+    if (show_files) {
+        UINT32 split = (w0 * 2U) / 3U;
+        if (split < 240) split = 240;
+        if (split + 240 > w0) split = (w0 > 240) ? (w0 - 240) : w0;
+        log_w = split;
+        files_x = x0 + log_w + 1;
+        files_y = body_y;
+        files_w = (x0 + w0 > files_x) ? ((x0 + w0) - files_x) : 0;
+        files_h = body_h;
+        llmk_gop_fill_rect_solid(x0 + log_w, body_y, 1, body_h, 80, 80, 120);
+    }
+
+    // Log pane background
+    llmk_gop_fill_rect_solid(log_x, log_y, log_w, log_h, 0, 0, 24);
+
+    // Render newest lines at bottom-ish (simple top-down with scroll)
+    int max_chars = (int)((log_w - pad * 2U) / char_w);
+    int max_lines = (int)((log_h - pad * 2U) / line_h);
+    if (max_lines < 1) max_lines = 1;
+
+    UINT32 start_age = 0;
+    if (g_tr_scroll < 0) g_tr_scroll = 0;
+    if ((UINT32)g_tr_scroll > g_tr_count) g_tr_scroll = (int)g_tr_count;
+    start_age = (UINT32)g_tr_scroll;
+
+    // Draw from newest backwards.
+    UINT32 ly = log_y + pad;
+    for (int i = 0; i < max_lines; i++) {
+        const char *line = llmk_tr_get_line_by_age(start_age + (UINT32)(max_lines - 1 - i));
+        llmk_ui_draw_text_clipped(log_x + pad, ly, scale, 220, 220, 220, 0, 0, 24, line, max_chars);
+        ly += line_h;
+    }
+
+    if (show_files && files_w > 0) {
+        llmk_gop_fill_rect_solid(files_x, files_y, files_w, files_h, 0, 16, 0);
+        int f_chars = (int)((files_w - pad * 2U) / char_w);
+        int f_lines = (int)((files_h - pad * 2U) / line_h);
+        if (f_lines < 1) f_lines = 1;
+
+        // Path header
+        char pbuf[128];
+        llmk_ascii_copy_cap(pbuf, (int)sizeof(pbuf), "PATH=");
+        llmk_ascii_append_cap(pbuf, (int)sizeof(pbuf), g_fb_path8[0] ? g_fb_path8 : "\\");
+        llmk_ui_draw_text_clipped(files_x + pad, files_y + pad, scale, 220, 255, 220, 0, 16, 0, pbuf, f_chars);
+
+        // List + preview
+        int list_lines = f_lines - 1;
+        if (list_lines < 1) list_lines = 1;
+        int preview_lines = LLMK_FB_PREVIEW_LINES;
+        if (list_lines > preview_lines + 2) {
+            list_lines = list_lines - preview_lines - 1;
+        }
+        if (list_lines < 1) list_lines = 1;
+
+        UINT32 fy = files_y + pad + line_h;
+        for (int i = 0; i < list_lines; i++) {
+            int idx = i;
+            if (idx >= g_fb_count) break;
+            char name_line[96];
+            name_line[0] = 0;
+            if (idx == g_fb_sel) llmk_ascii_append_cap(name_line, (int)sizeof(name_line), "> ");
+            else llmk_ascii_append_cap(name_line, (int)sizeof(name_line), "  ");
+            if (g_fb_entries[idx].is_dir) llmk_ascii_append_cap(name_line, (int)sizeof(name_line), "[D] ");
+            else llmk_ascii_append_cap(name_line, (int)sizeof(name_line), "    ");
+            llmk_ascii_append_cap(name_line, (int)sizeof(name_line), g_fb_entries[idx].name8);
+            llmk_ui_draw_text_clipped(files_x + pad, fy, scale,
+                                      (idx == g_fb_sel) ? 255 : 200,
+                                      (idx == g_fb_sel) ? 255 : 220,
+                                      (idx == g_fb_sel) ? 255 : 200,
+                                      0, 16, 0,
+                                      name_line,
+                                      f_chars);
+            fy += line_h;
+        }
+
+        // Preview separator
+        if (g_fb_preview_count > 0) {
+            llmk_gop_fill_rect_solid(files_x, fy, files_w, 1, 80, 120, 80);
+            fy += 2;
+            for (int i = 0; i < g_fb_preview_count && i < LLMK_FB_PREVIEW_LINES; i++) {
+                llmk_ui_draw_text_clipped(files_x + pad, fy, scale, 220, 220, 220, 0, 16, 0, g_fb_preview[i], f_chars);
+                fy += line_h;
+            }
+        }
+    }
+
+    llmk_gop_force_update();
+    g_tui_dirty = 0;
+}
+
+static void llmk_oo_on_step_gop(int id, int tick, int energy) {
+    g_tui_last_id = id;
+    g_tui_last_tick = tick;
+    g_tui_last_energy = energy;
+    if (!g_gop_fb32 || !g_gop_w || !g_gop_h) return;
+    UINT32 x = (UINT32)((tick * 13 + id * 31) % (int)g_gop_w);
+    UINT32 y = (UINT32)((tick * 7 + id * 17) % (int)g_gop_h);
+    llmk_gop_put_pixel(x, y, 0, 255, 0);
+
+    // Best-effort TUI refresh at a low cadence to avoid heavy overhead.
+    if (g_tui_enabled && ((tick & 7) == 0 || g_tui_dirty)) {
+        llmk_tui_redraw_best_effort();
+    } else {
+        llmk_gop_force_update();
+    }
+}
+
+static void llmk_gop_put_pixel(UINT32 x, UINT32 y, UINT8 r, UINT8 g, UINT8 b) {
+    if (!g_gop_fb32) return;
+    if (x >= g_gop_w || y >= g_gop_h) return;
+    UINTN idx = (UINTN)y * (UINTN)g_gop_ppsl + (UINTN)x;
+
+    int ok = 0;
+    UINT32 px = llmk_gop_pack_rgb(r, g, b, &ok);
+    if (!ok) return;
     g_gop_fb32[idx] = px;
 }
 
@@ -1065,6 +2064,233 @@ static EFI_STATUS llmk_copy_file_best_effort(const CHAR16 *src, const CHAR16 *ds
     return EFI_SUCCESS;
 }
 
+static EFI_STATUS llmk_delete_file_best_effort(const CHAR16 *name) {
+    if (!g_root || !name) return EFI_INVALID_PARAMETER;
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &f, (CHAR16 *)name,
+                                      EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
+    if (EFI_ERROR(st) || !f) return st;
+    // Delete closes the handle.
+    return uefi_call_wrapper(f->Delete, 1, f);
+}
+
+static EFI_STATUS llmk_open_binary_file_append(EFI_FILE_HANDLE *out, const CHAR16 *name) {
+    if (!out) return EFI_INVALID_PARAMETER;
+    *out = NULL;
+    if (!g_root || !name) return EFI_NOT_READY;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &f, (CHAR16 *)name,
+                                      EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
+    if (EFI_ERROR(st) || !f) return st;
+
+    // Seek to end
+    UINT64 file_size = 0;
+    {
+        EFI_GUID FileInfoGuid = EFI_FILE_INFO_ID;
+        UINTN info_size = 0;
+        EFI_STATUS s2 = uefi_call_wrapper(f->GetInfo, 4, f, &FileInfoGuid, &info_size, NULL);
+        if (s2 == EFI_BUFFER_TOO_SMALL && info_size > 0) {
+            EFI_FILE_INFO *info = NULL;
+            s2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, info_size, (void **)&info);
+            if (!EFI_ERROR(s2) && info) {
+                s2 = uefi_call_wrapper(f->GetInfo, 4, f, &FileInfoGuid, &info_size, info);
+                if (!EFI_ERROR(s2)) file_size = info->FileSize;
+                uefi_call_wrapper(BS->FreePool, 1, info);
+            }
+        }
+    }
+    uefi_call_wrapper(f->SetPosition, 2, f, file_size);
+    *out = f;
+    return EFI_SUCCESS;
+}
+
+static int llmk_char16_streq(const CHAR16 *a, const CHAR16 *b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++;
+        b++;
+    }
+    return (*a == 0 && *b == 0);
+}
+
+static void llmk_print_u64(UINT64 v) {
+    // Print decimal without relying on format widths.
+    CHAR16 buf[32];
+    int p = 0;
+    if (v == 0) {
+        buf[p++] = L'0';
+    } else {
+        CHAR16 rev[32];
+        int rn = 0;
+        while (v > 0 && rn < (int)(sizeof(rev) / sizeof(rev[0]))) {
+            rev[rn++] = (CHAR16)(L'0' + (v % 10));
+            v /= 10;
+        }
+        while (rn > 0 && p + 1 < (int)(sizeof(buf) / sizeof(buf[0]))) buf[p++] = rev[--rn];
+    }
+    buf[p] = 0;
+    Print(L"%s", buf);
+}
+
+static void llmk_fs_ls_best_effort(const CHAR16 *path, int max_entries) {
+    if (!g_root) {
+        Print(L"\r\nERROR: file system not ready\r\n\r\n");
+        return;
+    }
+    if (max_entries <= 0) max_entries = 200;
+    if (max_entries > 500) max_entries = 500;
+
+    EFI_FILE_HANDLE dir = NULL;
+    int close_dir = 0;
+
+    if (!path || path[0] == 0 || llmk_char16_streq(path, L".") || llmk_char16_streq(path, L"\\")) {
+        dir = g_root;
+        close_dir = 0;
+    } else {
+        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &dir, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
+        if (EFI_ERROR(st) || !dir) {
+            Print(L"\r\nERROR: cannot open %s: %r\r\n\r\n", (CHAR16 *)path, st);
+            return;
+        }
+        close_dir = 1;
+    }
+
+    // Rewind
+    uefi_call_wrapper(dir->SetPosition, 2, dir, 0);
+
+    UINTN printed = 0;
+    UINTN buf_cap = 1024;
+    void *buf = NULL;
+    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, buf_cap, &buf);
+    if (EFI_ERROR(st) || !buf) {
+        if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+        Print(L"\r\nERROR: OOM\r\n\r\n");
+        return;
+    }
+
+    while (printed < (UINTN)max_entries) {
+        UINTN sz = buf_cap;
+        st = uefi_call_wrapper(dir->Read, 3, dir, &sz, buf);
+        if (EFI_ERROR(st)) {
+            Print(L"\r\nERROR: ls read failed: %r\r\n\r\n", st);
+            break;
+        }
+        if (sz == 0) break;
+
+        EFI_FILE_INFO *info = (EFI_FILE_INFO *)buf;
+        // Skip . and ..
+        if (info->FileName && (llmk_char16_streq(info->FileName, L".") || llmk_char16_streq(info->FileName, L".."))) {
+            continue;
+        }
+
+        Print(L"  ");
+        if (info->Attribute & EFI_FILE_DIRECTORY) {
+            Print(L"<DIR> ");
+        } else {
+            Print(L"      ");
+        }
+        if (info->Attribute & EFI_FILE_DIRECTORY) {
+            Print(L"      ");
+        } else {
+            llmk_print_u64(info->FileSize);
+            // pad to ~10 chars (best-effort)
+            Print(L" ");
+        }
+        Print(L" %s\r\n", info->FileName ? info->FileName : L"(null)");
+        printed++;
+    }
+
+    if (printed == 0) {
+        Print(L"  (empty)\r\n");
+    }
+    if (printed >= (UINTN)max_entries) {
+        Print(L"  ... (truncated)\r\n");
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+}
+
+static void llmk_fs_cat_best_effort(const CHAR16 *path, UINTN max_bytes) {
+    if (max_bytes == 0) max_bytes = (256U * 1024U);
+    if (max_bytes > (1024U * 1024U)) max_bytes = (1024U * 1024U);
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(path, &raw, &raw_len);
+    if (EFI_ERROR(st)) {
+        Print(L"\r\nERROR: cat failed: %r\r\n\r\n", st);
+        return;
+    }
+
+    UINT8 *b = (UINT8 *)raw;
+    UINTN n = raw_len;
+    if (n > max_bytes) n = max_bytes;
+
+    // UTF-16 BOM detection (LE/BE). Print best-effort ASCII.
+    if (n >= 2 && ((b[0] == 0xFF && b[1] == 0xFE) || (b[0] == 0xFE && b[1] == 0xFF))) {
+        int is_le = (b[0] == 0xFF);
+        UINTN chars = (n - 2) / 2;
+        for (UINTN i = 0; i < chars; i++) {
+            UINT8 lo = b[2 + i * 2 + 0];
+            UINT8 hi = b[2 + i * 2 + 1];
+            UINT16 ch = is_le ? (UINT16)(lo | ((UINT16)hi << 8)) : (UINT16)(hi | ((UINT16)lo << 8));
+            if (ch == 0) break;
+            CHAR16 out = (ch < 0x80) ? (CHAR16)ch : L'?';
+            Print(L"%c", out);
+        }
+    } else {
+        for (UINTN i = 0; i < n; i++) {
+            UINT8 c = b[i];
+            if (c == 0) break;
+            // Print ASCII; map CR to LF
+            if (c == '\r') c = '\n';
+            if (c == '\n' || c == '\t' || (c >= 0x20 && c <= 0x7E)) {
+                Print(L"%c", (CHAR16)c);
+            }
+        }
+    }
+    Print(L"\r\n");
+
+    if (raw_len > max_bytes) {
+        Print(L"(truncated to %d bytes)\r\n", (int)max_bytes);
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, raw);
+}
+
+typedef struct {
+    UINT32 magic;      // 'SNP1'
+    UINT32 version;    // 1
+    UINT32 dim;
+    UINT32 n_layers;
+    UINT32 n_heads;
+    UINT32 n_kv_heads;
+    UINT32 seq_len;
+    UINT32 kv_dim;
+    UINT32 kv_pos;
+} LlmkSnapHeader;
+
+#define LLMK_SNAP_MAGIC 0x31504E53u
+
+static EFI_STATUS llmk_write_exact(EFI_FILE_HANDLE f, const void *src, UINTN total_bytes) {
+    const UINT8 *p = (const UINT8 *)src;
+    UINTN remaining = total_bytes;
+    while (remaining > 0) {
+        UINTN chunk = remaining;
+        if (chunk > (8U * 1024U * 1024U)) chunk = (8U * 1024U * 1024U);
+        UINTN nb = chunk;
+        EFI_STATUS st = uefi_call_wrapper(f->Write, 3, f, &nb, (void *)p);
+        if (EFI_ERROR(st)) return st;
+        if (nb != chunk) return EFI_DEVICE_ERROR;
+        p += nb;
+        remaining -= nb;
+    }
+    return EFI_SUCCESS;
+}
+
 // ============================================================================
 // AUTORUN SCRIPT (best-effort)
 // ============================================================================
@@ -1340,6 +2566,9 @@ static UINT64 g_budget_decode_cycles = 0;
 static int g_cfg_autorun_autostart = 0;
 static int g_cfg_autorun_shutdown_when_done = 0;
 static CHAR16 g_cfg_autorun_file[96] = L"llmk-autorun.txt";
+
+// Boot logging verbosity. 0=quiet (default), 1=verbose.
+static int g_boot_verbose = 0;
 static int g_cfg_loaded = 0;
 
 // Rate-limit budget overrun prints (avoid flooding console).
@@ -1350,6 +2579,8 @@ static UINT32 g_budget_overruns_decode = 0;
 static void set_seed(unsigned int seed);
 // Forward decl (used by model override reader before definition)
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
+// Forward decl (used by repl.cfg editor helper before definition)
+static int my_strlen(const char* s);
 
 static void llmk_reset_runtime_state(void) {
     // Budgets
@@ -1429,6 +2660,7 @@ static EFI_STATUS read_exact(EFI_FILE_HANDLE file, void *dst, UINTN total_bytes)
     UINTN remaining = total_bytes;
     UINTN done = 0;
     UINTN next_report = 0;
+    UINTN next_ui = 0;
     while (remaining > 0) {
         UINTN chunk = remaining;
         // Large reads can fail on some UEFI implementations; keep chunks modest.
@@ -1442,12 +2674,22 @@ static EFI_STATUS read_exact(EFI_FILE_HANDLE file, void *dst, UINTN total_bytes)
         if (got > remaining) return EFI_LOAD_ERROR;
         remaining -= got;
 
+        // Animated UI (cheap): update every ~8MB for large reads.
+        if (total_bytes >= (64U * 1024U * 1024U)) {
+            if (done >= next_ui) {
+                InterfaceFx_ProgressBytes(done, total_bytes);
+                next_ui = done + (8U * 1024U * 1024U);
+            }
+        }
+
         // Progress (avoid spamming): report every 64MB for large reads.
         if (total_bytes >= (128U * 1024U * 1024U)) {
             if (done >= next_report) {
                 UINTN mb_done = done / (1024U * 1024U);
                 UINTN mb_total = total_bytes / (1024U * 1024U);
-                Print(L"  Reading weights... %d / %d MB\r\n", (int)mb_done, (int)mb_total);
+                if (g_boot_verbose) {
+                    Print(L"  Reading weights... %d / %d MB\r\n", (int)mb_done, (int)mb_total);
+                }
                 next_report = done + (64U * 1024U * 1024U);
             }
         }
@@ -1577,6 +2819,72 @@ static int llmk_read_cfg_model_best_effort(EFI_FILE_HANDLE Root, CHAR16 *out, in
     }
 
     return 0;
+}
+
+static void llmk_load_repl_cfg_boot_best_effort(void) {
+    // Best-effort: read repl.cfg early and pick only boot verbosity keys.
+    // Supported keys:
+    //   boot_verbose=0/1
+    //   boot_quiet=0/1  (inverse of boot_verbose)
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_read_file(&f, L"repl.cfg");
+    if (EFI_ERROR(st) || !f) return;
+
+    char buf[2048];
+    UINTN sz = sizeof(buf) - 1;
+    st = uefi_call_wrapper(f->Read, 3, f, &sz, buf);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || sz == 0) return;
+    buf[sz] = 0;
+
+    char *p = buf;
+    while (*p) {
+        // Extract a line.
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        // Trim CR.
+        for (char *c = line; *c; c++) {
+            if (*c == '\r') { *c = 0; break; }
+        }
+
+        // Skip comments/empty.
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+        if (line[0] == '#' || line[0] == ';') continue;
+
+        // Strip inline comment.
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0) continue;
+
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        if (llmk_cfg_streq_ci(key, "boot_verbose") || llmk_cfg_streq_ci(key, "verbose_boot")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_boot_verbose = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "boot_quiet") || llmk_cfg_streq_ci(key, "quiet_boot")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_boot_verbose = (b != 0) ? 0 : 1;
+            }
+        }
+    }
 }
 
 static int llmk_cfg_parse_u64(const char *s, UINT64 *out) {
@@ -1853,7 +3161,9 @@ static void llmk_load_repl_cfg_best_effort(
 
     if (applied) {
         g_cfg_loaded = 1;
-        Print(L"[cfg] repl.cfg loaded\r\n");
+        if (g_boot_verbose) {
+            Print(L"[cfg] repl.cfg loaded\r\n");
+        }
     }
 }
 
@@ -1958,6 +3268,365 @@ static void llmk_load_repl_cfg_oo_best_effort(
             }
         }
     }
+}
+
+static void llmk_load_repl_cfg_snap_best_effort(
+    int *snap_autoload,
+    char *snap_file_out,
+    int snap_file_cap
+) {
+    if (snap_autoload) *snap_autoload = 0;
+    if (snap_file_out && snap_file_cap > 0) snap_file_out[0] = 0;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_read_file(&f, L"repl.cfg");
+    if (EFI_ERROR(st)) return;
+
+    char buf[4096];
+    UINTN sz = sizeof(buf) - 1;
+    st = uefi_call_wrapper(f->Read, 3, f, &sz, buf);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || sz == 0) return;
+    buf[sz] = 0;
+
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+        if (line[0] == '#' || line[0] == ';') continue;
+
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0) continue;
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        if (llmk_cfg_streq_ci(key, "snap_autoload") || llmk_cfg_streq_ci(key, "snap_load_on_boot")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                if (snap_autoload) *snap_autoload = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "snap_file") || llmk_cfg_streq_ci(key, "snap_autoload_file")) {
+            if (snap_file_out && snap_file_cap > 0) {
+                llmk_cfg_copy_ascii_token(snap_file_out, snap_file_cap, val);
+            }
+        }
+    }
+}
+
+static void llmk_load_repl_cfg_djibion_best_effort(DjibionEngine *e) {
+    if (!e) return;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_read_file(&f, L"repl.cfg");
+    if (EFI_ERROR(st)) return;
+
+    char buf[4096];
+    UINTN sz = sizeof(buf) - 1;
+    st = uefi_call_wrapper(f->Read, 3, f, &sz, buf);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || sz == 0) return;
+    buf[sz] = 0;
+
+    int applied = 0;
+
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+        if (line[0] == '#' || line[0] == ';') continue;
+
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0) continue;
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        if (llmk_cfg_streq_ci(key, "djibion_mode")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > 2) v = 2;
+                djibion_set_mode(e, (DjibionMode)v);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_prefix") || llmk_cfg_streq_ci(key, "djibion_fs_prefix") || llmk_cfg_streq_ci(key, "fs_mut_prefix")) {
+            if (val && val[0]) {
+                llmk_cfg_copy_ascii_token(e->laws.fs_mut_prefix, (int)sizeof(e->laws.fs_mut_prefix), val);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_allow_delete") || llmk_cfg_streq_ci(key, "djibion_allow_fs_delete")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                e->laws.allow_fs_delete = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_allow_write") || llmk_cfg_streq_ci(key, "djibion_allow_fs_write")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                e->laws.allow_fs_write = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_allow_snap_load")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                e->laws.allow_snap_load = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_allow_snap_save")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                e->laws.allow_snap_save = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_allow_cfg_write") || llmk_cfg_streq_ci(key, "djibion_allow_config_write")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                e->laws.allow_cfg_write = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_max_write") || llmk_cfg_streq_ci(key, "djibion_max_fs_write_bytes")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > (1024 * 1024)) v = (1024 * 1024);
+                e->laws.max_fs_write_bytes = (UINT32)v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_max_snap") || llmk_cfg_streq_ci(key, "djibion_max_snap_bytes")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > (1024 * 1024 * 1024)) v = (1024 * 1024 * 1024);
+                e->laws.max_snap_bytes = (UINT32)v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_max_oo") || llmk_cfg_streq_ci(key, "djibion_max_oo_cycles")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > 64) v = 64;
+                e->laws.max_oo_cycles = (UINT32)v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_allow_autorun")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                e->laws.allow_autorun = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_allow_oo_persist")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                e->laws.allow_oo_persist = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_allow_oo_exec")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                e->laws.allow_oo_exec = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "djibion_allow_oo_auto")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                e->laws.allow_oo_auto = (b != 0);
+                applied = 1;
+            }
+        }
+    }
+
+    if (applied) {
+        Print(L"[cfg] djibion: mode=%s prefix=",
+              (CHAR16 *)djibion_mode_name(e->mode));
+        if (e->laws.fs_mut_prefix[0]) {
+            llmk_print_ascii(e->laws.fs_mut_prefix);
+        } else {
+            Print(L"(none)");
+        }
+        Print(L"\r\n");
+    }
+}
+
+static int llmk_cfg_line_has_key_ci(const char *line, const char *key) {
+    if (!line || !key) return 0;
+
+    const char *p = line;
+    while (*p && llmk_cfg_is_space(*p)) p++;
+
+    // Allow commented-out keys like: # snap_autoload=1
+    if (*p == '#' || *p == ';') {
+        p++;
+        while (*p && llmk_cfg_is_space(*p)) p++;
+    }
+
+    // Parse key token up to '=' or whitespace.
+    char kbuf[64];
+    int kp = 0;
+    while (*p && *p != '=' && !llmk_cfg_is_space(*p) && *p != '#' && *p != ';') {
+        if (kp + 1 < (int)sizeof(kbuf)) {
+            kbuf[kp++] = llmk_cfg_tolower(*p);
+        }
+        p++;
+    }
+    kbuf[kp] = 0;
+    if (kbuf[0] == 0) return 0;
+
+    // Skip spaces before '='.
+    while (*p && llmk_cfg_is_space(*p)) p++;
+    if (*p != '=') return 0;
+
+    return llmk_cfg_streq_ci(kbuf, key);
+}
+
+static void llmk_cfg_out_append(char *out, int *op, int out_cap, const char *s) {
+    if (!out || !op || out_cap <= 0 || !s) return;
+    int p = *op;
+    while (*s && p + 1 < out_cap) out[p++] = *s++;
+    out[p] = 0;
+    *op = p;
+}
+
+static EFI_STATUS llmk_repl_cfg_set_kv_best_effort(const char *key, const char *val) {
+    if (!key || !val) return EFI_INVALID_PARAMETER;
+    if (!g_root) return EFI_NOT_READY;
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS read_st = llmk_read_entire_file_best_effort(L"repl.cfg", &raw, &raw_len);
+
+    // Make a mutable NUL-terminated copy (ASCII).
+    char *in = NULL;
+    UINTN in_len = 0;
+    if (!EFI_ERROR(read_st) && raw && raw_len > 0) {
+        in_len = raw_len;
+        EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, (UINTN)(in_len + 1), (void **)&in);
+        if (EFI_ERROR(st2) || !in) {
+            uefi_call_wrapper(BS->FreePool, 1, raw);
+            return EFI_OUT_OF_RESOURCES;
+        }
+        CopyMem(in, raw, in_len);
+        in[in_len] = 0;
+        uefi_call_wrapper(BS->FreePool, 1, raw);
+        raw = NULL;
+        raw_len = 0;
+    } else {
+        // Missing/empty file: start fresh.
+        const char *stub = "# repl.cfg (generated best-effort)\r\n";
+        in_len = (UINTN)my_strlen(stub);
+        EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, (UINTN)(in_len + 1), (void **)&in);
+        if (EFI_ERROR(st2) || !in) return EFI_OUT_OF_RESOURCES;
+        CopyMem(in, stub, in_len);
+        in[in_len] = 0;
+        read_st = EFI_NOT_FOUND;
+    }
+
+    int out_cap = (int)in_len + 512;
+    if (out_cap < 1024) out_cap = 1024;
+    if (out_cap > 64 * 1024) out_cap = 64 * 1024;
+
+    char *out = NULL;
+    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, (UINTN)out_cap, (void **)&out);
+    if (EFI_ERROR(st) || !out) {
+        uefi_call_wrapper(BS->FreePool, 1, in);
+        return EFI_OUT_OF_RESOURCES;
+    }
+    int op = 0;
+    out[0] = 0;
+
+    int replaced = 0;
+    char *p = in;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        int had_nl = (*p == '\n');
+        if (had_nl) { *p = 0; p++; }
+
+        // Strip trailing CR for parsing/writing.
+        int ll = (int)my_strlen(line);
+        if (ll > 0 && line[ll - 1] == '\r') line[ll - 1] = 0;
+
+        if (llmk_cfg_line_has_key_ci(line, key)) {
+            llmk_cfg_out_append(out, &op, out_cap, key);
+            llmk_cfg_out_append(out, &op, out_cap, "=");
+            llmk_cfg_out_append(out, &op, out_cap, val);
+            llmk_cfg_out_append(out, &op, out_cap, "\r\n");
+            replaced = 1;
+        } else {
+            llmk_cfg_out_append(out, &op, out_cap, line);
+            llmk_cfg_out_append(out, &op, out_cap, "\r\n");
+        }
+
+        if (!had_nl) break;
+    }
+
+    if (!replaced) {
+        // Ensure trailing newline then append key.
+        if (op >= 2 && !(out[op - 2] == '\r' && out[op - 1] == '\n')) {
+            llmk_cfg_out_append(out, &op, out_cap, "\r\n");
+        }
+        llmk_cfg_out_append(out, &op, out_cap, key);
+        llmk_cfg_out_append(out, &op, out_cap, "=");
+        llmk_cfg_out_append(out, &op, out_cap, val);
+        llmk_cfg_out_append(out, &op, out_cap, "\r\n");
+    }
+
+    // Backup previous file when it existed.
+    if (!EFI_ERROR(read_st)) {
+        CHAR16 bak[64];
+        llmk_make_bak_name(L"repl.cfg", bak, (int)(sizeof(bak) / sizeof(bak[0])));
+        llmk_copy_file_best_effort(L"repl.cfg", bak);
+    }
+
+    EFI_FILE_HANDLE f = NULL;
+    st = llmk_open_binary_file(&f, L"repl.cfg");
+    if (EFI_ERROR(st) || !f) {
+        uefi_call_wrapper(BS->FreePool, 1, out);
+        uefi_call_wrapper(BS->FreePool, 1, in);
+        return st;
+    }
+
+    UINTN nb = (UINTN)my_strlen(out);
+    st = llmk_file_write_bytes(f, out, nb);
+    EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+    uefi_call_wrapper(f->Close, 1, f);
+
+    uefi_call_wrapper(BS->FreePool, 1, out);
+    uefi_call_wrapper(BS->FreePool, 1, in);
+
+    if (EFI_ERROR(st)) return st;
+    if (EFI_ERROR(flush_st)) return flush_st;
+    return EFI_SUCCESS;
 }
 
 static EFI_STATUS llmk_oo_save_to_file_best_effort(const CHAR16 *name, int *out_bytes) {
@@ -2202,6 +3871,33 @@ typedef struct {
     int vocab_size;
     int seq_len;
 } Config;
+
+static UINT32 llmk_fnv1a32_update(UINT32 h, const void *data, UINTN len) {
+    const UINT8 *p = (const UINT8 *)data;
+    for (UINTN i = 0; i < len; i++) {
+        h ^= (UINT32)p[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static UINT32 llmk_memorion_ctx_hash32(const Config *config, const CHAR16 *model_filename) {
+    UINT32 h = 2166136261u;
+    if (config) {
+        h = llmk_fnv1a32_update(h, &config->dim, sizeof(config->dim));
+        h = llmk_fnv1a32_update(h, &config->n_layers, sizeof(config->n_layers));
+        h = llmk_fnv1a32_update(h, &config->n_heads, sizeof(config->n_heads));
+        h = llmk_fnv1a32_update(h, &config->n_kv_heads, sizeof(config->n_kv_heads));
+        h = llmk_fnv1a32_update(h, &config->seq_len, sizeof(config->seq_len));
+        h = llmk_fnv1a32_update(h, &config->vocab_size, sizeof(config->vocab_size));
+    }
+    if (model_filename) {
+        char name8[128];
+        llmk_char16_to_ascii_cap(name8, (int)sizeof(name8), model_filename);
+        h = llmk_fnv1a32_update(h, name8, (UINTN)my_strlen(name8));
+    }
+    return h;
+}
 
 static void llmk_print_ctx(const Config *config,
                    const CHAR16 *model_name,
@@ -2836,6 +4532,14 @@ static void llmk_ascii_copy_cap(char *dst, int dst_cap, const char *src) {
     dst[i] = 0;
 }
 
+static int llmk_ascii_has_dotdot(const char *s) {
+    if (!s) return 0;
+    for (const char *p = s; p[0] && p[1]; p++) {
+        if (p[0] == '.' && p[1] == '.') return 1;
+    }
+    return 0;
+}
+
 static void llmk_print_ascii(const char *s) {
     if (!s) return;
     for (const char *p = s; *p; p++) {
@@ -2873,6 +4577,11 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/top_k", L"Set top-k (0=off, typical 40-200)" },
     { "/norepeat", L"No-repeat ngram (0=off, typical 3-6)" },
     { "/repeat", L"Set repetition penalty (1.0=none, 1.5=strong)" },
+    { "/sampling", L"Show sampling settings" },
+    { "/preset", L"Apply sampling preset: stable|creative|greedy" },
+    { "/preset_save", L"Apply preset and save to repl.cfg (Djibion allow_cfg_write required)" },
+    { "/autostart_engines_on", L"Generate llmk-autorun.txt + enable autorun at boot (observe|enforce) [--run]" },
+    { "/autostart_engines_off", L"Disable autorun_autostart in repl.cfg" },
     { "/max_tokens", L"Max generation tokens (1-256)" },
     { "/seed", L"RNG seed" },
     { "/stats", L"Print generation stats (0/1)" },
@@ -2888,10 +4597,44 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/log", L"Dump last n log entries" },
     { "/save_log", L"Write last n log entries to llmk-log.txt" },
     { "/save_dump", L"Write ctx+zones+sentinel+log to llmk-dump.txt" },
+    { "/cls", L"Clear the screen" },
+    { "/blas_bench", L"Benchmark Matrix Multiplication (Scalar vs SIMD)" },
     { "/gop", L"Show GOP framebuffer info" },
+    { "/tui_on", L"Enable GOP TUI overlay" },
+    { "/tui_off", L"Disable GOP TUI overlay" },
+    { "/tui_toggle", L"Toggle GOP TUI overlay" },
+    { "/tui_redraw", L"Force redraw GOP TUI overlay" },
+    { "/tui_mode", L"Set GOP UI mode: status|log|split|files" },
+    { "/tui_log_on", L"Show transcript log UI (GOP)" },
+    { "/tui_log_off", L"Return to status-only UI" },
+    { "/tui_log_clear", L"Clear transcript ring buffer" },
+    { "/tui_log_up", L"Scroll transcript up (older)" },
+    { "/tui_log_down", L"Scroll transcript down (newer)" },
+    { "/tui_log_dump", L"Dump transcript to llmk-transcript.txt" },
+    { "/fb", L"Open GOP file browser (same as /fb_on)" },
+    { "/fb_on", L"Enable GOP file browser" },
+    { "/fb_off", L"Disable GOP file browser" },
+    { "/fb_refresh", L"Refresh file browser listing" },
+    { "/fb_cd", L"File browser: change directory" },
+    { "/fb_up", L"File browser: parent directory" },
+    { "/fb_sel", L"File browser: select entry by index" },
+    { "/fb_open", L"File browser: open selection (dir->cd, file->preview)" },
     { "/render", L"Render simple shapes to GOP framebuffer" },
     { "/save_img", L"Save GOP framebuffer as PPM (default llmk-img.ppm)" },
     { "/draw", L"Ask the model to output DSL and render it (GOP required)" },
+
+    { "/fs_ls", L"List files in directory (default: root)" },
+    { "/fs_cat", L"Print a text file (best-effort; truncated)" },
+    { "/fs_write", L"Write text to file (truncate/create)" },
+    { "/fs_append", L"Append text to file (create if missing)" },
+    { "/fs_rm", L"Delete a file" },
+    { "/fs_cp", L"Copy file (best-effort)" },
+    { "/fs_mv", L"Move file (copy+delete best-effort)" },
+
+    { "/snap_save", L"Save KV cache snapshot to file (fast resume)" },
+    { "/snap_load", L"Load KV cache snapshot from file" },
+    { "/snap_autoload_on", L"Enable snapshot auto-load at boot (writes repl.cfg)" },
+    { "/snap_autoload_off", L"Disable snapshot auto-load at boot (writes repl.cfg)" },
 
     { "/oo_new", L"Create an entity (long-lived intention)" },
     { "/oo_list", L"List entities" },
@@ -2912,6 +4655,8 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/oo_think", L"Ask the model, store answer in entity notes" },
     { "/oo_auto", L"Run n think->store->step cycles (auto; press 'q' or Esc to stop)" },
     { "/oo_auto_stop", L"Stop /oo_auto cycles" },
+    { "/oo_exec", L"Run agenda items (n cycles). Stops when agenda empty unless --plan" },
+    { "/oo_exec_stop", L"Stop /oo_exec" },
 
     { "/autorun", L"Run scripted REPL commands from file (default from repl.cfg)" },
     { "/autorun_stop", L"Stop autorun" },
@@ -2920,6 +4665,63 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/clear", L"Clear KV cache (reset conversation context)" },
     { "/djibmarks", L"Show DjibMark execution trace" },
     { "/djibperf", L"DjibMark performance analysis by phase" },
+    { "/djibion_on", L"Enable Djibion (observe mode)" },
+    { "/djibion_off", L"Disable Djibion" },
+    { "/djibion_enforce", L"Set Djibion mode: 0=off 1=observe 2=enforce" },
+    { "/djibion_status", L"Show Djibion laws + counters" },
+    { "/djibion_prefix", L"Set Djibion prefix for file actions (e.g. \\test_dir\\)" },
+    { "/djibion_allow_delete", L"Set allow_fs_delete (0/1)" },
+    { "/djibion_max_write", L"Set max_fs_write_bytes" },
+    { "/djibion_max_oo", L"Set max_oo_cycles" },
+    { "/djibion_max_snap", L"Set max_snap_bytes" },
+    { "/djibion_allow_autorun", L"Set allow_autorun (0/1)" },
+    { "/djibion_allow_snap_load", L"Set allow_snap_load (0/1)" },
+    { "/djibion_allow_snap_save", L"Set allow_snap_save (0/1)" },
+    { "/djibion_allow_cfg_write", L"Set allow_cfg_write (0/1)" },
+    { "/djibion_allow_oo_persist", L"Set allow_oo_persist (0/1)" },
+
+    { "/diopion_on", L"Enable Diopion (observe mode)" },
+    { "/diopion_off", L"Disable Diopion" },
+    { "/diopion_enforce", L"Set Diopion mode: 0=off 1=observe 2=enforce" },
+    { "/diopion_profile", L"Set Diopion profile: none|animal|vegetal|geom|bio" },
+    { "/diopion_burst", L"Burst sampling for N turns (temp/topk/max_tokens)" },
+    { "/diopion_status", L"Show Diopion status + burst defaults" },
+
+    { "/mem_on", L"Enable Memorion (manifest/check helpers)" },
+    { "/mem_off", L"Disable Memorion" },
+    { "/mem_status", L"Show Memorion status + counters" },
+    { "/mem_snap_info", L"Print snapshot header info (default llmk-snap.bin)" },
+    { "/mem_snap_check", L"Check snapshot compatibility vs current model" },
+    { "/mem_manifest", L"Write manifest (optionally include snap header)" },
+
+    { "/orch_on", L"Enable Orchestrion (observe mode)" },
+    { "/orch_off", L"Disable Orchestrion" },
+    { "/orch_enforce", L"Set Orchestrion mode: 0=off 1=observe 2=enforce" },
+    { "/orch_status", L"Show Orchestrion status + pipeline state" },
+    { "/orch_clear", L"Clear pipeline" },
+    { "/orch_add", L"Add step(s) to pipeline (sep by ;)" },
+    { "/orch_start", L"Start pipeline (optionally loops)" },
+    { "/orch_pause", L"Pause pipeline" },
+    { "/orch_resume", L"Resume pipeline" },
+    { "/orch_stop", L"Stop pipeline" },
+
+    { "/calib_on", L"Enable Calibrion (observe mode)" },
+    { "/calib_off", L"Disable Calibrion" },
+    { "/calib_enforce", L"Set Calibrion mode: 0=off 1=observe 2=enforce" },
+    { "/calib_strategy", L"Set Calibrion strategy: none|entropy|length|quality|hybrid" },
+    { "/calib_status", L"Show Calibrion status + recommendation" },
+    { "/calib_reset", L"Reset Calibrion stats" },
+    { "/calib_apply", L"Apply Calibrion recommendation to sampling" },
+
+    { "/compat_on", L"Enable Compatibilion" },
+    { "/compat_off", L"Disable Compatibilion" },
+    { "/compat_status", L"Show platform capabilities" },
+    { "/compat_probe", L"Re-probe CPU features" },
+
+    { "/diag_on", L"Enable Diagnostion diagnostics" },
+    { "/diag_off", L"Disable Diagnostion diagnostics" },
+    { "/diag_status", L"Show diagnostics status + counters" },
+    { "/diag_report", L"Write llmk-diag.txt report (or /diag_report <file>)" },
     { "/version", L"Show build version + features" },
     { "/commands", L"List commands (optionally filtered)" },
     { "/help", L"Show help (optionally filtered)" },
@@ -3039,6 +4841,11 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/stop_nl",
         "/norepeat",
         "/repeat",
+        "/sampling",
+        "/preset",
+        "/preset_save",
+        "/autostart_engines_on",
+        "/autostart_engines_off",
         "/model",
         "/cpu",
         "/zones",
@@ -3049,6 +4856,37 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/log",
         "/save_log",
         "/save_dump",
+        "/diag_on",
+        "/diag_off",
+        "/diag_status",
+        "/diag_report",
+        "/mem_on",
+        "/mem_off",
+        "/mem_status",
+        "/mem_snap_info",
+        "/mem_snap_check",
+        "/mem_manifest",
+        "/orch_on",
+        "/orch_off",
+        "/orch_enforce",
+        "/orch_status",
+        "/orch_clear",
+        "/orch_add",
+        "/orch_start",
+        "/orch_pause",
+        "/orch_resume",
+        "/orch_stop",
+        "/calib_on",
+        "/calib_off",
+        "/calib_enforce",
+        "/calib_strategy",
+        "/calib_status",
+        "/calib_reset",
+        "/calib_apply",
+        "/compat_on",
+        "/compat_off",
+        "/compat_status",
+        "/compat_probe",
         "/gop",
         "/render",
         "/save_img",
@@ -3078,6 +4916,26 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/version",
         "/djibmarks",
         "/djibperf",
+        "/djibion_on",
+        "/djibion_off",
+        "/djibion_enforce",
+        "/djibion_status",
+        "/djibion_prefix",
+        "/djibion_allow_delete",
+        "/djibion_max_write",
+        "/djibion_max_oo",
+        "/djibion_max_snap",
+        "/djibion_allow_autorun",
+        "/djibion_allow_snap_load",
+        "/djibion_allow_snap_save",
+        "/djibion_allow_cfg_write",
+        "/djibion_allow_oo_persist",
+        "/diopion_on",
+        "/diopion_off",
+        "/diopion_enforce",
+        "/diopion_profile",
+        "/diopion_burst",
+        "/diopion_status",
         "/commands",
         "/help",
     };
@@ -3360,12 +5218,94 @@ void reset_kv_cache(RunState* s, Config* p) {
     }
 }
 
+static EFI_STATUS llmk_snap_load_into_state_best_effort(RunState *state, const Config *config, int *io_kv_pos, const CHAR16 *in_name) {
+    if (!state || !config || !io_kv_pos || !in_name) return EFI_INVALID_PARAMETER;
+    if (!g_llmk_ready) return EFI_NOT_READY;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_read_file(&f, in_name);
+    if (EFI_ERROR(st) || !f) return st;
+
+    LlmkSnapHeader hdr;
+    st = read_exact(f, &hdr, sizeof(hdr));
+    if (EFI_ERROR(st)) {
+        uefi_call_wrapper(f->Close, 1, f);
+        return st;
+    }
+    if (hdr.magic != LLMK_SNAP_MAGIC || hdr.version != 1) {
+        uefi_call_wrapper(f->Close, 1, f);
+        return EFI_COMPROMISED_DATA;
+    }
+    if (hdr.dim != (UINT32)config->dim ||
+        hdr.n_layers != (UINT32)config->n_layers ||
+        hdr.n_heads != (UINT32)config->n_heads ||
+        hdr.n_kv_heads != (UINT32)config->n_kv_heads ||
+        hdr.seq_len != (UINT32)config->seq_len) {
+        uefi_call_wrapper(f->Close, 1, f);
+        return EFI_INCOMPATIBLE_VERSION;
+    }
+    if (hdr.kv_pos == 0 || hdr.kv_pos > (UINT32)config->seq_len) {
+        uefi_call_wrapper(f->Close, 1, f);
+        return EFI_INVALID_PARAMETER;
+    }
+
+    // Clear caches, then load prefix.
+    reset_kv_cache(state, (Config *)config);
+
+    int kv_dim = (int)hdr.kv_dim;
+    UINTN slice_floats = (UINTN)hdr.kv_pos * (UINTN)kv_dim;
+    UINTN slice_bytes = slice_floats * sizeof(float);
+
+    for (int l = 0; l < config->n_layers && !EFI_ERROR(st); l++) {
+        float *base = state->key_cache + (UINTN)l * (UINTN)config->seq_len * (UINTN)kv_dim;
+        st = read_exact(f, base, slice_bytes);
+    }
+    for (int l = 0; l < config->n_layers && !EFI_ERROR(st); l++) {
+        float *base = state->value_cache + (UINTN)l * (UINTN)config->seq_len * (UINTN)kv_dim;
+        st = read_exact(f, base, slice_bytes);
+    }
+    uefi_call_wrapper(f->Close, 1, f);
+
+    if (EFI_ERROR(st)) {
+        *io_kv_pos = 0;
+        g_llmk_kv_pos = 0;
+        return st;
+    }
+
+    *io_kv_pos = (int)hdr.kv_pos;
+    g_llmk_kv_pos = *io_kv_pos;
+    return EFI_SUCCESS;
+}
+
 // ============================================================================
 // MAIN
 // ============================================================================
 
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     InitializeLib(ImageHandle, SystemTable);
+
+    // Djibion meta-engine defaults: off unless enabled by the user.
+    djibion_init(&g_djibion);
+
+    // Diopion complementary engine defaults: off unless enabled by the user.
+    diopion_init(&g_diopion);
+
+    // Diagnostion engine defaults: on (diagnostics are safe).
+    diagnostion_init(&g_diagnostion);
+
+    // Memorion engine defaults: on (read-only helpers + explicit manifest writes).
+    memorion_init(&g_memorion);
+
+    // Orchestrion engine defaults: off (workflow runner).
+    orchestrion_init(&g_orchestrion);
+
+    // Calibrion engine defaults: off (auto-tuning sampling).
+    calibrion_init(&g_calibrion);
+
+    // Compatibilion engine defaults: on (platform detection).
+    compatibilion_init(&g_compatibilion);
+    compatibilion_probe_cpu(&g_compatibilion);
+    compatibilion_set_platform(&g_compatibilion, COMPAT_PLAT_UEFI | COMPAT_PLAT_FAT32);
 
     // Initialize DjibMark tracing system (Made in Senegal 🇸🇳)
     djibmark_init();
@@ -3374,17 +5314,42 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // Disable the UEFI watchdog timer (large model loads can take minutes).
     // If not disabled, firmware may reset/reboot mid-load and it looks like a hang.
     uefi_call_wrapper(BS->SetWatchdogTimer, 4, 0, 0, 0, NULL);
-    
+
+    // 1. Clear Screen
+    uefi_call_wrapper(ST->ConOut->ClearScreen, 1, ST->ConOut);
+
+    // 2. Try to show image splash
+    // Note: If successful, it covers the screen.
+    ShowCyberpunkSplash(ImageHandle, SystemTable);
+
+    // 3. Always show Text Banner (User requested boot interface to remain standard)
+    // The splash function now handles its own display + pause + clear.
     Print(L"\r\n");
-    Print(L"----------------------------------------\r\n");
-    Print(L"  LLAMA2 CHAT REPL V3 - Full Loop\r\n");
-    Print(L"----------------------------------------\r\n\r\n");
+    Print(L"    __    __    __  ___\r\n");
+    Print(L"   / /   / /   /  |/  /\r\n");
+    Print(L"  / /   / /   / /|_/ /\r\n");
+    Print(L" / /___/ /___/ /  / /\r\n");
+    Print(L"/_____/_____/_/  /_/\r\n\r\n");
+    Print(L"    ____  ___    ____  ________  __________________    __\r\n");
+    Print(L"   / __ )/   |  / __ \\/ ____/  |/  / ____/_  __/   |  / /\r\n");
+    Print(L"  / __  / /| | / /_/ / __/ / /|_/ / __/   / / / /| | / /\r\n");
+    Print(L" / /_/ / ___ |/ _, _/ /___/ /  / / /___  / / / ___ |/ /___\r\n");
+    Print(L"/_____/_/  |_/_/ |_/_____/_/  /_/_____/ /_/ /_/  |_/_____/\r\n\r\n");
+    Print(L"LLM Baremetal UEFI - LLAMA2 Chat REPL\r\n");
+    Print(L"--------------------------------------------------------------------------\r\n");
+    Print(L"Tips: /help | /compat_status | /calib_status | /orch_status\r\n\r\n");
+    
+    if (!g_boot_verbose) {
+        Print(L"Booting... (set boot_verbose=1 in repl.cfg for details)\r\n\r\n");
+    }
     
     // ========================================================================
     // [1/7] File System
     // ========================================================================
-    
-    Print(L"[1/7] Opening file system...\r\n");
+    InterfaceFx_Stage(1, 7);
+    if (g_boot_verbose) {
+        Print(L"[1/7] Opening file system...\r\n");
+    }
     
     EFI_LOADED_IMAGE *LoadedImage;
     EFI_STATUS status = uefi_call_wrapper(BS->HandleProtocol, 3, ImageHandle, &LoadedImageProtocol, &LoadedImage);
@@ -3409,8 +5374,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     // Persist root handle for best-effort dumps.
     g_root = Root;
-    
-    Print(L"OK: File system ready\r\n\r\n");
+
+    // Best-effort: read boot verbosity from repl.cfg now that the FS is ready.
+    llmk_load_repl_cfg_boot_best_effort();
+
+    if (g_boot_verbose) {
+        Print(L"OK: File system ready\r\n\r\n");
+    }
 
     // Best-effort enable AVX/AVX2 state before feature detection.
     enable_avx_best_effort();
@@ -3424,25 +5394,35 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         if (k == djiblas_sgemm_avx512) name = L"AVX512";
         else if (k == djiblas_sgemm_avx2) name = (cpu_features.has_fma ? L"AVX2+FMA" : L"AVX2");
         else if (k == djiblas_sgemm_sse2) name = L"SSE2";
-        Print(L"[DJIBLAS] SGEMM kernel: %s (sse2=%d avx=%d avx2=%d fma=%d)\r\n\r\n",
-              name,
-              (int)cpu_features.has_sse2,
-              (int)cpu_features.has_avx,
-              (int)cpu_features.has_avx2,
-              (int)cpu_features.has_fma);
 
-          // Attention SIMD dispatch: only use AVX2 if firmware/OS state supports it.
-          g_attn_use_avx2 = (cpu_features.has_avx2 && cpu_features.has_avx);
-          Print(L"[ATTN] SIMD path: %s\r\n\r\n", g_attn_use_avx2 ? L"AVX2" : L"SSE2");
+        // Attention SIMD dispatch: only use AVX2 if firmware/OS state supports it.
+        g_attn_use_avx2 = (cpu_features.has_avx2 && cpu_features.has_avx);
+
+        if (g_boot_verbose) {
+            Print(L"[DJIBLAS] SGEMM kernel: %s (sse2=%d avx=%d avx2=%d fma=%d)\r\n\r\n",
+                  name,
+                  (int)cpu_features.has_sse2,
+                  (int)cpu_features.has_avx,
+                  (int)cpu_features.has_avx2,
+                  (int)cpu_features.has_fma);
+            Print(L"[ATTN] SIMD path: %s\r\n\r\n", g_attn_use_avx2 ? L"AVX2" : L"SSE2");
+        }
     }
 
     // Best-effort graphics init (GOP). Optional: REPL still works without it.
     {
         EFI_STATUS gst = llmk_gop_init_best_effort();
         if (!EFI_ERROR(gst)) {
-            Print(L"[GOP] Framebuffer ready: %dx%d (ppsl=%d)\r\n\r\n", (int)g_gop_w, (int)g_gop_h, (int)g_gop_ppsl);
+            if (g_boot_verbose) {
+                Print(L"[GOP] Framebuffer ready: %dx%d (ppsl=%d)\r\n\r\n", (int)g_gop_w, (int)g_gop_h, (int)g_gop_ppsl);
+            }
+
+            // Feed platform info into Compatibilion.
+            compatibilion_set_gop(&g_compatibilion, (uint32_t)g_gop_w, (uint32_t)g_gop_h);
         } else {
-            Print(L"[GOP] Not available (%r)\r\n\r\n", gst);
+            if (g_boot_verbose) {
+                Print(L"[GOP] Not available (%r)\r\n\r\n", gst);
+            }
         }
     }
 
@@ -3453,8 +5433,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // ========================================================================
     // [2/7] Load Model Header
     // ========================================================================
+
+    InterfaceFx_Stage(2, 7);
     
-    Print(L"[2/7] Loading model...\r\n");
+    if (g_boot_verbose) {
+        Print(L"[2/7] Loading model...\r\n");
+    }
     
     EFI_FILE_HANDLE ModelFile;
     CHAR16 *model_filename = NULL;
@@ -3572,12 +5556,16 @@ model_selected:
         }
     }
     
+    if (g_boot_verbose) {
         Print(L"OK: Model loaded: %s (dim=%d, layers=%d, heads=%d, kv=%d, vocab=%d, seq=%d)\r\n\r\n",
-                    model_filename, config.dim, config.n_layers, config.n_heads, config.n_kv_heads, config.vocab_size, config.seq_len);
+              model_filename, config.dim, config.n_layers, config.n_heads, config.n_kv_heads, config.vocab_size, config.seq_len);
+    }
 
     // ========================================================================
     // [3/7] Kernel zones + heap (auto-sized)
     // ========================================================================
+
+    InterfaceFx_Stage(3, 7);
 
     int kv_dim = (config.dim * config.n_kv_heads) / config.n_heads;
     int head_size = config.dim / config.n_heads;
@@ -3660,12 +5648,16 @@ model_selected:
         zcfg.activations_bytes = acts_u64;
         zcfg.zone_c_bytes = zonec_bytes;
 
-        Print(L"[3/7] Init kernel zones (%d MB)...\r\n", (int)(total / (1024 * 1024)));
+        if (g_boot_verbose) {
+            Print(L"[3/7] Init kernel zones (%d MB)...\r\n", (int)(total / (1024 * 1024)));
+        }
         status = llmk_zones_init(BS, &zcfg, &g_zones);
         if (EFI_ERROR(status) && total > min_total) {
             // If the computed size can't be allocated (e.g. low guest RAM / fragmentation),
             // fall back to a smaller default so the REPL can still boot with smaller models.
-            Print(L"[llmk] zones alloc failed, retrying with %d MB...\r\n", (int)(min_total / (1024 * 1024)));
+            if (g_boot_verbose) {
+                Print(L"[llmk] zones alloc failed, retrying with %d MB...\r\n", (int)(min_total / (1024 * 1024)));
+            }
             zcfg.total_bytes = min_total;
             zcfg.weights_bytes = 0;
             zcfg.kv_bytes = 0;
@@ -3707,16 +5699,26 @@ model_selected:
         }
 
         g_llmk_ready = 1;
-        llmk_zones_print(&g_zones);
-        llmk_sentinel_print_status(&g_sentinel);
-        Print(L"OK: Kernel allocator ready\r\n\r\n");
+
+        // Feed memory info (best-effort) into Compatibilion.
+        compatibilion_set_memory(&g_compatibilion, (uint64_t)g_zones.zone_b_size);
+
+        if (g_boot_verbose) {
+            llmk_zones_print(&g_zones);
+            llmk_sentinel_print_status(&g_sentinel);
+            Print(L"OK: Kernel allocator ready\r\n\r\n");
+        }
     }
     
     // ========================================================================
     // [4/7] Weight Pointers
     // ========================================================================
+
+    InterfaceFx_Stage(4, 7);
     
-    Print(L"[4/7] Mapping weights...\r\n");
+    if (g_boot_verbose) {
+        Print(L"[4/7] Mapping weights...\r\n");
+    }
     bytes_to_read = weights_bytes;
     float* weights_mem = (float*)llmk_alloc_weights((UINT64)bytes_to_read, L"weights");
     if (weights_mem == NULL) {
@@ -3773,13 +5775,19 @@ model_selected:
     
     uefi_call_wrapper(ModelFile->Close, 1, ModelFile);
     
-    Print(L"OK: Weights mapped\r\n\r\n");
+    if (g_boot_verbose) {
+        Print(L"OK: Weights mapped\r\n\r\n");
+    }
     
     // ========================================================================
     // [5/7] State Buffers
     // ========================================================================
+
+    InterfaceFx_Stage(5, 7);
     
-    Print(L"[5/7] Allocating state buffers...\r\n");
+    if (g_boot_verbose) {
+        Print(L"[5/7] Allocating state buffers...\r\n");
+    }
     
     RunState state;
     
@@ -3796,13 +5804,19 @@ model_selected:
     state.key_cache = (float*)llmk_alloc_kv((UINT64)config.n_layers * (UINT64)config.seq_len * (UINT64)kv_dim * sizeof(float), L"key cache");
     state.value_cache = (float*)llmk_alloc_kv((UINT64)config.n_layers * (UINT64)config.seq_len * (UINT64)kv_dim * sizeof(float), L"value cache");
     
-    Print(L"OK: State buffers allocated\r\n\r\n");
+    if (g_boot_verbose) {
+        Print(L"OK: State buffers allocated\r\n\r\n");
+    }
     
     // ========================================================================
     // [6/7] Tokenizer
     // ========================================================================
+
+    InterfaceFx_Stage(6, 7);
     
-    Print(L"[6/7] Loading tokenizer...\r\n");
+    if (g_boot_verbose) {
+        Print(L"[6/7] Loading tokenizer...\r\n");
+    }
     
     EFI_FILE_HANDLE TokFile;
     status = uefi_call_wrapper(Root->Open, 5, Root, &TokFile, L"tokenizer.bin", EFI_FILE_MODE_READ, 0);
@@ -3834,21 +5848,27 @@ model_selected:
     }
     
     uefi_call_wrapper(TokFile->Close, 1, TokFile);
+
+    // Loading finished: stop the animated overlay now.
+    InterfaceFx_End();
     
-    Print(L"OK: Tokenizer loaded (%d tokens)\r\n\r\n", tokenizer.vocab_size);
-    
-    // ========================================================================
-    // [7/7] Interactive REPL Loop
-    // ========================================================================
-    
-    Print(L"[7/7] Entering chat loop...\r\n\r\n");
-    
-    Print(L"----------------------------------------\r\n");
-    Print(L"  CHAT MODE ACTIVE\r\n");
-    Print(L"  Type 'quit' or 'exit' to stop\r\n");
-    Print(L"  Multi-line: end line with '\\' to continue; ';;' alone submits\r\n");
-    Print(L"  Commands: /temp /min_p /top_p /top_k /norepeat /repeat /max_tokens /seed /stats /stop_you /stop_nl /model /cpu /zones /budget /attn /test_failsafe /ctx /log /save_log /save_dump /gop /render /save_img /draw /oo_new /oo_list /oo_step /oo_run /oo_kill /oo_note /oo_plan /oo_agenda /oo_next /oo_done /oo_prio /oo_edit /oo_show /oo_digest /oo_save /oo_load /oo_think /oo_auto /oo_auto_stop /autorun /autorun_stop /reset /clear /djibmarks /djibperf /version /commands /help\r\n");
-    Print(L"----------------------------------------\r\n\r\n");
+    if (g_boot_verbose) {
+        Print(L"OK: Tokenizer loaded (%d tokens)\r\n\r\n", tokenizer.vocab_size);
+
+        // ========================================================================
+        // [7/7] Interactive REPL Loop
+        // ========================================================================
+        Print(L"[7/7] Entering chat loop...\r\n\r\n");
+
+        Print(L"----------------------------------------\r\n");
+        Print(L"  CHAT MODE ACTIVE\r\n");
+        Print(L"  Type 'quit' or 'exit' to stop\r\n");
+        Print(L"  Multi-line: end line with '\\\\' to continue; ';;' alone submits\r\n");
+        Print(L"  Commands: use /help or /commands\r\n");
+        Print(L"----------------------------------------\r\n\r\n");
+    } else {
+        Print(L"OK: REPL ready (/help)\r\n\r\n");
+    }
     
     // Sampling parameters
     // Default sampling tuned for TinyStories (less looping, still creative).
@@ -3860,8 +5880,8 @@ model_selected:
     int no_repeat_ngram = 4;
     int max_gen_tokens = 160;
     int stats_enabled = 1;
-    int stop_on_you = 1;
-    int stop_on_double_nl = 0;
+    int stop_on_you = 0;
+    int stop_on_double_nl = 1;
 
     // Optional config: repl.cfg (key=value). Best-effort; ignored if missing.
     llmk_load_repl_cfg_best_effort(
@@ -3877,7 +5897,13 @@ model_selected:
         &stop_on_double_nl
     );
 
-    if (g_cfg_loaded) {
+    // Optional Diopion config (repl.cfg): burst defaults + profile.
+    llmk_load_repl_cfg_diopion_best_effort(&g_diopion);
+
+    // Optional Djibion config (repl.cfg): enables enforcement at boot.
+    llmk_load_repl_cfg_djibion_best_effort(&g_djibion);
+
+    if (g_cfg_loaded && g_boot_verbose) {
         Print(L"[cfg] autorun_autostart=%d file=%s shutdown_when_done=%d\r\n",
               g_cfg_autorun_autostart,
               g_cfg_autorun_file,
@@ -3899,11 +5925,34 @@ model_selected:
     }
 
     if (oo_autoload) {
+        // Djibion gate (best-effort) for boot-time OO autoload.
+        CHAR16 load_name[96];
+        StrCpy(load_name, oo_state_file);
+        if (g_djibion.mode != DJIBION_MODE_OFF) {
+            char file8[128];
+            llmk_char16_to_ascii_cap(file8, (int)sizeof(file8), load_name);
+            DjibionDecision d;
+            djibion_decide(&g_djibion, DJIBION_ACT_OO_LOAD, file8, 0, &d);
+            djibion_log_if_observe(&g_djibion, "oo_autoload", &d);
+            if (djibion_should_block(&g_djibion, &d)) {
+                CHAR16 msg[160];
+                ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                Print(L"[oo] autoload blocked by Djibion: %s\r\n", msg);
+                goto oo_autoload_done;
+            }
+            if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                Print(L"[oo] autoload path transformed by Djibion -> ");
+                llmk_print_ascii(d.transformed_arg0);
+                Print(L"\r\n");
+                ascii_to_char16(load_name, d.transformed_arg0, (int)(sizeof(load_name) / sizeof(load_name[0])));
+            }
+        }
+
         void *buf = NULL;
         UINTN len = 0;
-        EFI_STATUS st = llmk_read_entire_file_best_effort(oo_state_file, &buf, &len);
+        EFI_STATUS st = llmk_read_entire_file_best_effort(load_name, &buf, &len);
         CHAR16 bak[120];
-        llmk_make_bak_name(oo_state_file, bak, (int)(sizeof(bak) / sizeof(bak[0])));
+        llmk_make_bak_name(load_name, bak, (int)(sizeof(bak) / sizeof(bak[0])));
 
         if (EFI_ERROR(st)) {
             // Fallback to .bak
@@ -3937,32 +5986,109 @@ model_selected:
                     }
                 }
             } else {
-                Print(L"[oo] autoloaded %d entr%s from %s\r\n", imported, (imported == 1) ? L"y" : L"ies", oo_state_file);
+                Print(L"[oo] autoloaded %d entr%s from %s\r\n", imported, (imported == 1) ? L"y" : L"ies", load_name);
             }
         }
     }
 
+oo_autoload_done:
+
     // Optional autorun: only if enabled in repl.cfg (autorun_autostart=1).
     if (g_cfg_autorun_autostart) {
-        llmk_autorun_start(g_cfg_autorun_file, g_cfg_autorun_shutdown_when_done);
+        // Djibion gate for boot-time autorun (autostart).
+        CHAR16 ar_name[96];
+        StrCpy(ar_name, g_cfg_autorun_file);
+        if (g_djibion.mode != DJIBION_MODE_OFF) {
+            char file8[128];
+            llmk_char16_to_ascii_cap(file8, (int)sizeof(file8), ar_name);
+            DjibionDecision d;
+            djibion_decide(&g_djibion, DJIBION_ACT_AUTORUN, file8, 0, &d);
+            djibion_log_if_observe(&g_djibion, "autorun_autostart", &d);
+            if (djibion_should_block(&g_djibion, &d)) {
+                CHAR16 msg[160];
+                ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                Print(L"[cfg] autorun autostart blocked by Djibion: %s\r\n", msg);
+                goto autorun_autostart_done;
+            }
+            if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                Print(L"[cfg] autorun autostart path transformed by Djibion -> ");
+                llmk_print_ascii(d.transformed_arg0);
+                Print(L"\r\n");
+                ascii_to_char16(ar_name, d.transformed_arg0, (int)(sizeof(ar_name) / sizeof(ar_name[0])));
+            }
+        }
+        llmk_autorun_start(ar_name, g_cfg_autorun_shutdown_when_done);
     }
+
+autorun_autostart_done:
     
     int conversation_count = 0;
     
     // KV cache position tracking (persistent across prompts for context retention)
     int kv_pos = 0;
+    g_llmk_kv_pos = 0;
+
+    // Optional snapshot auto-resume (repl.cfg): snap_autoload=1
+    {
+        int snap_autoload = 0;
+        char snap_file_ascii[96];
+        snap_file_ascii[0] = 0;
+        llmk_load_repl_cfg_snap_best_effort(&snap_autoload, snap_file_ascii, (int)sizeof(snap_file_ascii));
+        if (snap_autoload) {
+            CHAR16 snap_file[96];
+            if (snap_file_ascii[0]) {
+                ascii_to_char16(snap_file, snap_file_ascii, (int)(sizeof(snap_file) / sizeof(snap_file[0])));
+            } else {
+                StrCpy(snap_file, L"llmk-snap.bin");
+            }
+
+            // Djibion gate for boot-time snapshot autoload.
+            if (g_djibion.mode != DJIBION_MODE_OFF) {
+                char file8[128];
+                llmk_char16_to_ascii_cap(file8, (int)sizeof(file8), snap_file);
+                DjibionDecision d;
+                djibion_decide(&g_djibion, DJIBION_ACT_SNAP_LOAD, file8, 0, &d);
+                djibion_log_if_observe(&g_djibion, "snap_autoload", &d);
+                if (djibion_should_block(&g_djibion, &d)) {
+                    CHAR16 msg[160];
+                    ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                    Print(L"[cfg] snapshot autoload blocked by Djibion: %s\r\n", msg);
+                    goto snap_autoload_done;
+                }
+                if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                    Print(L"[cfg] snapshot autoload path transformed by Djibion -> ");
+                    llmk_print_ascii(d.transformed_arg0);
+                    Print(L"\r\n");
+                    ascii_to_char16(snap_file, d.transformed_arg0, (int)(sizeof(snap_file) / sizeof(snap_file[0])));
+                }
+            }
+
+            EFI_STATUS st = llmk_snap_load_into_state_best_effort(&state, &config, &kv_pos, snap_file);
+            if (EFI_ERROR(st)) {
+                Print(L"[snap] autoload skipped (%r)\r\n", st);
+                llmk_tr_note("SNAP: autoload failed");
+            } else {
+                Print(L"[snap] autoloaded %s (kv_pos=%d)\r\n", snap_file, kv_pos);
+                llmk_tr_note("SNAP: autoloaded");
+            }
+        }
+    }
+
+snap_autoload_done:
     
     // MAIN LOOP
     while (1) {
         conversation_count++;
 
         // capture-mode state (per-turn)
-        // capture_kind: 0=none, 1=/draw, 2=/oo_think, 3=/oo_auto
+        // capture_kind: 0=none, 1=/draw, 2=/oo_think, 3=/oo_auto, 4=/oo_exec
         int capture_kind = 0;
         int draw_mode = 0;
         int oo_think_id = 0;
         int oo_auto_planning = 0;
         int oo_auto_action_k = 0;
+        int oo_exec_planning = 0;
+        int oo_exec_action_k = 0;
         char oo_think_user[256];
         oo_think_user[0] = 0;
         int saved_stop_on_you = stop_on_you;
@@ -3981,6 +6107,25 @@ model_selected:
         char prompt[512];
         prompt[0] = 0;
 
+        if (g_oo_exec_active && g_oo_exec_id > 0 && g_oo_exec_remaining > 0) {
+            // Allow user to interrupt exec mode between cycles.
+            {
+                EFI_INPUT_KEY key;
+                EFI_STATUS kst = uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &key);
+                if (!EFI_ERROR(kst)) {
+                    if (key.UnicodeChar == L'q' || key.UnicodeChar == L'Q' || key.ScanCode == SCAN_ESC) {
+                        Print(L"\r\n[oo_exec] interrupted by user\r\n\r\n");
+                        g_oo_exec_active = 0;
+                        g_oo_exec_id = 0;
+                        g_oo_exec_remaining = 0;
+                        g_oo_exec_total = 0;
+                        g_oo_exec_plan_if_empty = 0;
+                        g_oo_exec_hint[0] = 0;
+                    }
+                }
+            }
+        }
+
         if (g_oo_auto_active && g_oo_auto_id > 0 && g_oo_auto_remaining > 0) {
             // Allow user to interrupt auto mode between cycles.
             // Note: we poll once per cycle; keypresses are consumed here.
@@ -3996,6 +6141,110 @@ model_selected:
                         g_oo_auto_total = 0;
                         g_oo_auto_user[0] = 0;
                     }
+                }
+            }
+        }
+
+        if (g_oo_exec_active && g_oo_exec_id > 0 && g_oo_exec_remaining > 0) {
+            int cycle = (g_oo_exec_total - g_oo_exec_remaining) + 1;
+            if (cycle < 1) cycle = 1;
+            Print(L"\r\n[oo_exec] cycle %d/%d...\r\n", cycle, (g_oo_exec_total > 0) ? g_oo_exec_total : cycle);
+
+            // Prefer consuming agenda items.
+            char cycle_action[96];
+            cycle_action[0] = 0;
+            int picked_k = 0;
+
+            // String passed into llmk_oo_build_think_prompt (can include hint + action).
+            char cycle_user_build[256];
+            cycle_user_build[0] = 0;
+
+            if (llmk_oo_agenda_next_ex(g_oo_exec_id, &picked_k, cycle_action, (int)sizeof(cycle_action))) {
+                oo_exec_planning = 0;
+                oo_exec_action_k = picked_k;
+                {
+                    // Store just the action as the per-cycle "user" (notes + done marker).
+                    int up = 0;
+                    for (const char *s = cycle_action; *s && up + 1 < (int)sizeof(oo_think_user); s++) oo_think_user[up++] = *s;
+                    oo_think_user[up] = 0;
+                }
+
+                {
+                    CHAR16 a16[120];
+                    ascii_to_char16(a16, cycle_action, (int)(sizeof(a16) / sizeof(a16[0])));
+                    Print(L"[oo_exec] action #%d: %s\r\n", picked_k, a16);
+                }
+
+                // Build prompt input: optional hint + action.
+                if (g_oo_exec_hint[0]) {
+                    int p = 0;
+                    const char *h = g_oo_exec_hint;
+                    for (int k = 0; h[k] && p + 1 < (int)sizeof(cycle_user_build); k++) cycle_user_build[p++] = h[k];
+                    const char *mid = " | action: ";
+                    for (int k = 0; mid[k] && p + 1 < (int)sizeof(cycle_user_build); k++) cycle_user_build[p++] = mid[k];
+                    for (int k = 0; cycle_action[k] && p + 1 < (int)sizeof(cycle_user_build); k++) cycle_user_build[p++] = cycle_action[k];
+                    cycle_user_build[p] = 0;
+                } else {
+                    int p = 0;
+                    for (int k = 0; cycle_action[k] && p + 1 < (int)sizeof(cycle_user_build); k++) cycle_user_build[p++] = cycle_action[k];
+                    cycle_user_build[p] = 0;
+                }
+            } else {
+                if (!g_oo_exec_plan_if_empty) {
+                    Print(L"[oo_exec] agenda empty -> stopping\r\n\r\n");
+                    g_oo_exec_active = 0;
+                    g_oo_exec_id = 0;
+                    g_oo_exec_remaining = 0;
+                    g_oo_exec_total = 0;
+                    g_oo_exec_plan_if_empty = 0;
+                    g_oo_exec_hint[0] = 0;
+                } else {
+                    // Planning cycle: propose one next action and push it.
+                    oo_exec_planning = 1;
+                    oo_exec_action_k = 0;
+                    {
+                        const char *plan = "Propose ONE next concrete action (single line, no bullets, no extra text).";
+                        int up = 0;
+                        for (const char *s = plan; *s && up + 1 < (int)sizeof(oo_think_user); s++) oo_think_user[up++] = *s;
+                        oo_think_user[up] = 0;
+                    }
+                    {
+                        int p = 0;
+                        for (int k = 0; oo_think_user[k] && p + 1 < (int)sizeof(cycle_user_build); k++) cycle_user_build[p++] = oo_think_user[k];
+                        cycle_user_build[p] = 0;
+                    }
+                    Print(L"[oo_exec] agenda empty -> planning next action\r\n");
+                }
+            }
+
+            if (g_oo_exec_active && g_oo_exec_id > 0 && g_oo_exec_remaining > 0) {
+                char new_prompt[512];
+                if (!llmk_oo_build_think_prompt(g_oo_exec_id, cycle_user_build, new_prompt, (int)sizeof(new_prompt))) {
+                    Print(L"[oo_exec] ERROR: unknown entity id=%d (stopping)\r\n\r\n", g_oo_exec_id);
+                    g_oo_exec_active = 0;
+                    g_oo_exec_id = 0;
+                    g_oo_exec_remaining = 0;
+                    g_oo_exec_total = 0;
+                    g_oo_exec_plan_if_empty = 0;
+                    g_oo_exec_hint[0] = 0;
+                } else {
+                    // Keep model context clean per-cycle.
+                    reset_kv_cache(&state, &config);
+                    kv_pos = 0;
+                    g_llmk_kv_pos = kv_pos;
+
+                    for (int k = 0; k < (int)sizeof(prompt); k++) {
+                        prompt[k] = new_prompt[k];
+                        if (new_prompt[k] == 0) break;
+                    }
+                    oo_think_id = g_oo_exec_id;
+
+                    g_capture_mode = 1;
+                    capture_kind = 4; // /oo_exec cycle
+                    llmk_capture_reset();
+                    stop_on_you = 0;
+                    stop_on_double_nl = 1;
+                    if (max_gen_tokens > 64) max_gen_tokens = 64;
                 }
             }
         }
@@ -4040,6 +6289,7 @@ model_selected:
                 // /oo_auto builds a fresh prompt every cycle; keep model context clean per-cycle.
                 reset_kv_cache(&state, &config);
                 kv_pos = 0;
+                g_llmk_kv_pos = kv_pos;
 
                 for (int k = 0; k < (int)sizeof(prompt); k++) {
                     prompt[k] = new_prompt[k];
@@ -4072,6 +6322,7 @@ model_selected:
                     CHAR16 p16[540];
                     ascii_to_char16(p16, prompt, (int)(sizeof(p16) / sizeof(p16[0])));
                     Print(L"You (autorun): %s\r\n", p16);
+                    llmk_tr_push_prefixed("AUTO: ", prompt);
                 } else {
                     Print(L"[autorun] done\r\n");
                     int shutdown = g_autorun_shutdown_when_done;
@@ -4083,6 +6334,21 @@ model_selected:
                 }
             }
 
+            // Orchestrion: inject next pipeline step (non-blocking) when running.
+            if (prompt[0] == 0 && g_orchestrion.mode != ORCHESTRION_MODE_OFF) {
+                const char *step = orchestrion_pipeline_next_step(&g_orchestrion);
+                if (step && step[0]) {
+                    int i = 0;
+                    for (; step[i] && i + 1 < (int)sizeof(prompt); i++) prompt[i] = step[i];
+                    prompt[i] = 0;
+
+                    CHAR16 p16[540];
+                    ascii_to_char16(p16, prompt, (int)(sizeof(p16) / sizeof(p16[0])));
+                    Print(L"You (orch): %s\r\n", p16);
+                    llmk_tr_push_prefixed("ORCH: ", prompt);
+                }
+            }
+
             // Read user input
             if (prompt[0] == 0) {
                 CHAR16 user_input[512];
@@ -4091,8 +6357,12 @@ model_selected:
 
                 // Convert to char
                 char16_to_char(prompt, user_input, 512);
+                if (prompt[0]) llmk_tr_push_prefixed("YOU: ", prompt);
             }
         }
+
+        // If GOP TUI is enabled, refresh it for every prompt/command.
+        llmk_tui_on_prompt_best_effort(prompt);
 
         // Special command: /draw uses the model to generate render DSL, captures it, then runs /render.
         // It intentionally consumes context like any other prompt; use /clear if you want a clean slate.
@@ -4406,6 +6676,466 @@ model_selected:
                 Print(L"%d.", (int)repeat_penalty);
                 Print(L"%d\r\n", (int)((repeat_penalty - (int)repeat_penalty) * 100.0f));
                 continue;
+            } else if (my_strncmp(prompt, "/sampling", 9) == 0) {
+                Print(L"\r\nSampling:\r\n");
+                Print(L"  temp=");
+                Print(L"%d.", (int)temperature);
+                Print(L"%d\r\n", (int)((temperature - (int)temperature) * 100.0f));
+                Print(L"  min_p=");
+                Print(L"%d.", (int)min_p);
+                Print(L"%d\r\n", (int)((min_p - (int)min_p) * 100.0f));
+                Print(L"  top_p=");
+                Print(L"%d.", (int)top_p);
+                Print(L"%d\r\n", (int)((top_p - (int)top_p) * 100.0f));
+                Print(L"  top_k=%d\r\n", top_k);
+                Print(L"  norepeat=%d\r\n", no_repeat_ngram);
+                Print(L"  repeat=");
+                Print(L"%d.", (int)repeat_penalty);
+                Print(L"%d\r\n", (int)((repeat_penalty - (int)repeat_penalty) * 100.0f));
+                Print(L"  max_tokens=%d\r\n\r\n", max_gen_tokens);
+                continue;
+            } else if (my_strncmp(prompt, "/preset_save", 12) == 0) {
+                int i = 12;
+                while (prompt[i] == ' ') i++;
+                if (prompt[i] == 0) {
+                    Print(L"\r\nUsage:\r\n");
+                    Print(L"  /preset_save stable|creative|greedy\r\n");
+                    Print(L"  (persists to repl.cfg; Djibion allow_cfg_write must allow it)\r\n\r\n");
+                    continue;
+                }
+
+                char name[32];
+                int n = 0;
+                while (prompt[i] && prompt[i] != ' ' && n + 1 < (int)sizeof(name)) {
+                    name[n++] = prompt[i++];
+                }
+                name[n] = 0;
+
+                int applied = 1;
+                // Also hold the canonical string values for cfg persistence.
+                const char *cfg_temp = NULL;
+                const char *cfg_min_p = NULL;
+                const char *cfg_top_p = NULL;
+                const char *cfg_top_k = NULL;
+                const char *cfg_repeat = NULL;
+                const char *cfg_norepeat = NULL;
+
+                if (llmk_cfg_streq_ci(name, "stable")) {
+                    temperature = 0.70f;
+                    min_p = 0.05f;
+                    top_p = 0.90f;
+                    top_k = 40;
+                    repeat_penalty = 1.10f;
+                    no_repeat_ngram = 4;
+                    cfg_temp = "0.70";
+                    cfg_min_p = "0.05";
+                    cfg_top_p = "0.90";
+                    cfg_top_k = "40";
+                    cfg_repeat = "1.10";
+                    cfg_norepeat = "4";
+                } else if (llmk_cfg_streq_ci(name, "creative")) {
+                    temperature = 1.00f;
+                    min_p = 0.05f;
+                    top_p = 0.95f;
+                    top_k = 80;
+                    repeat_penalty = 1.05f;
+                    no_repeat_ngram = 3;
+                    cfg_temp = "1.00";
+                    cfg_min_p = "0.05";
+                    cfg_top_p = "0.95";
+                    cfg_top_k = "80";
+                    cfg_repeat = "1.05";
+                    cfg_norepeat = "3";
+                } else if (llmk_cfg_streq_ci(name, "greedy") || llmk_cfg_streq_ci(name, "det") || llmk_cfg_streq_ci(name, "deterministic")) {
+                    temperature = 0.00f;
+                    min_p = 0.00f;
+                    top_p = 0.00f;
+                    top_k = 0;
+                    repeat_penalty = 1.00f;
+                    no_repeat_ngram = 0;
+                    cfg_temp = "0.00";
+                    cfg_min_p = "0.00";
+                    cfg_top_p = "0.00";
+                    cfg_top_k = "0";
+                    cfg_repeat = "1.00";
+                    cfg_norepeat = "0";
+                } else {
+                    applied = 0;
+                }
+
+                if (!applied || !cfg_temp || !cfg_min_p || !cfg_top_p || !cfg_top_k || !cfg_repeat || !cfg_norepeat) {
+                    Print(L"  Unknown preset: ");
+                    llmk_print_ascii(name);
+                    Print(L"\r\n  Try: /preset_save stable | /preset_save creative | /preset_save greedy\r\n");
+                    continue;
+                }
+
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_CFG_WRITE, "sampling_preset", (UINT32)my_strlen(name), &d);
+                    djibion_log_if_observe(&g_djibion, "cfg_write", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/preset_save): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                }
+
+                int ok = 1;
+                EFI_STATUS st;
+                st = llmk_repl_cfg_set_kv_best_effort("temp", cfg_temp);
+                if (EFI_ERROR(st)) ok = 0;
+                st = llmk_repl_cfg_set_kv_best_effort("min_p", cfg_min_p);
+                if (EFI_ERROR(st)) ok = 0;
+                st = llmk_repl_cfg_set_kv_best_effort("top_p", cfg_top_p);
+                if (EFI_ERROR(st)) ok = 0;
+                st = llmk_repl_cfg_set_kv_best_effort("top_k", cfg_top_k);
+                if (EFI_ERROR(st)) ok = 0;
+                st = llmk_repl_cfg_set_kv_best_effort("repeat_penalty", cfg_repeat);
+                if (EFI_ERROR(st)) ok = 0;
+                st = llmk_repl_cfg_set_kv_best_effort("no_repeat_ngram", cfg_norepeat);
+                if (EFI_ERROR(st)) ok = 0;
+
+                Print(L"  Preset applied + saved: ");
+                llmk_print_ascii(name);
+                Print(L"\r\n");
+                if (!ok) {
+                    Print(L"  WARNING: repl.cfg update had errors (settings applied in RAM)\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/preset", 7) == 0) {
+                int i = 7;
+                while (prompt[i] == ' ') i++;
+                if (prompt[i] == 0) {
+                    Print(L"\r\nPresets:\r\n");
+                    Print(L"  /preset stable           - temp=0.70 top_p=0.90 top_k=40 min_p=0.05 repeat=1.10 norepeat=4\r\n");
+                    Print(L"  /preset creative         - temp=1.00 top_p=0.95 top_k=80 min_p=0.05 repeat=1.05 norepeat=3\r\n");
+                    Print(L"  /preset greedy           - temp=0.00 top_p=0.00 top_k=0  min_p=0.00 repeat=1.00 norepeat=0\r\n");
+                    Print(L"  /preset stable --save    - same but persists to repl.cfg\r\n");
+                    Print(L"  /preset_save stable      - same as --save\r\n\r\n");
+                    continue;
+                }
+
+                char name[32];
+                int n = 0;
+                while (prompt[i] && prompt[i] != ' ' && n + 1 < (int)sizeof(name)) {
+                    name[n++] = prompt[i++];
+                }
+                name[n] = 0;
+
+                // Optional: persist to repl.cfg.
+                int save_cfg = 0;
+                while (prompt[i] == ' ') i++;
+                if (prompt[i]) {
+                    // Accept: --save or -s
+                    if (my_strncmp(prompt + i, "--save", 6) == 0) {
+                        save_cfg = 1;
+                    } else if (my_strncmp(prompt + i, "-s", 2) == 0) {
+                        save_cfg = 1;
+                    }
+                }
+
+                int applied = 1;
+                const char *cfg_temp = NULL;
+                const char *cfg_min_p = NULL;
+                const char *cfg_top_p = NULL;
+                const char *cfg_top_k = NULL;
+                const char *cfg_repeat = NULL;
+                const char *cfg_norepeat = NULL;
+                if (llmk_cfg_streq_ci(name, "stable")) {
+                    temperature = 0.70f;
+                    min_p = 0.05f;
+                    top_p = 0.90f;
+                    top_k = 40;
+                    repeat_penalty = 1.10f;
+                    no_repeat_ngram = 4;
+                    cfg_temp = "0.70";
+                    cfg_min_p = "0.05";
+                    cfg_top_p = "0.90";
+                    cfg_top_k = "40";
+                    cfg_repeat = "1.10";
+                    cfg_norepeat = "4";
+                } else if (llmk_cfg_streq_ci(name, "creative")) {
+                    temperature = 1.00f;
+                    min_p = 0.05f;
+                    top_p = 0.95f;
+                    top_k = 80;
+                    repeat_penalty = 1.05f;
+                    no_repeat_ngram = 3;
+                    cfg_temp = "1.00";
+                    cfg_min_p = "0.05";
+                    cfg_top_p = "0.95";
+                    cfg_top_k = "80";
+                    cfg_repeat = "1.05";
+                    cfg_norepeat = "3";
+                } else if (llmk_cfg_streq_ci(name, "greedy") || llmk_cfg_streq_ci(name, "det") || llmk_cfg_streq_ci(name, "deterministic")) {
+                    temperature = 0.00f;
+                    min_p = 0.00f;
+                    top_p = 0.00f;
+                    top_k = 0;
+                    repeat_penalty = 1.00f;
+                    no_repeat_ngram = 0;
+                    cfg_temp = "0.00";
+                    cfg_min_p = "0.00";
+                    cfg_top_p = "0.00";
+                    cfg_top_k = "0";
+                    cfg_repeat = "1.00";
+                    cfg_norepeat = "0";
+                } else {
+                    applied = 0;
+                }
+
+                if (!applied) {
+                    Print(L"  Unknown preset: ");
+                    llmk_print_ascii(name);
+                    Print(L"\r\n  Try: /preset stable | /preset creative | /preset greedy\r\n");
+                    continue;
+                }
+
+                Print(L"  Preset applied: ");
+                llmk_print_ascii(name);
+
+                if (save_cfg) {
+                    // Djibion gate (best-effort)
+                    if (g_djibion.mode != DJIBION_MODE_OFF) {
+                        DjibionDecision d;
+                        djibion_decide(&g_djibion, DJIBION_ACT_CFG_WRITE, "sampling_preset", (UINT32)my_strlen(name), &d);
+                        djibion_log_if_observe(&g_djibion, "cfg_write", &d);
+                        if (djibion_should_block(&g_djibion, &d)) {
+                            CHAR16 msg[160];
+                            ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                            Print(L"\r\nDJIBION: blocked (--save): %s\r\n", msg);
+                            Print(L"\r\n");
+                            continue;
+                        }
+                    }
+
+                    int ok = 1;
+                    EFI_STATUS st;
+                    if (cfg_temp) {
+                        st = llmk_repl_cfg_set_kv_best_effort("temp", cfg_temp);
+                        if (EFI_ERROR(st)) ok = 0;
+                    } else ok = 0;
+                    if (cfg_min_p) {
+                        st = llmk_repl_cfg_set_kv_best_effort("min_p", cfg_min_p);
+                        if (EFI_ERROR(st)) ok = 0;
+                    } else ok = 0;
+                    if (cfg_top_p) {
+                        st = llmk_repl_cfg_set_kv_best_effort("top_p", cfg_top_p);
+                        if (EFI_ERROR(st)) ok = 0;
+                    } else ok = 0;
+                    if (cfg_top_k) {
+                        st = llmk_repl_cfg_set_kv_best_effort("top_k", cfg_top_k);
+                        if (EFI_ERROR(st)) ok = 0;
+                    } else ok = 0;
+                    if (cfg_repeat) {
+                        st = llmk_repl_cfg_set_kv_best_effort("repeat_penalty", cfg_repeat);
+                        if (EFI_ERROR(st)) ok = 0;
+                    } else ok = 0;
+                    if (cfg_norepeat) {
+                        st = llmk_repl_cfg_set_kv_best_effort("no_repeat_ngram", cfg_norepeat);
+                        if (EFI_ERROR(st)) ok = 0;
+                    } else ok = 0;
+
+                    if (ok) {
+                        Print(L" (saved)");
+                    } else {
+                        Print(L" (save failed)");
+                    }
+                }
+
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/autostart_engines_on", 20) == 0) {
+                // Usage: /autostart_engines_on [observe|enforce] [--run]
+                const char *p = prompt + 20;
+                while (*p == ' ' || *p == '\t') p++;
+
+                int mode = 1; // observe
+                int run_now = 0;
+
+                // Parse tokens in any order: observe|enforce|1|2 and --run
+                while (*p) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p == 0) break;
+
+                    char tok[24];
+                    int tp = 0;
+                    while (*p && *p != ' ' && *p != '\t' && tp + 1 < (int)sizeof(tok)) tok[tp++] = *p++;
+                    tok[tp] = 0;
+
+                    if (llmk_cfg_streq_ci(tok, "enforce") || llmk_cfg_streq_ci(tok, "2")) {
+                        mode = 2;
+                    } else if (llmk_cfg_streq_ci(tok, "observe") || llmk_cfg_streq_ci(tok, "1")) {
+                        mode = 1;
+                    } else if (llmk_cfg_streq_ci(tok, "--run")) {
+                        run_now = 1;
+                    } else if (llmk_cfg_streq_ci(tok, "--help") || llmk_cfg_streq_ci(tok, "-h")) {
+                        Print(L"\r\nUsage:\r\n");
+                        Print(L"  /autostart_engines_on observe [--run]\r\n");
+                        Print(L"  /autostart_engines_on enforce [--run]\r\n\r\n");
+                        continue;
+                    }
+                }
+
+                const char *mode_name = (mode == 2) ? "enforce" : "observe";
+
+                // Generate llmk-autorun.txt in the boot volume root.
+                // Keep it ASCII + CRLF, allow comments.
+                char script[1024];
+                int sp = 0;
+                script[0] = 0;
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "# llmk-autorun.txt (generated by /autostart_engines_on)\r\n");
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "# Mode: ");
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), mode_name);
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "\r\n\r\n");
+
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/version\r\n");
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/compat_on\r\n");
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/compat_probe\r\n");
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/compat_status\r\n");
+
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/djibion_on\r\n");
+                if (mode == 2) {
+                    llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/djibion_enforce 2\r\n");
+                } else {
+                    llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/djibion_enforce 1\r\n");
+                }
+
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/mem_on\r\n");
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/diag_on\r\n");
+
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/orch_on\r\n");
+                if (mode == 2) {
+                    llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/orch_enforce 2\r\n");
+                } else {
+                    llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/orch_enforce 1\r\n");
+                }
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/orch_status\r\n");
+
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/calib_on\r\n");
+                if (mode == 2) {
+                    llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/calib_enforce 2\r\n");
+                } else {
+                    llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/calib_enforce 1\r\n");
+                }
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/calib_status\r\n");
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/calib_apply\r\n");
+
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/diopion_on\r\n");
+                if (mode == 2) {
+                    llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/diopion_enforce 2\r\n");
+                } else {
+                    llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/diopion_enforce 1\r\n");
+                }
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/diopion_status\r\n");
+
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/preset stable\r\n");
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/sampling\r\n");
+                llmk_cfg_out_append(script, &sp, (int)sizeof(script), "/ctx\r\n");
+
+                // Djibion gate for file write (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_FS_WRITE, "llmk-autorun.txt", (UINT32)my_strlen(script), &d);
+                    djibion_log_if_observe(&g_djibion, "fs_write", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (autorun script write): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                }
+
+                {
+                    CHAR16 path[64];
+                    StrCpy(path, L"llmk-autorun.txt");
+                    EFI_FILE_HANDLE f = NULL;
+                    EFI_STATUS st = llmk_open_binary_file(&f, path);
+                    if (EFI_ERROR(st) || !f) {
+                        Print(L"\r\nERROR: open failed: %r\r\n\r\n", st);
+                        continue;
+                    }
+                    UINTN nbytes = (UINTN)my_strlen(script);
+                    EFI_STATUS wst = llmk_file_write_bytes(f, script, nbytes);
+                    EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+                    uefi_call_wrapper(f->Close, 1, f);
+                    if (EFI_ERROR(wst)) {
+                        Print(L"\r\nERROR: write failed: %r\r\n\r\n", wst);
+                        continue;
+                    }
+                    if (EFI_ERROR(flush_st)) {
+                        Print(L"\r\nWARNING: flush failed: %r (file may not persist)\r\n\r\n", flush_st);
+                    }
+                }
+
+                // Djibion gate for cfg write (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_CFG_WRITE, "autorun_autostart", 1, &d);
+                    djibion_log_if_observe(&g_djibion, "cfg_write", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (repl.cfg update): %s\r\n\r\n", msg);
+                        Print(L"OK: wrote llmk-autorun.txt; enable autorun manually in repl.cfg\r\n\r\n");
+                        continue;
+                    }
+                }
+
+                // Persist autorun settings.
+                {
+                    EFI_STATUS st;
+                    st = llmk_repl_cfg_set_kv_best_effort("autorun_autostart", "1");
+                    if (EFI_ERROR(st)) {
+                        Print(L"\r\nERROR: repl.cfg update failed: %r\r\n\r\n", st);
+                        continue;
+                    }
+                    llmk_repl_cfg_set_kv_best_effort("autorun_shutdown_when_done", "0");
+                    llmk_repl_cfg_set_kv_best_effort("autorun_file", "llmk-autorun.txt");
+
+                    // Ensure Djibion allows autorun when enabled via repl.cfg.
+                    llmk_repl_cfg_set_kv_best_effort("djibion_allow_autorun", "1");
+                    llmk_repl_cfg_set_kv_best_effort("djibion_mode", (mode == 2) ? "2" : "1");
+                }
+
+                Print(L"\r\nOK: engines autostart enabled (mode=");
+                llmk_print_ascii(mode_name);
+                Print(L"). Reboot to apply.\r\n");
+
+                if (run_now) {
+                    Print(L"[autostart] launching autorun now...\r\n\r\n");
+                    int ok = llmk_autorun_start(L"llmk-autorun.txt", 0);
+                    if (!ok) {
+                        Print(L"\r\nERROR: autorun start failed\r\n\r\n");
+                    }
+                } else {
+                    Print(L"\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/autostart_engines_off", 21) == 0) {
+                // Disable autorun_autostart.
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_CFG_WRITE, "autorun_autostart", 1, &d);
+                    djibion_log_if_observe(&g_djibion, "cfg_write", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/autostart_engines_off): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                }
+
+                EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort("autorun_autostart", "0");
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: repl.cfg update failed: %r\r\n\r\n", st);
+                    continue;
+                }
+                Print(L"\r\nOK: autorun_autostart=0 (reboot to apply)\r\n\r\n");
+                continue;
             } else if (my_strncmp(prompt, "/model", 6) == 0) {
                 Print(L"\r\nModel:\r\n");
                 Print(L"  stories110M.bin\r\n");
@@ -4684,6 +7414,625 @@ model_selected:
                     Print(L"\r\nOK: wrote llmk-dump.txt (flushed)\r\n\r\n");
                 }
                 continue;
+            } else if (my_strncmp(prompt, "/diag_on", 8) == 0) {
+                diagnostion_set_mode(&g_diagnostion, DIAGNOSTION_MODE_ON);
+                Print(L"\r\nOK: diagnostion=on\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/diag_off", 9) == 0) {
+                diagnostion_set_mode(&g_diagnostion, DIAGNOSTION_MODE_OFF);
+                Print(L"\r\nOK: diagnostion=off\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/diag_status", 11) == 0) {
+                Print(L"\r\n[Diagnostion]\r\n");
+                Print(L"  mode=");
+                llmk_print_ascii(diagnostion_mode_name_ascii(g_diagnostion.mode));
+                Print(L"\r\n");
+                Print(L"  reports_written=%d\r\n\r\n", (int)g_diagnostion.reports_written);
+                continue;
+            } else if (my_strncmp(prompt, "/diag_report", 11) == 0) {
+                if (!g_llmk_ready) {
+                    Print(L"\r\n  (llmk not ready)\r\n\r\n");
+                    continue;
+                }
+                if (g_diagnostion.mode == DIAGNOSTION_MODE_OFF) {
+                    Print(L"\r\nERROR: Diagnostion is off (use /diag_on)\r\n\r\n");
+                    continue;
+                }
+
+                // Optional: /diag_report <file>
+                char out_name8[96];
+                out_name8[0] = 0;
+                {
+                    const char *p = prompt + 11;
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p) {
+                        int n = 0;
+                        while (*p && *p != ' ' && *p != '\t' && n + 1 < (int)sizeof(out_name8)) {
+                            out_name8[n++] = *p++;
+                        }
+                        out_name8[n] = 0;
+                    }
+                }
+
+                CHAR16 out_name16[96];
+                if (out_name8[0]) {
+                    ascii_to_char16(out_name16, out_name8, (int)(sizeof(out_name16) / sizeof(out_name16[0])));
+                } else {
+                    StrCpy(out_name16, L"llmk-diag.txt");
+                }
+
+                EFI_FILE_HANDLE f = NULL;
+                EFI_STATUS st = llmk_open_text_file(&f, out_name16);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: failed to open diag file: %r\r\n\r\n", st);
+                    continue;
+                }
+
+                // Human-friendly report header (UTF-16)
+                {
+                    CHAR16 line[256];
+                    llmk_file_write_u16(f, L"LLMK DIAGNOSTIC REPORT\r\n\r\n");
+                    SPrint(line, sizeof(line), L"  model=%s\r\n", model_filename ? model_filename : L"(unknown)");
+                    llmk_file_write_u16(f, line);
+                    SPrint(line, sizeof(line), L"  dim=%d layers=%d heads=%d kv=%d vocab=%d seq=%d\r\n",
+                           config.dim, config.n_layers, config.n_heads, config.n_kv_heads, config.vocab_size, config.seq_len);
+                    llmk_file_write_u16(f, line);
+                    SPrint(line, sizeof(line), L"  kv_pos=%d\r\n", kv_pos);
+                    llmk_file_write_u16(f, line);
+                    SPrint(line, sizeof(line), L"  budgets: prefill_max=%lu decode_max=%lu overruns(p=%d d=%d)\r\n",
+                           g_budget_prefill_cycles, g_budget_decode_cycles,
+                           (int)g_budget_overruns_prefill, (int)g_budget_overruns_decode);
+                    llmk_file_write_u16(f, line);
+                    llmk_file_write_u16(f, L"\r\nEngines:\r\n");
+                    SPrint(line, sizeof(line), L"  djibion_mode=%s decisions=%d rejected=%d transformed=%d\r\n",
+                           (CHAR16 *)djibion_mode_name(g_djibion.mode),
+                           (int)g_djibion.decisions_total,
+                           (int)g_djibion.decisions_rejected,
+                           (int)g_djibion.decisions_transformed);
+                    llmk_file_write_u16(f, line);
+                    llmk_file_write_u16(f, L"  diopion_mode=");
+                    llmk_file_write_u16(f, L"\"");
+                    {
+                        // diopion_mode_name_ascii returns ASCII; print it char-by-char into UTF-16 file.
+                        CHAR16 m[32];
+                        ascii_to_char16(m, diopion_mode_name_ascii(g_diopion.mode), (int)(sizeof(m) / sizeof(m[0])));
+                        llmk_file_write_u16(f, m);
+                    }
+                    llmk_file_write_u16(f, L"\" profile=\"");
+                    {
+                        CHAR16 p[32];
+                        ascii_to_char16(p, diopion_profile_name_ascii(g_diopion.profile), (int)(sizeof(p) / sizeof(p[0])));
+                        llmk_file_write_u16(f, p);
+                    }
+                    llmk_file_write_u16(f, L"\"\r\n\r\n");
+
+                    llmk_file_write_u16(f, L"Sampling:\r\n");
+                    SPrint(line, sizeof(line), L"  temp=%d.%02d min_p=%d.%02d top_p=%d.%02d top_k=%d\r\n",
+                           (int)temperature, (int)((temperature - (int)temperature) * 100.0f),
+                           (int)min_p, (int)((min_p - (int)min_p) * 100.0f),
+                           (int)top_p, (int)((top_p - (int)top_p) * 100.0f),
+                           top_k);
+                    llmk_file_write_u16(f, line);
+                    SPrint(line, sizeof(line), L"  norepeat=%d repeat_penalty=%d.%02d max_tokens=%d\r\n\r\n",
+                           no_repeat_ngram,
+                           (int)repeat_penalty, (int)((repeat_penalty - (int)repeat_penalty) * 100.0f),
+                           max_gen_tokens);
+                    llmk_file_write_u16(f, line);
+                }
+
+                // Deep dumps (same building blocks as /save_dump)
+                llmk_dump_zones_to_file(f, &g_zones);
+                llmk_dump_sentinel_to_file(f, &g_sentinel);
+                if (g_llmk_log.capacity) {
+                    llmk_dump_log_to_file(f, &g_llmk_log, 128);
+                }
+
+                EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+                uefi_call_wrapper(f->Close, 1, f);
+                if (EFI_ERROR(flush_st)) {
+                    Print(L"\r\nWARNING: flush failed %r (file may not persist)\r\n\r\n", flush_st);
+                } else {
+                    g_diagnostion.reports_written++;
+                    Print(L"\r\nOK: wrote %s (flushed)\r\n\r\n", out_name16);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/mem_on", 7) == 0) {
+                memorion_set_mode(&g_memorion, MEMORION_MODE_ON);
+                Print(L"\r\nOK: memorion=on\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/mem_off", 8) == 0) {
+                memorion_set_mode(&g_memorion, MEMORION_MODE_OFF);
+                Print(L"\r\nOK: memorion=off\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/mem_status", 10) == 0) {
+                Print(L"\r\n[Memorion]\r\n");
+                Print(L"  mode=");
+                llmk_print_ascii(memorion_mode_name_ascii(g_memorion.mode));
+                Print(L"\r\n");
+                Print(L"  manifests_written=%d\r\n", (int)g_memorion.manifests_written);
+                Print(L"  checks_done=%d\r\n\r\n", (int)g_memorion.checks_done);
+                continue;
+            } else if (my_strncmp(prompt, "/mem_snap_info", 14) == 0 || my_strncmp(prompt, "/mem_snap_check", 15) == 0) {
+                if (!g_llmk_ready) {
+                    Print(L"\r\n  (llmk not ready)\r\n\r\n");
+                    continue;
+                }
+                if (g_memorion.mode == MEMORION_MODE_OFF) {
+                    Print(L"\r\nERROR: Memorion is off (use /mem_on)\r\n\r\n");
+                    continue;
+                }
+
+                int is_check = (my_strncmp(prompt, "/mem_snap_check", 15) == 0);
+                int cmd_len = is_check ? 15 : 14;
+                const char *p = prompt + cmd_len;
+                while (*p == ' ' || *p == '\t') p++;
+
+                char snap8[96];
+                snap8[0] = 0;
+                if (*p) {
+                    int n = 0;
+                    while (*p && *p != ' ' && *p != '\t' && n + 1 < (int)sizeof(snap8)) {
+                        snap8[n++] = *p++;
+                    }
+                    snap8[n] = 0;
+                }
+                if (snap8[0] == 0) {
+                    llmk_ascii_copy_cap(snap8, (int)sizeof(snap8), "llmk-snap.bin");
+                }
+
+                if (llmk_ascii_has_dotdot(snap8)) {
+                    Print(L"\r\nERROR: path contains '..'\r\n\r\n");
+                    continue;
+                }
+
+                // Djibion gate (best-effort): treat as a snapshot load-like read.
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_SNAP_LOAD, snap8, 0, &d);
+                    djibion_log_if_observe(&g_djibion, is_check ? "mem_snap_check" : "mem_snap_info", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (%s): %s\r\n\r\n", is_check ? L"/mem_snap_check" : L"/mem_snap_info", msg);
+                        continue;
+                    }
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"[djibion] snap path transformed -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        llmk_ascii_copy_cap(snap8, (int)sizeof(snap8), d.transformed_arg0);
+                    }
+                }
+
+                CHAR16 snap16[96];
+                ascii_to_char16(snap16, snap8, (int)(sizeof(snap16) / sizeof(snap16[0])));
+
+                EFI_FILE_HANDLE f = NULL;
+                EFI_STATUS st = llmk_open_read_file(&f, snap16);
+                if (EFI_ERROR(st) || !f) {
+                    Print(L"\r\nERROR: open failed: %r\r\n\r\n", st);
+                    continue;
+                }
+
+                LlmkSnapHeader hdr;
+                st = read_exact(f, &hdr, sizeof(hdr));
+                uefi_call_wrapper(f->Close, 1, f);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: read failed: %r\r\n\r\n", st);
+                    continue;
+                }
+                if (hdr.magic != LLMK_SNAP_MAGIC || hdr.version != 1) {
+                    Print(L"\r\nERROR: invalid snapshot header (magic/version)\r\n\r\n");
+                    continue;
+                }
+
+                Print(L"\r\n[Snapshot]\r\n");
+                Print(L"  file=%s\r\n", snap16);
+                Print(L"  dim=%d layers=%d heads=%d kv=%d seq=%d\r\n", (int)hdr.dim, (int)hdr.n_layers, (int)hdr.n_heads, (int)hdr.n_kv_heads, (int)hdr.seq_len);
+                Print(L"  kv_dim=%d kv_pos=%d\r\n", (int)hdr.kv_dim, (int)hdr.kv_pos);
+                {
+                    UINTN slice_bytes = (UINTN)hdr.kv_pos * (UINTN)hdr.kv_dim * sizeof(float);
+                    UINTN total = sizeof(LlmkSnapHeader) + (UINTN)hdr.n_layers * 2u * slice_bytes;
+                    Print(L"  approx_bytes=%lu\r\n", (UINT64)total);
+                }
+
+                if (is_check) {
+                    int ok = 1;
+                    if (hdr.dim != (UINT32)config.dim) ok = 0;
+                    if (hdr.n_layers != (UINT32)config.n_layers) ok = 0;
+                    if (hdr.n_heads != (UINT32)config.n_heads) ok = 0;
+                    if (hdr.n_kv_heads != (UINT32)config.n_kv_heads) ok = 0;
+                    if (hdr.seq_len != (UINT32)config.seq_len) ok = 0;
+                    if (hdr.kv_pos == 0 || hdr.kv_pos > (UINT32)config.seq_len) ok = 0;
+                    Print(L"  compatible=%s\r\n\r\n", ok ? L"yes" : L"NO");
+                    g_memorion.checks_done++;
+                } else {
+                    Print(L"\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/mem_manifest", 13) == 0) {
+                if (!g_llmk_ready) {
+                    Print(L"\r\n  (llmk not ready)\r\n\r\n");
+                    continue;
+                }
+                if (g_memorion.mode == MEMORION_MODE_OFF) {
+                    Print(L"\r\nERROR: Memorion is off (use /mem_on)\r\n\r\n");
+                    continue;
+                }
+
+                // Usage:
+                //   /mem_manifest                 -> write current context manifest to llmk-manifest.txt
+                //   /mem_manifest <snap>          -> include snapshot header, write llmk-manifest.txt
+                //   /mem_manifest <snap> <out>    -> include snapshot header, write <out>
+                const char *p = prompt + 13;
+                while (*p == ' ' || *p == '\t') p++;
+
+                char snap8[96];
+                char out8[96];
+                snap8[0] = 0;
+                out8[0] = 0;
+
+                if (*p) {
+                    int n = 0;
+                    while (*p && *p != ' ' && *p != '\t' && n + 1 < (int)sizeof(snap8)) snap8[n++] = *p++;
+                    snap8[n] = 0;
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p) {
+                        int m = 0;
+                        while (*p && *p != ' ' && *p != '\t' && m + 1 < (int)sizeof(out8)) out8[m++] = *p++;
+                        out8[m] = 0;
+                    }
+                }
+
+                if (snap8[0] && llmk_ascii_has_dotdot(snap8)) {
+                    Print(L"\r\nERROR: snap path contains '..'\r\n\r\n");
+                    continue;
+                }
+                if (out8[0] && llmk_ascii_has_dotdot(out8)) {
+                    Print(L"\r\nERROR: out path contains '..'\r\n\r\n");
+                    continue;
+                }
+
+                CHAR16 out16[96];
+                if (out8[0]) {
+                    ascii_to_char16(out16, out8, (int)(sizeof(out16) / sizeof(out16[0])));
+                } else {
+                    StrCpy(out16, L"llmk-manifest.txt");
+                }
+
+                // Djibion gate (best-effort): writing a file.
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    char out_file8[128];
+                    llmk_char16_to_ascii_cap(out_file8, (int)sizeof(out_file8), out16);
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_FS_WRITE, out_file8, 4096u, &d);
+                    djibion_log_if_observe(&g_djibion, "mem_manifest", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/mem_manifest): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"[djibion] manifest path transformed -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        ascii_to_char16(out16, d.transformed_arg0, (int)(sizeof(out16) / sizeof(out16[0])));
+                    }
+                }
+
+                EFI_FILE_HANDLE f = NULL;
+                EFI_STATUS st = llmk_open_text_file(&f, out16);
+                if (EFI_ERROR(st) || !f) {
+                    Print(L"\r\nERROR: open failed: %r\r\n\r\n", st);
+                    continue;
+                }
+
+                LlmkSnapHeader hdr;
+                int have_hdr = 0;
+                int compat = 0;
+                if (snap8[0]) {
+                    // Djibion gate (best-effort): read snapshot.
+                    if (g_djibion.mode != DJIBION_MODE_OFF) {
+                        DjibionDecision d;
+                        djibion_decide(&g_djibion, DJIBION_ACT_SNAP_LOAD, snap8, 0, &d);
+                        djibion_log_if_observe(&g_djibion, "mem_manifest_snap", &d);
+                        if (djibion_should_block(&g_djibion, &d)) {
+                            CHAR16 msg[160];
+                            ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                            Print(L"\r\nDJIBION: blocked (snap read): %s\r\n\r\n", msg);
+                            uefi_call_wrapper(f->Close, 1, f);
+                            continue;
+                        }
+                        if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                            llmk_ascii_copy_cap(snap8, (int)sizeof(snap8), d.transformed_arg0);
+                        }
+                    }
+
+                    CHAR16 snap16[96];
+                    ascii_to_char16(snap16, snap8, (int)(sizeof(snap16) / sizeof(snap16[0])));
+                    EFI_FILE_HANDLE rf = NULL;
+                    st = llmk_open_read_file(&rf, snap16);
+                    if (!EFI_ERROR(st) && rf) {
+                        EFI_STATUS st2 = read_exact(rf, &hdr, sizeof(hdr));
+                        uefi_call_wrapper(rf->Close, 1, rf);
+                        if (!EFI_ERROR(st2) && hdr.magic == LLMK_SNAP_MAGIC && hdr.version == 1) {
+                            have_hdr = 1;
+                            compat = 1;
+                            if (hdr.dim != (UINT32)config.dim) compat = 0;
+                            if (hdr.n_layers != (UINT32)config.n_layers) compat = 0;
+                            if (hdr.n_heads != (UINT32)config.n_heads) compat = 0;
+                            if (hdr.n_kv_heads != (UINT32)config.n_kv_heads) compat = 0;
+                            if (hdr.seq_len != (UINT32)config.seq_len) compat = 0;
+                            if (hdr.kv_pos == 0 || hdr.kv_pos > (UINT32)config.seq_len) compat = 0;
+                        }
+                    }
+                }
+
+                {
+                    CHAR16 line[256];
+                    UINT32 h = llmk_memorion_ctx_hash32(&config, model_filename);
+                    llmk_file_write_u16(f, L"LLMK MEMORION MANIFEST\r\n\r\n");
+                    SPrint(line, sizeof(line), L"  model=%s\r\n", model_filename ? model_filename : L"(unknown)");
+                    llmk_file_write_u16(f, line);
+                    SPrint(line, sizeof(line), L"  dim=%d layers=%d heads=%d kv=%d vocab=%d seq=%d\r\n",
+                           config.dim, config.n_layers, config.n_heads, config.n_kv_heads, config.vocab_size, config.seq_len);
+                    llmk_file_write_u16(f, line);
+                    SPrint(line, sizeof(line), L"  kv_pos=%d\r\n", kv_pos);
+                    llmk_file_write_u16(f, line);
+                    SPrint(line, sizeof(line), L"  ctx_hash32=0x%08x\r\n\r\n", h);
+                    llmk_file_write_u16(f, line);
+
+                    if (snap8[0]) {
+                        llmk_file_write_u16(f, L"Snapshot:\r\n");
+                        {
+                            CHAR16 snap16[96];
+                            ascii_to_char16(snap16, snap8, (int)(sizeof(snap16) / sizeof(snap16[0])));
+                            SPrint(line, sizeof(line), L"  file=%s\r\n", snap16);
+                            llmk_file_write_u16(f, line);
+                        }
+                        if (have_hdr) {
+                            SPrint(line, sizeof(line), L"  dim=%d layers=%d heads=%d kv=%d seq=%d\r\n",
+                                   (int)hdr.dim, (int)hdr.n_layers, (int)hdr.n_heads, (int)hdr.n_kv_heads, (int)hdr.seq_len);
+                            llmk_file_write_u16(f, line);
+                            SPrint(line, sizeof(line), L"  kv_dim=%d kv_pos=%d\r\n",
+                                   (int)hdr.kv_dim, (int)hdr.kv_pos);
+                            llmk_file_write_u16(f, line);
+                            SPrint(line, sizeof(line), L"  compatible=%s\r\n\r\n", compat ? L"yes" : L"NO");
+                            llmk_file_write_u16(f, line);
+                        } else {
+                            llmk_file_write_u16(f, L"  (could not read valid header)\r\n\r\n");
+                        }
+                    }
+                }
+
+                EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+                uefi_call_wrapper(f->Close, 1, f);
+                if (EFI_ERROR(flush_st)) {
+                    Print(L"\r\nWARNING: flush failed %r (file may not persist)\r\n\r\n", flush_st);
+                } else {
+                    g_memorion.manifests_written++;
+                    Print(L"\r\nOK: wrote %s (flushed)\r\n\r\n", out16);
+                }
+                continue;
+
+            // ==============================================================
+            // ORCHESTRION commands
+            // ==============================================================
+            } else if (my_strncmp(prompt, "/orch_on", 8) == 0) {
+                orchestrion_set_mode(&g_orchestrion, ORCHESTRION_MODE_OBSERVE);
+                Print(L"\r\nOK: orchestrion=observe\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/orch_off", 9) == 0) {
+                orchestrion_set_mode(&g_orchestrion, ORCHESTRION_MODE_OFF);
+                Print(L"\r\nOK: orchestrion=off\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/orch_enforce", 13) == 0) {
+                const char *p = prompt + 13;
+                while (*p == ' ') p++;
+                int v = 2;
+                if (*p >= '0' && *p <= '2') v = *p - '0';
+                orchestrion_set_mode(&g_orchestrion, (OrchestrionMode)v);
+                Print(L"\r\nOK: orchestrion_mode=%d\r\n\r\n", v);
+                continue;
+            } else if (my_strncmp(prompt, "/orch_status", 12) == 0) {
+                Print(L"\r\n[Orchestrion]\r\n");
+                Print(L"  mode=");
+                llmk_print_ascii(orchestrion_mode_name_ascii(g_orchestrion.mode));
+                Print(L"\r\n");
+                Print(L"  state=");
+                llmk_print_ascii(orchestrion_state_name_ascii(g_orchestrion.pipeline.state));
+                Print(L"\r\n");
+                Print(L"  steps=%d current=%d loops=%d/%d\r\n",
+                      (int)g_orchestrion.pipeline.step_count,
+                      (int)g_orchestrion.pipeline.current_step,
+                      (int)g_orchestrion.pipeline.loops_done,
+                      (int)g_orchestrion.pipeline.loops_max);
+                Print(L"  workflows_run=%d steps_executed=%d errors=%d\r\n\r\n",
+                      (int)g_orchestrion.workflows_run,
+                      (int)g_orchestrion.steps_executed,
+                      (int)g_orchestrion.errors);
+                continue;
+            } else if (my_strncmp(prompt, "/orch_clear", 11) == 0) {
+                orchestrion_pipeline_clear(&g_orchestrion);
+                Print(L"\r\nOK: pipeline cleared\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/orch_add", 9) == 0) {
+                const char *p = prompt + 9;
+                while (*p == ' ') p++;
+                if (*p == 0) {
+                    Print(L"\r\nUsage: /orch_add <step> [; <step2> ...]\r\n\r\n");
+                    continue;
+                }
+                int added = 0;
+                while (*p) {
+                    char step[ORCHESTRION_STEP_LEN];
+                    int n = 0;
+                    while (*p && *p != ';' && n + 1 < ORCHESTRION_STEP_LEN) {
+                        step[n++] = *p++;
+                    }
+                    step[n] = 0;
+                    // Trim trailing spaces
+                    while (n > 0 && (step[n-1] == ' ' || step[n-1] == '\t')) step[--n] = 0;
+                    // Trim leading spaces
+                    char *s = step;
+                    while (*s == ' ' || *s == '\t') s++;
+                    if (*s) {
+                        if (orchestrion_pipeline_add_step(&g_orchestrion, s)) added++;
+                    }
+                    if (*p == ';') p++;
+                    while (*p == ' ' || *p == '\t') p++;
+                }
+                Print(L"\r\nOK: added %d step(s), total=%d\r\n\r\n", added, (int)g_orchestrion.pipeline.step_count);
+                continue;
+            } else if (my_strncmp(prompt, "/orch_start", 11) == 0) {
+                const char *p = prompt + 11;
+                while (*p == ' ') p++;
+                uint32_t loops = 1;
+                if (*p >= '0' && *p <= '9') {
+                    loops = 0;
+                    while (*p >= '0' && *p <= '9') loops = loops * 10 + (*p++ - '0');
+                }
+                if (orchestrion_pipeline_start(&g_orchestrion, loops)) {
+                    Print(L"\r\nOK: pipeline started (loops=%d)\r\n\r\n", (int)loops);
+                } else {
+                    Print(L"\r\nERROR: cannot start (no steps?)\r\n\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/orch_pause", 11) == 0) {
+                orchestrion_pipeline_pause(&g_orchestrion);
+                Print(L"\r\nOK: pipeline paused\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/orch_resume", 12) == 0) {
+                orchestrion_pipeline_resume(&g_orchestrion);
+                Print(L"\r\nOK: pipeline resumed\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/orch_stop", 10) == 0) {
+                orchestrion_pipeline_stop(&g_orchestrion);
+                Print(L"\r\nOK: pipeline stopped\r\n\r\n");
+                continue;
+
+            // ==============================================================
+            // CALIBRION commands
+            // ==============================================================
+            } else if (my_strncmp(prompt, "/calib_on", 9) == 0) {
+                calibrion_set_mode(&g_calibrion, CALIBRION_MODE_OBSERVE);
+                Print(L"\r\nOK: calibrion=observe\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/calib_off", 10) == 0) {
+                calibrion_set_mode(&g_calibrion, CALIBRION_MODE_OFF);
+                Print(L"\r\nOK: calibrion=off\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/calib_enforce", 14) == 0) {
+                const char *p = prompt + 14;
+                while (*p == ' ') p++;
+                int v = 2;
+                if (*p >= '0' && *p <= '2') v = *p - '0';
+                calibrion_set_mode(&g_calibrion, (CalibrionMode)v);
+                Print(L"\r\nOK: calibrion_mode=%d\r\n\r\n", v);
+                continue;
+            } else if (my_strncmp(prompt, "/calib_strategy", 15) == 0) {
+                const char *p = prompt + 15;
+                while (*p == ' ') p++;
+                CalibrionStrategy s = CALIBRION_STRATEGY_NONE;
+                if (my_strncmp(p, "entropy", 7) == 0) s = CALIBRION_STRATEGY_ENTROPY;
+                else if (my_strncmp(p, "length", 6) == 0) s = CALIBRION_STRATEGY_LENGTH;
+                else if (my_strncmp(p, "quality", 7) == 0) s = CALIBRION_STRATEGY_QUALITY;
+                else if (my_strncmp(p, "hybrid", 6) == 0) s = CALIBRION_STRATEGY_HYBRID;
+                calibrion_set_strategy(&g_calibrion, s);
+                Print(L"\r\nOK: calibrion_strategy=");
+                llmk_print_ascii(calibrion_strategy_name_ascii(s));
+                Print(L"\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/calib_status", 13) == 0) {
+                Print(L"\r\n[Calibrion]\r\n");
+                Print(L"  mode=");
+                llmk_print_ascii(calibrion_mode_name_ascii(g_calibrion.mode));
+                Print(L"\r\n");
+                Print(L"  strategy=");
+                llmk_print_ascii(calibrion_strategy_name_ascii(g_calibrion.strategy));
+                Print(L"\r\n");
+                Print(L"  samples=%d total_tokens=%d repeats=%d\r\n",
+                      (int)g_calibrion.stats.samples,
+                      (int)g_calibrion.stats.total_tokens,
+                      (int)g_calibrion.stats.total_repeats);
+                Print(L"  short=%d long=%d avg_entropy_milli=%d\r\n",
+                      (int)g_calibrion.stats.short_responses,
+                      (int)g_calibrion.stats.long_responses,
+                      (int)g_calibrion.stats.avg_entropy_milli);
+                Print(L"  rec: temp=%d.%02d top_k=%d top_p=%d.%02d\r\n",
+                      (int)(g_calibrion.rec_temp_milli / 1000),
+                      (int)((g_calibrion.rec_temp_milli % 1000) / 10),
+                      (int)g_calibrion.rec_top_k,
+                      (int)(g_calibrion.rec_top_p_milli / 1000),
+                      (int)((g_calibrion.rec_top_p_milli % 1000) / 10));
+                Print(L"  calibrations_done=%d\r\n\r\n", (int)g_calibrion.calibrations_done);
+                continue;
+            } else if (my_strncmp(prompt, "/calib_reset", 12) == 0) {
+                calibrion_reset_stats(&g_calibrion);
+                Print(L"\r\nOK: calibrion stats reset\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/calib_apply", 12) == 0) {
+                uint32_t t, k, p;
+                calibrion_get_recommendation(&g_calibrion, &t, &k, &p);
+                temperature = (float)t / 1000.0f;
+                top_k = (int)k;
+                top_p = (float)p / 1000.0f;
+                Print(L"\r\nOK: applied temp=%d.%02d top_k=%d top_p=%d.%02d\r\n\r\n",
+                      (int)temperature, (int)((temperature - (int)temperature) * 100.0f),
+                      top_k,
+                      (int)top_p, (int)((top_p - (int)top_p) * 100.0f));
+                continue;
+
+            // ==============================================================
+            // COMPATIBILION commands
+            // ==============================================================
+            } else if (my_strncmp(prompt, "/compat_on", 10) == 0) {
+                compatibilion_set_mode(&g_compatibilion, COMPATIBILION_MODE_ON);
+                Print(L"\r\nOK: compatibilion=on\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/compat_off", 11) == 0) {
+                compatibilion_set_mode(&g_compatibilion, COMPATIBILION_MODE_OFF);
+                Print(L"\r\nOK: compatibilion=off\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/compat_status", 14) == 0) {
+                Print(L"\r\n[Compatibilion]\r\n");
+                Print(L"  mode=");
+                llmk_print_ascii(compatibilion_mode_name_ascii(g_compatibilion.mode));
+                Print(L"\r\n");
+                Print(L"  cpu_vendor=");
+                llmk_print_ascii(g_compatibilion.caps.cpu_vendor);
+                Print(L"\r\n");
+                Print(L"  cpu_brand=");
+                llmk_print_ascii(g_compatibilion.caps.cpu_brand);
+                Print(L"\r\n");
+                Print(L"  cpu_flags=0x%x (SSE2=%d AVX=%d AVX2=%d FMA=%d)\r\n",
+                      (unsigned)g_compatibilion.caps.cpu_flags,
+                      compatibilion_has_cpu(&g_compatibilion, COMPAT_CPU_SSE2),
+                      compatibilion_has_cpu(&g_compatibilion, COMPAT_CPU_AVX),
+                      compatibilion_has_cpu(&g_compatibilion, COMPAT_CPU_AVX2),
+                      compatibilion_has_cpu(&g_compatibilion, COMPAT_CPU_FMA));
+                Print(L"  platform_flags=0x%x (UEFI=%d GOP=%d FAT32=%d)\r\n",
+                      (unsigned)g_compatibilion.caps.platform_flags,
+                      compatibilion_has_platform(&g_compatibilion, COMPAT_PLAT_UEFI),
+                      compatibilion_has_platform(&g_compatibilion, COMPAT_PLAT_GOP),
+                      compatibilion_has_platform(&g_compatibilion, COMPAT_PLAT_FAT32));
+                Print(L"  mem_tier=");
+                llmk_print_ascii(compatibilion_mem_tier_name_ascii(g_compatibilion.caps.mem_tier));
+                Print(L" (%lu bytes)\r\n", g_compatibilion.caps.mem_bytes);
+                if (g_compatibilion.caps.gop_width > 0) {
+                    Print(L"  gop=%dx%d\r\n", (int)g_compatibilion.caps.gop_width, (int)g_compatibilion.caps.gop_height);
+                }
+                Print(L"  recommend: attn=%s model_mb=%d\r\n",
+                      compatibilion_recommend_attn(&g_compatibilion) ? L"AVX2" : L"SSE2",
+                      (int)compatibilion_recommend_model_mb(&g_compatibilion));
+                Print(L"  probes_done=%d\r\n\r\n", (int)g_compatibilion.probes_done);
+                continue;
+            } else if (my_strncmp(prompt, "/compat_probe", 13) == 0) {
+                compatibilion_probe_cpu(&g_compatibilion);
+                Print(L"\r\nOK: CPU probed (flags=0x%x)\r\n\r\n", (unsigned)g_compatibilion.caps.cpu_flags);
+                continue;
+
             } else if (my_strncmp(prompt, "/gop", 4) == 0) {
                 if (!g_gop_fb32) {
                     Print(L"\r\n  GOP: not available\r\n\r\n");
@@ -4694,6 +8043,278 @@ model_selected:
                     else if (g_gop_pf == PixelBitMask) pf = L"BITMASK";
                     Print(L"\r\n  GOP: %dx%d ppsl=%d fmt=%s fb=0x%lx\r\n\r\n",
                           (int)g_gop_w, (int)g_gop_h, (int)g_gop_ppsl, pf, (UINT64)(UINTN)g_gop_fb32);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/tui_on", 7) == 0) {
+                if (!g_gop_fb32) {
+                    Print(L"\r\nERROR: GOP not available\r\n\r\n");
+                } else {
+                    g_tui_enabled = 1;
+                    llmk_tui_set_event("/tui_on");
+                    llmk_tui_redraw_best_effort();
+                    Print(L"\r\nOK: TUI enabled\r\n\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/tui_off", 8) == 0) {
+                g_tui_enabled = 0;
+                llmk_tui_set_event("/tui_off");
+                Print(L"\r\nOK: TUI disabled\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/tui_toggle", 11) == 0) {
+                if (!g_gop_fb32) {
+                    Print(L"\r\nERROR: GOP not available\r\n\r\n");
+                } else {
+                    g_tui_enabled = !g_tui_enabled;
+                    llmk_tui_set_event("/tui_toggle");
+                    if (g_tui_enabled) llmk_tui_redraw_best_effort();
+                    Print(L"\r\nOK: TUI %s\r\n\r\n", g_tui_enabled ? L"enabled" : L"disabled");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/tui_redraw", 11) == 0) {
+                if (!g_gop_fb32) {
+                    Print(L"\r\nERROR: GOP not available\r\n\r\n");
+                } else {
+                    llmk_tui_set_event("/tui_redraw");
+                    g_tui_enabled = 1;
+                    llmk_tui_redraw_best_effort();
+                    Print(L"\r\nOK: TUI redrawn\r\n\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/tui_mode", 9) == 0) {
+                if (!g_gop_fb32) {
+                    Print(L"\r\nERROR: GOP not available\r\n\r\n");
+                    continue;
+                }
+                const char *p = prompt + 9;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == 0) {
+                    Print(L"\r\nUsage: /tui_mode <status|log|split|files>\r\n");
+                    Print(L"  Current: %d\r\n\r\n", g_ui_mode);
+                    continue;
+                }
+                if (my_strncmp(p, "status", 6) == 0) g_ui_mode = 0;
+                else if (my_strncmp(p, "log", 3) == 0) g_ui_mode = 1;
+                else if (my_strncmp(p, "split", 5) == 0) g_ui_mode = 2;
+                else if (my_strncmp(p, "files", 5) == 0) g_ui_mode = 3;
+                else {
+                    Print(L"\r\nERROR: unknown mode\r\n\r\n");
+                    continue;
+                }
+                g_tui_enabled = 1;
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/tui_mode");
+                llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: UI mode=%d\r\n\r\n", g_ui_mode);
+                continue;
+            } else if (my_strncmp(prompt, "/tui_log_on", 11) == 0) {
+                if (!g_gop_fb32) {
+                    Print(L"\r\nERROR: GOP not available\r\n\r\n");
+                    continue;
+                }
+                g_ui_mode = 1;
+                g_tui_enabled = 1;
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/tui_log_on");
+                llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: log UI enabled\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/tui_log_off", 12) == 0) {
+                g_ui_mode = 0;
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/tui_log_off");
+                if (g_tui_enabled) llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: log UI disabled\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/tui_log_clear", 13) == 0) {
+                llmk_tr_clear();
+                llmk_tui_set_event("/tui_log_clear");
+                if (g_tui_enabled && g_gop_fb32) llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: transcript cleared\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/tui_log_up", 11) == 0) {
+                const char *p = prompt + 11;
+                while (*p == ' ' || *p == '\t') p++;
+                int n = 10;
+                if (*p) {
+                    int v = 0;
+                    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                    if (v > 0) n = v;
+                }
+                g_tr_scroll += n;
+                if ((UINT32)g_tr_scroll > g_tr_count) g_tr_scroll = (int)g_tr_count;
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/tui_log_up");
+                if (g_tui_enabled && g_gop_fb32) llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: log scroll=%d\r\n\r\n", g_tr_scroll);
+                continue;
+            } else if (my_strncmp(prompt, "/tui_log_down", 13) == 0) {
+                const char *p = prompt + 13;
+                while (*p == ' ' || *p == '\t') p++;
+                int n = 10;
+                if (*p) {
+                    int v = 0;
+                    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                    if (v > 0) n = v;
+                }
+                g_tr_scroll -= n;
+                if (g_tr_scroll < 0) g_tr_scroll = 0;
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/tui_log_down");
+                if (g_tui_enabled && g_gop_fb32) llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: log scroll=%d\r\n\r\n", g_tr_scroll);
+                continue;
+            } else if (my_strncmp(prompt, "/tui_log_dump", 13) == 0) {
+                const char *p = prompt + 13;
+                while (*p == ' ' || *p == '\t') p++;
+                CHAR16 out_name[96];
+                if (*p == 0) {
+                    StrCpy(out_name, L"llmk-transcript.txt");
+                } else {
+                    ascii_to_char16(out_name, p, (int)(sizeof(out_name) / sizeof(out_name[0])));
+                }
+
+                // Flush any partial line so the dump matches what the user saw.
+                if (g_tr_cur_len > 0) llmk_tr_flush_cur_line();
+
+                EFI_FILE_HANDLE f = NULL;
+                EFI_STATUS st = llmk_open_text_file(&f, out_name);
+                if (EFI_ERROR(st) || !f) {
+                    Print(L"\r\nERROR: cannot open %s (%r)\r\n\r\n", out_name, st);
+                    continue;
+                }
+                for (UINT32 age = g_tr_count; age > 0; age--) {
+                    const char *line8 = llmk_tr_get_line_by_age(age - 1);
+                    CHAR16 line16[LLMK_TR_COLS + 4];
+                    ascii_to_char16(line16, line8, (int)(sizeof(line16) / sizeof(line16[0])));
+                    llmk_file_write_u16(f, line16);
+                    llmk_file_write_u16(f, L"\r\n");
+                }
+                EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+                uefi_call_wrapper(f->Close, 1, f);
+                if (EFI_ERROR(flush_st)) {
+                    Print(L"\r\nWARNING: flush failed (%r)\r\n\r\n", flush_st);
+                } else {
+                    Print(L"\r\nOK: wrote %s\r\n\r\n", out_name);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/fb_on", 6) == 0 || my_strcmp(prompt, "/fb") == 0) {
+                if (!g_gop_fb32) {
+                    Print(L"\r\nERROR: GOP not available\r\n\r\n");
+                    continue;
+                }
+                g_ui_mode = 3;
+                g_tui_enabled = 1;
+                llmk_fb_refresh_best_effort();
+                llmk_fb_preview_selected_best_effort();
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/fb_on");
+                llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: file browser enabled\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/fb_off", 7) == 0) {
+                g_ui_mode = 0;
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/fb_off");
+                if (g_tui_enabled && g_gop_fb32) llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: file browser disabled\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/fb_refresh", 11) == 0) {
+                if (!g_gop_fb32) {
+                    Print(L"\r\nERROR: GOP not available\r\n\r\n");
+                    continue;
+                }
+                llmk_fb_refresh_best_effort();
+                llmk_fb_preview_selected_best_effort();
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/fb_refresh");
+                if (g_tui_enabled) llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/fb_cd", 6) == 0) {
+                const char *p = prompt + 6;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == 0) {
+                    Print(L"\r\nUsage: /fb_cd <dir>\r\n\r\n");
+                    continue;
+                }
+                llmk_ascii_copy_cap(g_fb_path8, (int)sizeof(g_fb_path8), p);
+                ascii_to_char16(g_fb_path16, g_fb_path8, (int)(sizeof(g_fb_path16) / sizeof(g_fb_path16[0])));
+                llmk_fb_refresh_best_effort();
+                llmk_fb_preview_selected_best_effort();
+                g_ui_mode = 3;
+                g_tui_enabled = 1;
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/fb_cd");
+                llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: cd %s\r\n\r\n", g_fb_path16);
+                continue;
+            } else if (my_strncmp(prompt, "/fb_up", 6) == 0) {
+                // Parent directory (ASCII path best-effort)
+                int n = 0;
+                while (g_fb_path8[n]) n++;
+                while (n > 0 && (g_fb_path8[n - 1] == '\\' || g_fb_path8[n - 1] == '/')) n--;
+                while (n > 0 && g_fb_path8[n - 1] != '\\') n--;
+                if (n <= 0) {
+                    llmk_ascii_copy_cap(g_fb_path8, (int)sizeof(g_fb_path8), "\\");
+                } else {
+                    g_fb_path8[n] = 0;
+                    if (g_fb_path8[0] == 0) llmk_ascii_copy_cap(g_fb_path8, (int)sizeof(g_fb_path8), "\\");
+                }
+                ascii_to_char16(g_fb_path16, g_fb_path8, (int)(sizeof(g_fb_path16) / sizeof(g_fb_path16[0])));
+                llmk_fb_refresh_best_effort();
+                llmk_fb_preview_selected_best_effort();
+                g_ui_mode = 3;
+                g_tui_enabled = 1;
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/fb_up");
+                llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: cd %s\r\n\r\n", g_fb_path16);
+                continue;
+            } else if (my_strncmp(prompt, "/fb_sel", 7) == 0) {
+                const char *p = prompt + 7;
+                while (*p == ' ' || *p == '\t') p++;
+                int v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                if (v < 0) v = 0;
+                if (v >= g_fb_count) v = (g_fb_count > 0) ? (g_fb_count - 1) : 0;
+                g_fb_sel = v;
+                llmk_fb_preview_selected_best_effort();
+                g_tui_dirty = 1;
+                llmk_tui_set_event("/fb_sel");
+                if (g_tui_enabled && g_gop_fb32) llmk_tui_redraw_best_effort();
+                Print(L"\r\nOK: sel=%d\r\n\r\n", g_fb_sel);
+                continue;
+            } else if (my_strncmp(prompt, "/fb_open", 8) == 0) {
+                if (g_fb_count <= 0 || g_fb_sel < 0 || g_fb_sel >= g_fb_count) {
+                    Print(L"\r\nERROR: no selection\r\n\r\n");
+                    continue;
+                }
+                if (g_fb_entries[g_fb_sel].is_dir) {
+                    // cd into dir
+                    char newp[128];
+                    newp[0] = 0;
+                    llmk_ascii_copy_cap(newp, (int)sizeof(newp), g_fb_path8[0] ? g_fb_path8 : "\\");
+                    int np = 0;
+                    while (newp[np]) np++;
+                    if (np > 0 && newp[np - 1] != '\\') {
+                        if (np + 1 < (int)sizeof(newp)) newp[np++] = '\\';
+                        newp[np] = 0;
+                    }
+                    llmk_ascii_append_cap(newp, (int)sizeof(newp), g_fb_entries[g_fb_sel].name8);
+                    llmk_ascii_copy_cap(g_fb_path8, (int)sizeof(g_fb_path8), newp);
+                    ascii_to_char16(g_fb_path16, g_fb_path8, (int)(sizeof(g_fb_path16) / sizeof(g_fb_path16[0])));
+                    llmk_fb_refresh_best_effort();
+                    llmk_fb_preview_selected_best_effort();
+                    g_tui_dirty = 1;
+                    llmk_tui_set_event("/fb_open(dir)");
+                    if (g_tui_enabled && g_gop_fb32) llmk_tui_redraw_best_effort();
+                    Print(L"\r\nOK: cd %s\r\n\r\n", g_fb_path16);
+                } else {
+                    llmk_fb_preview_selected_best_effort();
+                    g_tui_dirty = 1;
+                    llmk_tui_set_event("/fb_open(file)");
+                    if (g_tui_enabled && g_gop_fb32) llmk_tui_redraw_best_effort();
+                    Print(L"\r\nOK: preview loaded\r\n\r\n");
                 }
                 continue;
             } else if (my_strncmp(prompt, "/render", 7) == 0) {
@@ -4741,6 +8362,483 @@ model_selected:
                 } else {
                     Print(L"\r\nOK: wrote %s (PPM, flushed)\r\n\r\n", out_name);
                 }
+                continue;
+            } else if (my_strncmp(prompt, "/fs_ls", 6) == 0) {
+                const char *p = prompt + 6;
+                while (*p == ' ' || *p == '\t') p++;
+                CHAR16 path[160];
+                if (*p == 0) {
+                    path[0] = 0;
+                } else {
+                    ascii_to_char16(path, p, (int)(sizeof(path) / sizeof(path[0])));
+                }
+                Print(L"\r\n");
+                llmk_fs_ls_best_effort(path[0] ? path : NULL, 200);
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/fs_cat", 7) == 0) {
+                const char *p = prompt + 7;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == 0) {
+                    Print(L"\r\nUsage: /fs_cat <file>\r\n\r\n");
+                    continue;
+                }
+                CHAR16 path[160];
+                ascii_to_char16(path, p, (int)(sizeof(path) / sizeof(path[0])));
+                Print(L"\r\n");
+                llmk_fs_cat_best_effort(path, 256U * 1024U);
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/fs_write", 9) == 0) {
+                const char *p = prompt + 9;
+                while (*p == ' ' || *p == '\t') p++;
+                // Parse path token
+                char tok[160];
+                int tp = 0;
+                while (*p && *p != ' ' && *p != '\t' && tp + 1 < (int)sizeof(tok)) tok[tp++] = *p++;
+                tok[tp] = 0;
+                while (*p == ' ' || *p == '\t') p++;
+                const char *text = p;
+                if (tok[0] == 0) {
+                    Print(L"\r\nUsage: /fs_write <file> <text...>\r\n\r\n");
+                    continue;
+                }
+
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_FS_WRITE, tok, (UINT32)my_strlen(text), &d);
+                    djibion_log_if_observe(&g_djibion, "fs_write", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/fs_write): %s\r\n\r\n", msg);
+                        continue;
+                    }
+
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"\r\nDJIBION: transform (/fs_write) -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        djibion_apply_transform_path(tok, (int)sizeof(tok), &d);
+                    }
+                }
+
+                CHAR16 path[160];
+                ascii_to_char16(path, tok, (int)(sizeof(path) / sizeof(path[0])));
+                EFI_FILE_HANDLE f = NULL;
+                EFI_STATUS st = llmk_open_binary_file(&f, path);
+                if (EFI_ERROR(st) || !f) {
+                    Print(L"\r\nERROR: open failed: %r\r\n\r\n", st);
+                    continue;
+                }
+                UINTN n = (UINTN)my_strlen(text);
+                st = llmk_file_write_bytes(f, text, n);
+                EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+                uefi_call_wrapper(f->Close, 1, f);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: write failed: %r\r\n\r\n", st);
+                } else if (EFI_ERROR(flush_st)) {
+                    Print(L"\r\nWARNING: flush failed: %r\r\n\r\n", flush_st);
+                } else {
+                    Print(L"\r\nOK: wrote ");
+                    Print(L"%s", path);
+                    Print(L" (%d bytes)\r\n\r\n", (int)n);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/fs_append", 10) == 0) {
+                const char *p = prompt + 10;
+                while (*p == ' ' || *p == '\t') p++;
+                // Parse path token
+                char tok[160];
+                int tp = 0;
+                while (*p && *p != ' ' && *p != '\t' && tp + 1 < (int)sizeof(tok)) tok[tp++] = *p++;
+                tok[tp] = 0;
+                while (*p == ' ' || *p == '\t') p++;
+                const char *text = p;
+                if (tok[0] == 0) {
+                    Print(L"\r\nUsage: /fs_append <file> <text...>\r\n\r\n");
+                    continue;
+                }
+
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_FS_APPEND, tok, (UINT32)my_strlen(text), &d);
+                    djibion_log_if_observe(&g_djibion, "fs_append", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/fs_append): %s\r\n\r\n", msg);
+                        continue;
+                    }
+
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"\r\nDJIBION: transform (/fs_append) -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        djibion_apply_transform_path(tok, (int)sizeof(tok), &d);
+                    }
+                }
+
+                CHAR16 path[160];
+                ascii_to_char16(path, tok, (int)(sizeof(path) / sizeof(path[0])));
+                EFI_FILE_HANDLE f = NULL;
+                EFI_STATUS st = llmk_open_binary_file_append(&f, path);
+                if (EFI_ERROR(st) || !f) {
+                    Print(L"\r\nERROR: open failed: %r\r\n\r\n", st);
+                    continue;
+                }
+                UINTN n = (UINTN)my_strlen(text);
+                st = llmk_file_write_bytes(f, text, n);
+                EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+                uefi_call_wrapper(f->Close, 1, f);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: append failed: %r\r\n\r\n", st);
+                } else if (EFI_ERROR(flush_st)) {
+                    Print(L"\r\nWARNING: flush failed: %r\r\n\r\n", flush_st);
+                } else {
+                    Print(L"\r\nOK: appended ");
+                    Print(L"%s", path);
+                    Print(L" (%d bytes)\r\n\r\n", (int)n);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/fs_rm", 6) == 0) {
+                const char *p = prompt + 6;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == 0) {
+                    Print(L"\r\nUsage: /fs_rm <file>\r\n\r\n");
+                    continue;
+                }
+
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_FS_RM, p, 0, &d);
+                    djibion_log_if_observe(&g_djibion, "fs_rm", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/fs_rm): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                }
+
+                CHAR16 path[160];
+                ascii_to_char16(path, p, (int)(sizeof(path) / sizeof(path[0])));
+                EFI_STATUS st = llmk_delete_file_best_effort(path);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: delete failed: %r\r\n\r\n", st);
+                } else {
+                    Print(L"\r\nOK: deleted %s\r\n\r\n", path);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/fs_cp", 6) == 0) {
+                const char *p = prompt + 6;
+                while (*p == ' ' || *p == '\t') p++;
+                char src8[128];
+                int sp = 0;
+                while (*p && *p != ' ' && *p != '\t' && sp + 1 < (int)sizeof(src8)) src8[sp++] = *p++;
+                src8[sp] = 0;
+                while (*p == ' ' || *p == '\t') p++;
+                char dst8[128];
+                int dp = 0;
+                while (*p && *p != ' ' && *p != '\t' && dp + 1 < (int)sizeof(dst8)) dst8[dp++] = *p++;
+                dst8[dp] = 0;
+                if (src8[0] == 0 || dst8[0] == 0) {
+                    Print(L"\r\nUsage: /fs_cp <src> <dst>\r\n\r\n");
+                    continue;
+                }
+
+                // Djibion gate (best-effort): validate src (no '..') and govern dst.
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    if (llmk_ascii_has_dotdot(src8)) {
+                        Print(L"\r\nDJIBION: blocked (/fs_cp): src path contains '..'\r\n\r\n");
+                        continue;
+                    }
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_FS_CP, dst8, 0, &d);
+                    djibion_log_if_observe(&g_djibion, "fs_cp", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/fs_cp): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"[djibion] fs_cp dst transformed -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        llmk_ascii_copy_cap(dst8, (int)sizeof(dst8), d.transformed_arg0);
+                    }
+                }
+
+                CHAR16 src[160];
+                CHAR16 dst[160];
+                ascii_to_char16(src, src8, (int)(sizeof(src) / sizeof(src[0])));
+                ascii_to_char16(dst, dst8, (int)(sizeof(dst) / sizeof(dst[0])));
+                EFI_STATUS st = llmk_copy_file_best_effort(src, dst);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: copy failed: %r\r\n\r\n", st);
+                } else {
+                    Print(L"\r\nOK: copied %s -> %s\r\n\r\n", src, dst);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/fs_mv", 6) == 0) {
+                const char *p = prompt + 6;
+                while (*p == ' ' || *p == '\t') p++;
+                char src8[128];
+                int sp = 0;
+                while (*p && *p != ' ' && *p != '\t' && sp + 1 < (int)sizeof(src8)) src8[sp++] = *p++;
+                src8[sp] = 0;
+                while (*p == ' ' || *p == '\t') p++;
+                char dst8[128];
+                int dp = 0;
+                while (*p && *p != ' ' && *p != '\t' && dp + 1 < (int)sizeof(dst8)) dst8[dp++] = *p++;
+                dst8[dp] = 0;
+                if (src8[0] == 0 || dst8[0] == 0) {
+                    Print(L"\r\nUsage: /fs_mv <src> <dst>\r\n\r\n");
+                    continue;
+                }
+
+                // Djibion gate (best-effort): validate src (no '..') and govern dst (move implies delete).
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    if (llmk_ascii_has_dotdot(src8)) {
+                        Print(L"\r\nDJIBION: blocked (/fs_mv): src path contains '..'\r\n\r\n");
+                        continue;
+                    }
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_FS_MV, dst8, 0, &d);
+                    djibion_log_if_observe(&g_djibion, "fs_mv", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/fs_mv): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"[djibion] fs_mv dst transformed -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        llmk_ascii_copy_cap(dst8, (int)sizeof(dst8), d.transformed_arg0);
+                    }
+                }
+
+                CHAR16 src[160];
+                CHAR16 dst[160];
+                ascii_to_char16(src, src8, (int)(sizeof(src) / sizeof(src[0])));
+                ascii_to_char16(dst, dst8, (int)(sizeof(dst) / sizeof(dst[0])));
+                EFI_STATUS st = llmk_copy_file_best_effort(src, dst);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: move copy failed: %r\r\n\r\n", st);
+                    continue;
+                }
+                EFI_STATUS st2 = llmk_delete_file_best_effort(src);
+                if (EFI_ERROR(st2)) {
+                    Print(L"\r\nWARNING: move delete failed: %r\r\n\r\n", st2);
+                } else {
+                    Print(L"\r\nOK: moved %s -> %s\r\n\r\n", src, dst);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/snap_save", 10) == 0) {
+                if (!g_llmk_ready) {
+                    Print(L"\r\n  (llmk not ready)\r\n\r\n");
+                    continue;
+                }
+                const char *p = prompt + 10;
+                while (*p == ' ' || *p == '\t') p++;
+                CHAR16 out_name[96];
+                if (*p == 0) {
+                    StrCpy(out_name, L"llmk-snap.bin");
+                } else {
+                    ascii_to_char16(out_name, p, (int)(sizeof(out_name) / sizeof(out_name[0])));
+                }
+
+                if (kv_pos <= 0) {
+                    Print(L"\r\nERROR: nothing to snapshot (kv_pos=0)\r\n\r\n");
+                    continue;
+                }
+                if (kv_pos > config.seq_len) {
+                    Print(L"\r\nERROR: kv_pos out of range\r\n\r\n");
+                    continue;
+                }
+
+                int kv_dim = (config.dim * config.n_kv_heads) / config.n_heads;
+                UINTN slice_floats = (UINTN)kv_pos * (UINTN)kv_dim;
+                UINTN slice_bytes = slice_floats * sizeof(float);
+
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    char file8[128];
+                    llmk_char16_to_ascii_cap(file8, (int)sizeof(file8), out_name);
+                    UINTN total_bytes = sizeof(LlmkSnapHeader) + (UINTN)config.n_layers * (UINTN)2 * slice_bytes;
+                    UINT32 total32 = (total_bytes > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (UINT32)total_bytes;
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_SNAP_SAVE, file8, total32, &d);
+                    djibion_log_if_observe(&g_djibion, "snap_save", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/snap_save): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"[djibion] snap_save path transformed -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        ascii_to_char16(out_name, d.transformed_arg0, (int)(sizeof(out_name) / sizeof(out_name[0])));
+                    }
+                }
+
+                EFI_FILE_HANDLE f = NULL;
+                EFI_STATUS st = llmk_open_binary_file(&f, out_name);
+                if (EFI_ERROR(st) || !f) {
+                    Print(L"\r\nERROR: open failed: %r\r\n\r\n", st);
+                    continue;
+                }
+
+                LlmkSnapHeader hdr;
+                hdr.magic = LLMK_SNAP_MAGIC;
+                hdr.version = 1;
+                hdr.dim = (UINT32)config.dim;
+                hdr.n_layers = (UINT32)config.n_layers;
+                hdr.n_heads = (UINT32)config.n_heads;
+                hdr.n_kv_heads = (UINT32)config.n_kv_heads;
+                hdr.seq_len = (UINT32)config.seq_len;
+                hdr.kv_dim = (UINT32)kv_dim;
+                hdr.kv_pos = (UINT32)kv_pos;
+
+                st = llmk_write_exact(f, &hdr, sizeof(hdr));
+                if (!EFI_ERROR(st)) {
+                    for (int l = 0; l < config.n_layers && !EFI_ERROR(st); l++) {
+                        float *base = state.key_cache + (UINTN)l * (UINTN)config.seq_len * (UINTN)kv_dim;
+                        st = llmk_write_exact(f, base, slice_bytes);
+                    }
+                    for (int l = 0; l < config.n_layers && !EFI_ERROR(st); l++) {
+                        float *base = state.value_cache + (UINTN)l * (UINTN)config.seq_len * (UINTN)kv_dim;
+                        st = llmk_write_exact(f, base, slice_bytes);
+                    }
+                }
+
+                EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+                uefi_call_wrapper(f->Close, 1, f);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: snapshot write failed: %r\r\n\r\n", st);
+                } else if (EFI_ERROR(flush_st)) {
+                    Print(L"\r\nWARNING: flush failed: %r\r\n\r\n", flush_st);
+                } else {
+                    Print(L"\r\nOK: wrote snapshot %s (kv_pos=%d)\r\n\r\n", out_name, kv_pos);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/snap_load", 10) == 0) {
+                if (!g_llmk_ready) {
+                    Print(L"\r\n  (llmk not ready)\r\n\r\n");
+                    continue;
+                }
+                const char *p = prompt + 10;
+                while (*p == ' ' || *p == '\t') p++;
+                CHAR16 in_name[96];
+                if (*p == 0) {
+                    StrCpy(in_name, L"llmk-snap.bin");
+                } else {
+                    ascii_to_char16(in_name, p, (int)(sizeof(in_name) / sizeof(in_name[0])));
+                }
+
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    char file8[128];
+                    llmk_char16_to_ascii_cap(file8, (int)sizeof(file8), in_name);
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_SNAP_LOAD, file8, 0, &d);
+                    djibion_log_if_observe(&g_djibion, "snap_load", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/snap_load): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"[djibion] snap_load path transformed -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        ascii_to_char16(in_name, d.transformed_arg0, (int)(sizeof(in_name) / sizeof(in_name[0])));
+                    }
+                }
+
+                EFI_STATUS st = llmk_snap_load_into_state_best_effort(&state, &config, &kv_pos, in_name);
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: snapshot load failed: %r\r\n\r\n", st);
+                    continue;
+                }
+                Print(L"\r\nOK: loaded snapshot %s (kv_pos=%d)\r\n\r\n", in_name, kv_pos);
+                continue;
+            } else if (my_strncmp(prompt, "/snap_autoload_on", 16) == 0) {
+                const char *p = prompt + 16;
+                while (*p == ' ' || *p == '\t') p++;
+
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_CFG_WRITE, "snap_autoload", 1, &d);
+                    djibion_log_if_observe(&g_djibion, "cfg_write", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/snap_autoload_on): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                }
+
+                EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort("snap_autoload", "1");
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: repl.cfg update failed: %r\r\n\r\n", st);
+                    continue;
+                }
+                if (*p) {
+                    // Optional file override
+
+                    if (g_djibion.mode != DJIBION_MODE_OFF) {
+                        DjibionDecision d;
+                        djibion_decide(&g_djibion, DJIBION_ACT_CFG_WRITE, "snap_file", (UINT32)my_strlen(p), &d);
+                        djibion_log_if_observe(&g_djibion, "cfg_write", &d);
+                        if (djibion_should_block(&g_djibion, &d)) {
+                            CHAR16 msg[160];
+                            ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                            Print(L"\r\nDJIBION: blocked (snap_file update): %s\r\n\r\n", msg);
+                            Print(L"\r\nOK: snap_autoload=1 (reboot to apply)\r\n\r\n");
+                            llmk_tr_note("SNAP: snap_autoload_on");
+                            continue;
+                        }
+                    }
+
+                    EFI_STATUS st2 = llmk_repl_cfg_set_kv_best_effort("snap_file", p);
+                    if (EFI_ERROR(st2)) {
+                        Print(L"\r\nWARNING: snap_file update failed: %r\r\n\r\n", st2);
+                    }
+                }
+                Print(L"\r\nOK: snap_autoload=1 (reboot to apply)\r\n\r\n");
+                llmk_tr_note("SNAP: snap_autoload_on");
+                continue;
+            } else if (my_strncmp(prompt, "/snap_autoload_off", 17) == 0) {
+
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_CFG_WRITE, "snap_autoload", 1, &d);
+                    djibion_log_if_observe(&g_djibion, "cfg_write", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/snap_autoload_off): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                }
+
+                EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort("snap_autoload", "0");
+                if (EFI_ERROR(st)) {
+                    Print(L"\r\nERROR: repl.cfg update failed: %r\r\n\r\n", st);
+                    continue;
+                }
+                Print(L"\r\nOK: snap_autoload=0 (reboot to apply)\r\n\r\n");
+                llmk_tr_note("SNAP: snap_autoload_off");
                 continue;
             } else if (my_strncmp(prompt, "/oo_new", 7) == 0) {
                 const char *goal = prompt + 7;
@@ -5072,6 +9170,27 @@ model_selected:
                     ascii_to_char16(out_name, name, (int)(sizeof(out_name) / sizeof(out_name[0])));
                 }
 
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    char file8[128];
+                    llmk_char16_to_ascii_cap(file8, (int)sizeof(file8), out_name);
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_OO_SAVE, file8, 0, &d);
+                    djibion_log_if_observe(&g_djibion, "oo_save", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/oo_save): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"\r\nDJIBION: transform (/oo_save) -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        ascii_to_char16(out_name, d.transformed_arg0, (int)(sizeof(out_name) / sizeof(out_name[0])));
+                    }
+                }
+
                 // Best-effort backup (copy previous target -> .bak) before overwriting.
                 {
                     CHAR16 bak[120];
@@ -5097,12 +9216,40 @@ model_selected:
                     ascii_to_char16(in_name, name, (int)(sizeof(in_name) / sizeof(in_name[0])));
                 }
 
-                // Stop auto mode (loading changes entity IDs/state)
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    char file8[128];
+                    llmk_char16_to_ascii_cap(file8, (int)sizeof(file8), in_name);
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_OO_LOAD, file8, 0, &d);
+                    djibion_log_if_observe(&g_djibion, "oo_load", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/oo_load): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"\r\nDJIBION: transform (/oo_load) -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        ascii_to_char16(in_name, d.transformed_arg0, (int)(sizeof(in_name) / sizeof(in_name[0])));
+                    }
+                }
+
+                // Stop auto/exec mode (loading changes entity IDs/state)
                 g_oo_auto_active = 0;
                 g_oo_auto_id = 0;
                 g_oo_auto_remaining = 0;
                 g_oo_auto_total = 0;
                 g_oo_auto_user[0] = 0;
+
+                g_oo_exec_active = 0;
+                g_oo_exec_id = 0;
+                g_oo_exec_remaining = 0;
+                g_oo_exec_total = 0;
+                g_oo_exec_plan_if_empty = 0;
+                g_oo_exec_hint[0] = 0;
 
                 void *buf = NULL;
                 UINTN len = 0;
@@ -5232,6 +9379,19 @@ model_selected:
                 if (n < 1) n = 1;
                 if (n > 16) n = 16;
 
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_OO_AUTO, "oo_auto", (UINT32)n, &d);
+                    djibion_log_if_observe(&g_djibion, "oo_auto", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/oo_auto): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                }
+
                 // Store the user prompt (optional)
                 g_oo_auto_user[0] = 0;
                 if (q && q[0]) {
@@ -5250,6 +9410,14 @@ model_selected:
                 g_oo_auto_remaining = n;
                 g_oo_auto_total = n;
 
+                // /oo_auto takes over; ensure /oo_exec is off.
+                g_oo_exec_active = 0;
+                g_oo_exec_id = 0;
+                g_oo_exec_remaining = 0;
+                g_oo_exec_total = 0;
+                g_oo_exec_plan_if_empty = 0;
+                g_oo_exec_hint[0] = 0;
+
                 Print(L"\r\n[oo_auto] started: id=%d cycles=%d\r\n", id, n);
                 {
                     CHAR16 p16[260];
@@ -5258,6 +9426,109 @@ model_selected:
                 }
 
                 // The actual cycles will run automatically at the top of the loop.
+                continue;
+            } else if (my_strncmp(prompt, "/oo_exec", 8) == 0) {
+                // Usage: /oo_exec <id> [n] [--plan] [hint...]
+                // Runs n cycles consuming agenda actions (marks done). Stops when agenda empty unless --plan.
+                int i = 8;
+                int id = llmk_parse_entity_id_allow_brackets(prompt, &i);
+                while (prompt[i] == ' ') i++;
+
+                int n = 3;
+                if (prompt[i] >= '0' && prompt[i] <= '9') {
+                    n = 0;
+                    while (prompt[i] >= '0' && prompt[i] <= '9') {
+                        n = n * 10 + (prompt[i] - '0');
+                        i++;
+                    }
+                    while (prompt[i] == ' ') i++;
+                }
+
+                int plan_if_empty = 0;
+                // Optional flag "--plan" (must appear before hint text)
+                if (prompt[i] == '-' && prompt[i + 1] == '-' && prompt[i + 2] == 'p' && prompt[i + 3] == 'l' && prompt[i + 4] == 'a' && prompt[i + 5] == 'n') {
+                    plan_if_empty = 1;
+                    i += 6;
+                    while (prompt[i] == ' ') i++;
+                }
+
+                const char *hint = prompt + i;
+
+                if (id <= 0) {
+                    Print(L"\r\nUsage: /oo_exec <id> [n] [--plan] [hint]\r\n");
+                    Print(L"  Example: /oo_exec 1 5\r\n");
+                    Print(L"           /oo_exec <1> 8 --plan\r\n");
+                    Print(L"           /oo_exec 1 4 be strict and concise\r\n\r\n");
+                    continue;
+                }
+
+                // Ensure entity exists
+                if (!llmk_oo_get_brief(id, NULL, 0, NULL, 0)) {
+                    Print(L"\r\nERROR: unknown entity id=%d\r\n\r\n", id);
+                    continue;
+                }
+
+                if (n < 1) n = 1;
+                if (n > 16) n = 16;
+
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_OO_EXEC, "oo_exec", (UINT32)n, &d);
+                    djibion_log_if_observe(&g_djibion, "oo_exec", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/oo_exec): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                }
+
+                // Store hint (optional)
+                g_oo_exec_hint[0] = 0;
+                if (hint && hint[0]) {
+                    int hp = 0;
+                    for (const char *s = hint; *s && hp + 1 < (int)sizeof(g_oo_exec_hint); s++) g_oo_exec_hint[hp++] = *s;
+                    g_oo_exec_hint[hp] = 0;
+                } else {
+                    const char *def = "Execute the action concisely; give concrete steps.";
+                    int hp = 0;
+                    for (const char *s = def; *s && hp + 1 < (int)sizeof(g_oo_exec_hint); s++) g_oo_exec_hint[hp++] = *s;
+                    g_oo_exec_hint[hp] = 0;
+                }
+
+                g_oo_exec_active = 1;
+                g_oo_exec_id = id;
+                g_oo_exec_remaining = n;
+                g_oo_exec_total = n;
+                g_oo_exec_plan_if_empty = plan_if_empty;
+
+                // /oo_exec takes over; ensure /oo_auto is off.
+                g_oo_auto_active = 0;
+                g_oo_auto_id = 0;
+                g_oo_auto_remaining = 0;
+                g_oo_auto_total = 0;
+                g_oo_auto_user[0] = 0;
+
+                Print(L"\r\n[oo_exec] started: id=%d cycles=%d plan_if_empty=%d\r\n", id, n, plan_if_empty);
+                {
+                    Print(L"[oo_exec] hint: ");
+                    llmk_print_ascii(g_oo_exec_hint);
+                    Print(L"\r\n\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/oo_exec_stop", 13) == 0) {
+                if (g_oo_exec_active) {
+                    Print(L"\r\n[oo_exec] stopping (id=%d remaining=%d)\r\n\r\n", g_oo_exec_id, g_oo_exec_remaining);
+                } else {
+                    Print(L"\r\n[oo_exec] not active\r\n\r\n");
+                }
+                g_oo_exec_active = 0;
+                g_oo_exec_id = 0;
+                g_oo_exec_remaining = 0;
+                g_oo_exec_total = 0;
+                g_oo_exec_plan_if_empty = 0;
+                g_oo_exec_hint[0] = 0;
                 continue;
             } else if (my_strncmp(prompt, "/oo_auto_stop", 13) == 0) {
                 if (g_oo_auto_active) {
@@ -5333,6 +9604,27 @@ model_selected:
                     continue;
                 }
 
+                // Djibion gate (best-effort)
+                if (g_djibion.mode != DJIBION_MODE_OFF) {
+                    char file8[128];
+                    llmk_char16_to_ascii_cap(file8, (int)sizeof(file8), in_name);
+                    DjibionDecision d;
+                    djibion_decide(&g_djibion, DJIBION_ACT_AUTORUN, file8, 0, &d);
+                    djibion_log_if_observe(&g_djibion, "autorun", &d);
+                    if (djibion_should_block(&g_djibion, &d)) {
+                        CHAR16 msg[160];
+                        ascii_to_char16(msg, d.reason, (int)(sizeof(msg) / sizeof(msg[0])));
+                        Print(L"\r\nDJIBION: blocked (/autorun): %s\r\n\r\n", msg);
+                        continue;
+                    }
+                    if (d.verdict == DJIBION_VERDICT_TRANSFORM && d.transformed_arg0[0]) {
+                        Print(L"\r\nDJIBION: transform (/autorun) -> ");
+                        llmk_print_ascii(d.transformed_arg0);
+                        Print(L"\r\n");
+                        ascii_to_char16(in_name, d.transformed_arg0, (int)(sizeof(in_name) / sizeof(in_name[0])));
+                    }
+                }
+
                 if (!llmk_autorun_start(in_name, shutdown)) {
                     Print(L"\r\nERROR: failed to start autorun from %s\r\n\r\n", in_name);
                 } else {
@@ -5352,6 +9644,7 @@ model_selected:
                 Print(L"\r\nClearing KV cache...\r\n");
                 reset_kv_cache(&state, &config);
                 kv_pos = 0;
+                g_llmk_kv_pos = kv_pos;
                 Print(L"OK: KV cache cleared, context reset\r\n\r\n");
                 continue;
             } else if (my_strncmp(prompt, "/version", 8) == 0) {
@@ -5435,6 +9728,251 @@ model_selected:
                 }
                 Print(L"\r\n");
                 continue;
+            } else if (my_strncmp(prompt, "/djibion_on", 10) == 0) {
+                djibion_set_mode(&g_djibion, DJIBION_MODE_OBSERVE);
+                Print(L"\r\nOK: Djibion mode=%s\r\n\r\n", (CHAR16 *)djibion_mode_name(g_djibion.mode));
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_off", 11) == 0) {
+                djibion_set_mode(&g_djibion, DJIBION_MODE_OFF);
+                Print(L"\r\nOK: Djibion mode=%s\r\n\r\n", (CHAR16 *)djibion_mode_name(g_djibion.mode));
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_enforce", 15) == 0) {
+                const char *p = prompt + 15;
+                while (*p == ' ' || *p == '\t') p++;
+                int v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                if (v < 0) v = 0;
+                if (v > 2) v = 2;
+                djibion_set_mode(&g_djibion, (DjibionMode)v);
+                Print(L"\r\nOK: Djibion mode=%s\r\n\r\n", (CHAR16 *)djibion_mode_name(g_djibion.mode));
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_status", 14) == 0) {
+                Print(L"\r\n[Djibion]\r\n");
+                Print(L"  mode=%s\r\n", (CHAR16 *)djibion_mode_name(g_djibion.mode));
+                Print(L"  laws: max_fs_write_bytes=%d allow_fs_write=%d allow_fs_delete=%d\r\n",
+                      (int)g_djibion.laws.max_fs_write_bytes,
+                      (int)g_djibion.laws.allow_fs_write,
+                      (int)g_djibion.laws.allow_fs_delete);
+                Print(L"  laws: max_snap_bytes=%d allow_snap_load=%d allow_snap_save=%d\r\n",
+                    (int)g_djibion.laws.max_snap_bytes,
+                    (int)g_djibion.laws.allow_snap_load,
+                    (int)g_djibion.laws.allow_snap_save);
+                Print(L"  laws: allow_cfg_write=%d\r\n", (int)g_djibion.laws.allow_cfg_write);
+                Print(L"  laws: max_oo_cycles=%d allow_oo_exec=%d allow_oo_auto=%d allow_autorun=%d\r\n",
+                      (int)g_djibion.laws.max_oo_cycles,
+                      (int)g_djibion.laws.allow_oo_exec,
+                      (int)g_djibion.laws.allow_oo_auto,
+                      (int)g_djibion.laws.allow_autorun);
+                    Print(L"  laws: allow_oo_persist=%d\r\n", (int)g_djibion.laws.allow_oo_persist);
+                {
+                    CHAR16 pfx[80];
+                    ascii_to_char16(pfx, g_djibion.laws.fs_mut_prefix, (int)(sizeof(pfx) / sizeof(pfx[0])));
+                    Print(L"  laws: fs_mut_prefix=%s\r\n", pfx[0] ? pfx : L"(none)");
+                }
+                Print(L"  decisions: total=%d rejected=%d transformed=%d\r\n\r\n",
+                      (int)g_djibion.decisions_total,
+                      (int)g_djibion.decisions_rejected,
+                      (int)g_djibion.decisions_transformed);
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_prefix", 14) == 0) {
+                const char *p = prompt + 14;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == 0) {
+                    Print(L"\r\nUsage: /djibion_prefix <prefix>\r\n");
+                    Print(L"  Example: /djibion_prefix \\test_dir\\\r\n\r\n");
+                    continue;
+                }
+                llmk_ascii_copy_cap(g_djibion.laws.fs_mut_prefix, (int)sizeof(g_djibion.laws.fs_mut_prefix), p);
+                Print(L"\r\nOK: fs_mut_prefix=");
+                llmk_print_ascii(g_djibion.laws.fs_mut_prefix);
+                Print(L"\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_allow_delete", 20) == 0) {
+                const char *p = prompt + 20;
+                while (*p == ' ' || *p == '\t') p++;
+                int v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                g_djibion.laws.allow_fs_delete = (v != 0) ? 1 : 0;
+                Print(L"\r\nOK: allow_fs_delete=%d\r\n\r\n", (int)g_djibion.laws.allow_fs_delete);
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_max_write", 16) == 0) {
+                const char *p = prompt + 16;
+                while (*p == ' ' || *p == '\t') p++;
+                UINT32 v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (UINT32)(*p - '0'); p++; }
+                if (v < 256) v = 256;
+                g_djibion.laws.max_fs_write_bytes = v;
+                Print(L"\r\nOK: max_fs_write_bytes=%d\r\n\r\n", (int)g_djibion.laws.max_fs_write_bytes);
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_max_oo", 13) == 0) {
+                const char *p = prompt + 13;
+                while (*p == ' ' || *p == '\t') p++;
+                UINT32 v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (UINT32)(*p - '0'); p++; }
+                if (v < 1) v = 1;
+                if (v > 64) v = 64;
+                g_djibion.laws.max_oo_cycles = v;
+                Print(L"\r\nOK: max_oo_cycles=%d\r\n\r\n", (int)g_djibion.laws.max_oo_cycles);
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_max_snap", 15) == 0) {
+                const char *p = prompt + 15;
+                while (*p == ' ' || *p == '\t') p++;
+                UINT32 v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (UINT32)(*p - '0'); p++; }
+                if (v < (1024 * 1024)) v = (1024 * 1024);
+                g_djibion.laws.max_snap_bytes = v;
+                Print(L"\r\nOK: max_snap_bytes=%d\r\n\r\n", (int)g_djibion.laws.max_snap_bytes);
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_allow_snap_load", 23) == 0) {
+                const char *p = prompt + 23;
+                while (*p == ' ' || *p == '\t') p++;
+                int v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                g_djibion.laws.allow_snap_load = (v != 0) ? 1 : 0;
+                Print(L"\r\nOK: allow_snap_load=%d\r\n\r\n", (int)g_djibion.laws.allow_snap_load);
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_allow_snap_save", 23) == 0) {
+                const char *p = prompt + 23;
+                while (*p == ' ' || *p == '\t') p++;
+                int v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                g_djibion.laws.allow_snap_save = (v != 0) ? 1 : 0;
+                Print(L"\r\nOK: allow_snap_save=%d\r\n\r\n", (int)g_djibion.laws.allow_snap_save);
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_allow_cfg_write", 23) == 0) {
+                const char *p = prompt + 23;
+                while (*p == ' ' || *p == '\t') p++;
+                int v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                g_djibion.laws.allow_cfg_write = (v != 0) ? 1 : 0;
+                Print(L"\r\nOK: allow_cfg_write=%d\r\n\r\n", (int)g_djibion.laws.allow_cfg_write);
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_allow_autorun", 21) == 0) {
+                const char *p = prompt + 21;
+                while (*p == ' ' || *p == '\t') p++;
+                int v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                g_djibion.laws.allow_autorun = (v != 0) ? 1 : 0;
+                Print(L"\r\nOK: allow_autorun=%d\r\n\r\n", (int)g_djibion.laws.allow_autorun);
+                continue;
+            } else if (my_strncmp(prompt, "/djibion_allow_oo_persist", 23) == 0) {
+                const char *p = prompt + 23;
+                while (*p == ' ' || *p == '\t') p++;
+                int v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                g_djibion.laws.allow_oo_persist = (v != 0) ? 1 : 0;
+                Print(L"\r\nOK: allow_oo_persist=%d\r\n\r\n", (int)g_djibion.laws.allow_oo_persist);
+                continue;
+            } else if (my_strncmp(prompt, "/diopion_on", 10) == 0) {
+                diopion_set_mode(&g_diopion, DIOPION_MODE_OBSERVE);
+                Print(L"\r\nOK: Diopion mode=");
+                llmk_print_ascii(diopion_mode_name_ascii(g_diopion.mode));
+                Print(L"\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/diopion_off", 11) == 0) {
+                // Stop any active burst and restore knobs immediately.
+                if (g_diopion_burst_active) {
+                    g_diopion_burst_remaining = 0;
+                    llmk_diopion_burst_finish_one(&max_gen_tokens, &top_k, &temperature);
+                }
+                diopion_set_mode(&g_diopion, DIOPION_MODE_OFF);
+                Print(L"\r\nOK: Diopion mode=");
+                llmk_print_ascii(diopion_mode_name_ascii(g_diopion.mode));
+                Print(L"\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/diopion_enforce", 15) == 0) {
+                const char *p = prompt + 15;
+                while (*p == ' ' || *p == '\t') p++;
+                int v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                if (v < 0) v = 0;
+                if (v > 2) v = 2;
+                diopion_set_mode(&g_diopion, (DiopionMode)v);
+                Print(L"\r\nOK: Diopion mode=");
+                llmk_print_ascii(diopion_mode_name_ascii(g_diopion.mode));
+                Print(L"\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/diopion_profile", 15) == 0) {
+                const char *p = prompt + 15;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == 0) {
+                    Print(L"\r\nUsage: /diopion_profile <none|animal|vegetal|geom|bio>\r\n\r\n");
+                    continue;
+                }
+                if (llmk_cfg_streq_ci(p, "animal")) diopion_set_profile(&g_diopion, DIOPION_PROFILE_ANIMAL);
+                else if (llmk_cfg_streq_ci(p, "vegetal")) diopion_set_profile(&g_diopion, DIOPION_PROFILE_VEGETAL);
+                else if (llmk_cfg_streq_ci(p, "geom") || llmk_cfg_streq_ci(p, "geometric")) diopion_set_profile(&g_diopion, DIOPION_PROFILE_GEOM);
+                else if (llmk_cfg_streq_ci(p, "bio") || llmk_cfg_streq_ci(p, "biological")) diopion_set_profile(&g_diopion, DIOPION_PROFILE_BIO);
+                else diopion_set_profile(&g_diopion, DIOPION_PROFILE_NONE);
+                Print(L"\r\nOK: Diopion profile=");
+                llmk_print_ascii(diopion_profile_name_ascii(g_diopion.profile));
+                Print(L"\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/diopion_status", 14) == 0) {
+                Print(L"\r\n[Diopion]\r\n");
+                Print(L"  mode=");
+                llmk_print_ascii(diopion_mode_name_ascii(g_diopion.mode));
+                Print(L" profile=");
+                llmk_print_ascii(diopion_profile_name_ascii(g_diopion.profile));
+                Print(L"\r\n");
+                Print(L"  burst_defaults: turns=%d max_tokens=%d top_k=%d temp=%d.%03d\r\n",
+                      (int)g_diopion.params.burst_turns_default,
+                      (int)g_diopion.params.burst_max_gen_tokens,
+                      (int)g_diopion.params.burst_top_k,
+                      (int)(g_diopion.params.burst_temp_milli / 1000u),
+                      (int)(g_diopion.params.burst_temp_milli % 1000u));
+                Print(L"  bursts_started=%d\r\n", (int)g_diopion.bursts_started);
+                Print(L"  burst_active=%d remaining=%d\r\n\r\n", g_diopion_burst_active, g_diopion_burst_remaining);
+                continue;
+            } else if (my_strncmp(prompt, "/diopion_burst", 13) == 0) {
+                if (g_diopion.mode == DIOPION_MODE_OFF) {
+                    Print(L"\r\nERROR: Diopion is off (use /diopion_on)\r\n\r\n");
+                    continue;
+                }
+
+                const char *p = prompt + 13;
+                while (*p == ' ' || *p == '\t') p++;
+
+                // Args: [turns] [temp_milli] [top_k] [max_tokens]
+                UINT32 turns = g_diopion.params.burst_turns_default;
+                UINT32 temp_milli = g_diopion.params.burst_temp_milli;
+                UINT32 topk = g_diopion.params.burst_top_k;
+                UINT32 max_tokens = g_diopion.params.burst_max_gen_tokens;
+
+                int argc = 0;
+                while (*p && argc < 4) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p == 0) break;
+                    UINT32 v = 0;
+                    int any = 0;
+                    while (*p >= '0' && *p <= '9') { v = v * 10u + (UINT32)(*p - '0'); p++; any = 1; }
+                    if (!any) break;
+                    if (argc == 0) turns = v;
+                    else if (argc == 1) temp_milli = v;
+                    else if (argc == 2) topk = v;
+                    else if (argc == 3) max_tokens = v;
+                    argc++;
+                }
+
+                if (turns < 1) turns = 1;
+                if (turns > 16) turns = 16;
+                if (temp_milli < 50) temp_milli = 50;
+                if (temp_milli > 2000) temp_milli = 2000;
+                if (topk < 1) topk = 1;
+                if (topk > 200) topk = 200;
+                if (max_tokens < 16) max_tokens = 16;
+                if (max_tokens > 1024) max_tokens = 1024;
+
+                llmk_diopion_burst_apply(turns, max_tokens, topk, temp_milli, &max_gen_tokens, &top_k, &temperature);
+                g_diopion.bursts_started++;
+
+                Print(L"\r\nOK: burst turns=%d temp=%d.%03d top_k=%d max_tokens=%d\r\n\r\n",
+                      (int)turns,
+                      (int)(temp_milli / 1000u),
+                      (int)(temp_milli % 1000u),
+                      (int)topk,
+                      (int)max_tokens);
+                continue;
             } else if (my_strncmp(prompt, "/commands", 9) == 0) {
                 char pref[64];
                 pref[0] = 0;
@@ -5447,6 +9985,58 @@ model_selected:
                     Print(L")\r\n");
                 }
                 llmk_print_commands_filtered(pref[0] ? pref : NULL);
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/cls", 4) == 0) {
+                uefi_call_wrapper(ST->ConOut->ClearScreen, 1, ST->ConOut);
+                continue;
+            } else if (my_strncmp(prompt, "/blas_bench", 11) == 0) {
+                Print(L"\r\nRunning DjibLAS Benchmark (256x256)...\r\n");
+                int M=256, N=256, K=256;
+                // Use simple_alloc (monotonic) - suitable for a test command if memory allows
+                float *A = (float*)simple_alloc(M*K*sizeof(float));
+                float *B = (float*)simple_alloc(K*N*sizeof(float));
+                float *C_sc = (float*)simple_alloc(M*N*sizeof(float));
+                float *C_avx = (float*)simple_alloc(M*N*sizeof(float));
+
+                if (!A || !B || !C_sc || !C_avx) {
+                    Print(L"Benchmark aborted: Alloc failed\r\n");
+                    continue;
+                }
+
+                // Init with deterministic values
+                for(int i=0; i<M*K; i++) A[i] = (float)((i % 17) - 8) * 0.1f;
+                for(int i=0; i<K*N; i++) B[i] = (float)((i % 19) - 9) * 0.1f;
+
+                // 1. Scalar Baseline
+                unsigned long long t0 = rdtsc();
+                djiblas_sgemm_scalar(M, N, K, A, K, B, N, C_sc, N);
+                unsigned long long t_scalar = rdtsc() - t0;
+                Print(L"Scalar: %lu cycles\r\n", t_scalar);
+
+                // 2. AVX2
+                CPUFeatures f;
+                djiblas_detect_cpu(&f);
+                if (f.has_avx2 && f.has_fma) {
+                    t0 = rdtsc();
+                    djiblas_sgemm_avx2(M, N, K, A, K, B, N, C_avx, N);
+                    unsigned long long t_avx = rdtsc() - t0;
+                    
+                    int speedup = (int)(t_scalar / t_avx);
+                    int dec = (int)(((t_scalar * 10) / t_avx) % 10);
+                    Print(L"AVX2:   %lu cycles (Speedup: %d.%dx)\r\n", t_avx, speedup, dec);
+
+                    // Verify
+                    float max_err = 0.0f;
+                    for(int i=0; i<M*N; i++) {
+                        float d = C_sc[i] - C_avx[i];
+                        if (d < 0) d = -d;
+                        if (d > max_err) max_err = d;
+                    }
+                    Print(L"Max Error: %d.%06d\r\n", (int)max_err, (int)((max_err - (int)max_err)*1000000));
+                } else {
+                    Print(L"AVX2:   Skipped (Not Supported)\r\n");
+                }
                 Print(L"\r\n");
                 continue;
             } else if (my_strncmp(prompt, "/help", 5) == 0) {
@@ -5466,9 +10056,31 @@ model_selected:
         }
         
         // Encode prompt
-        int prompt_tokens[256];
+        // For normal chat turns, wrap input so the model sees explicit roles.
+        // Keep /commands and capture-mode prompts untouched.
+        const char *encode_text = prompt;
+        char model_prompt[768];
+        model_prompt[0] = 0;
+        if (!g_capture_mode && !draw_mode && prompt[0] != '/' && prompt[0] != 0) {
+            int mp = 0;
+            const char *pre = (kv_pos == 0) ? "You: " : "\nYou: ";
+            for (int i = 0; pre[i] && mp + 1 < (int)sizeof(model_prompt); i++) model_prompt[mp++] = pre[i];
+            for (int i = 0; prompt[i] && mp + 1 < (int)sizeof(model_prompt); i++) model_prompt[mp++] = prompt[i];
+            const char *suf = "\nAI: ";
+            for (int i = 0; suf[i] && mp + 1 < (int)sizeof(model_prompt); i++) model_prompt[mp++] = suf[i];
+            model_prompt[mp] = 0;
+            encode_text = model_prompt;
+        }
+
+        int prompt_tokens[384];
         int n_prompt_tokens = 0;
-        encode(prompt, prompt_tokens, &n_prompt_tokens, 256, &tokenizer);
+        encode((char *)encode_text, prompt_tokens, &n_prompt_tokens, (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0])), &tokenizer);
+
+        // Avoid injecting BOS into the middle of an ongoing conversation.
+        if (kv_pos > 0 && n_prompt_tokens > 0 && prompt_tokens[0] == TOKEN_BOS) {
+            for (int i = 1; i < n_prompt_tokens; i++) prompt_tokens[i - 1] = prompt_tokens[i];
+            n_prompt_tokens--;
+        }
         
         // Check if KV cache will overflow
         if (kv_pos + n_prompt_tokens + max_gen_tokens > config.seq_len) {
@@ -5476,6 +10088,7 @@ model_selected:
                   kv_pos, n_prompt_tokens + max_gen_tokens);
             reset_kv_cache(&state, &config);
             kv_pos = 0;
+            g_llmk_kv_pos = kv_pos;
         }
         
         if (!g_capture_mode) {
@@ -5559,10 +10172,11 @@ model_selected:
         int generated_count = 0;
         int repeat_count = 0;
         int last_token = -1;
+        int immediate_repeat_count = 0;
         int loop_escape_used = 0;
         
         // Track context for repetition penalty and loop detection.
-        int context_tokens[256 + MAX_TOKENS];
+        int context_tokens[384 + MAX_TOKENS];
         int n_context_tokens = 0;
         for (int i = 0; i < n_prompt_tokens && n_context_tokens < (int)(sizeof(context_tokens) / sizeof(context_tokens[0])); i++) {
             context_tokens[n_context_tokens++] = prompt_tokens[i];
@@ -5580,6 +10194,16 @@ model_selected:
             calibrate_tsc_once();
             gen_t0 = rdtsc();
             gen_have_wall = uefi_wall_us(&gen_wall0_us);
+        }
+
+        // TUI: show live generation progress (skip /draw to avoid scribbling over images).
+        if (!draw_mode) {
+            g_tui_gen_active = 1;
+            g_tui_gen_tokens = 0;
+            if (g_tui_enabled && g_gop_fb32) {
+                g_tui_dirty = 1;
+                llmk_tui_redraw_best_effort();
+            }
         }
 
         for (int step = 0; step < max_gen_tokens; step++) {
@@ -5616,6 +10240,9 @@ model_selected:
             
             // Check for EOS (some exports may still emit BOS; treat both as stop)
             if (next == TOKEN_EOS || next == TOKEN_BOS) break;
+
+            // Track immediate repeats (useful as a cheap repetition signal).
+            if (next == token) immediate_repeat_count++;
             
             // Check if stuck on same token (per conversation)
             if (next == last_token) {
@@ -5637,6 +10264,16 @@ model_selected:
                         uefi_print_utf8_bytes(piece, len);
                     }
                     generated_count++;
+
+                    if (!draw_mode) {
+                        g_tui_gen_tokens = generated_count;
+                        int mask = (g_ui_mode == 0) ? 15 : 63;
+                        if (g_tui_enabled && g_gop_fb32 && ((generated_count & mask) == 0)) {
+                            // Throttle redraws to keep overhead low.
+                            g_tui_dirty = 1;
+                            llmk_tui_redraw_best_effort();
+                        }
+                    }
 
                     // Update ASCII tail buffer for stop detection.
                     for (int k = 0; k < len; k++) {
@@ -5747,6 +10384,14 @@ model_selected:
             uefi_print_utf8_flush();
         }
 
+        if (!draw_mode) {
+            g_tui_gen_active = 0;
+            if (g_tui_enabled && g_gop_fb32) {
+                g_tui_dirty = 1;
+                llmk_tui_redraw_best_effort();
+            }
+        }
+
         if (g_test_failsafe_active) {
             g_sentinel.cfg.strict_budget = g_test_failsafe_prev_strict_budget;
             g_budget_prefill_cycles = g_test_failsafe_prev_prefill;
@@ -5801,6 +10446,26 @@ model_selected:
             }
 stats_done:
             ;
+        }
+
+        // Diopion burst: decrement remaining and restore knobs when done.
+        llmk_diopion_burst_finish_one(&max_gen_tokens, &top_k, &temperature);
+
+        // Calibrion: feed basic stats after each non-capture generation.
+        // Keep it simple and cheap: tokens_generated + immediate repeats, entropy is a neutral placeholder.
+        if (!g_capture_mode && !draw_mode) {
+            calibrion_feed(&g_calibrion,
+                           (uint32_t)generated_count,
+                           (uint32_t)immediate_repeat_count,
+                           1000 /* entropy_milli (neutral) */);
+
+            if (g_calibrion.mode == CALIBRION_MODE_ENFORCE) {
+                uint32_t t, k, p;
+                calibrion_get_recommendation(&g_calibrion, &t, &k, &p);
+                temperature = (float)t / 1000.0f;
+                top_k = (int)k;
+                top_p = (float)p / 1000.0f;
+            }
         }
 
         // If capture mode was active, handle it now.
@@ -5951,6 +10616,106 @@ stats_done:
                     g_oo_auto_total = 0;
                     g_oo_auto_user[0] = 0;
                 }
+            } else if (capture_kind == 4) {
+                if (oo_think_id > 0) {
+                    // Store the cycle's prompt + answer.
+                    char n1[320];
+                    int p1 = 0;
+                    const char *h1 = "exec: ";
+                    for (int k = 0; h1[k] && p1 + 1 < (int)sizeof(n1); k++) n1[p1++] = h1[k];
+                    for (int k = 0; oo_think_user[k] && p1 + 1 < (int)sizeof(n1); k++) n1[p1++] = oo_think_user[k];
+                    n1[p1] = 0;
+                    llmk_oo_note(oo_think_id, n1);
+
+                    char n2[640];
+                    int p2 = 0;
+                    const char *h2 = "answer: ";
+                    for (int k = 0; h2[k] && p2 + 1 < (int)sizeof(n2); k++) n2[p2++] = h2[k];
+                    for (int k = 0; g_capture_buf[k] && p2 + 1 < (int)sizeof(n2); k++) n2[p2++] = g_capture_buf[k];
+                    n2[p2] = 0;
+                    llmk_oo_note(oo_think_id, n2);
+
+                    if (oo_exec_planning) {
+                        // Planning cycle: extract first line as an action and push to agenda.
+                        char act[96];
+                        int ap = 0;
+                        int si = 0;
+                        while (g_capture_buf[si] == ' ' || g_capture_buf[si] == '\t' || g_capture_buf[si] == '\n') si++;
+                        for (; g_capture_buf[si] && g_capture_buf[si] != '\n' && ap + 1 < (int)sizeof(act); si++) {
+                            act[ap++] = g_capture_buf[si];
+                        }
+                        while (ap > 0 && (act[ap - 1] == ' ' || act[ap - 1] == '\t')) ap--;
+                        act[ap] = 0;
+
+                        if (act[0] && llmk_oo_agenda_add(oo_think_id, act)) {
+                            CHAR16 a16[120];
+                            ascii_to_char16(a16, act, (int)(sizeof(a16) / sizeof(a16[0])));
+                            Print(L"\r\n[oo_exec] planned: %s\r\n\r\n", a16);
+                            llmk_oo_digest(oo_think_id);
+                            // Do NOT decrement remaining; next cycle will execute.
+                        } else {
+                            Print(L"\r\n[oo_exec] planning failed; stopping\r\n\r\n");
+                            g_oo_exec_active = 0;
+                            g_oo_exec_id = 0;
+                            g_oo_exec_remaining = 0;
+                            g_oo_exec_total = 0;
+                            g_oo_exec_plan_if_empty = 0;
+                            g_oo_exec_hint[0] = 0;
+                        }
+                    } else {
+                        llmk_oo_step(oo_think_id);
+                        llmk_oo_digest(oo_think_id);
+
+                        if (oo_exec_action_k > 0) {
+                            char done_note[196];
+                            int dp = 0;
+                            const char *h = "done: ";
+                            for (int k = 0; h[k] && dp + 1 < (int)sizeof(done_note); k++) done_note[dp++] = h[k];
+                            for (int k = 0; oo_think_user[k] && dp + 1 < (int)sizeof(done_note); k++) done_note[dp++] = oo_think_user[k];
+                            done_note[dp] = 0;
+                            llmk_oo_note(oo_think_id, done_note);
+                            llmk_oo_action_set_state(oo_think_id, oo_exec_action_k, 2);
+                        }
+
+                        if (g_oo_exec_active && g_oo_exec_id == oo_think_id && g_oo_exec_remaining > 0) {
+                            g_oo_exec_remaining--;
+                            Print(L"\r\n[oo_exec] stored + stepped id=%d (%d chars%s); remaining=%d\r\n\r\n",
+                                  oo_think_id, g_capture_len, g_capture_truncated ? L"; truncated" : L"", g_oo_exec_remaining);
+                            if (g_oo_exec_remaining <= 0) {
+                                Print(L"[oo_exec] done\r\n\r\n");
+                                g_oo_exec_active = 0;
+                                g_oo_exec_id = 0;
+                                g_oo_exec_remaining = 0;
+                                g_oo_exec_total = 0;
+                                g_oo_exec_plan_if_empty = 0;
+                                g_oo_exec_hint[0] = 0;
+                            }
+
+                            // Optional autosave (repl.cfg: oo_autosave_every=N). Best-effort.
+                            if (oo_autosave_every > 0 && oo_state_file[0]) {
+                                int completed = 0;
+                                if (g_oo_exec_total > 0) {
+                                    completed = g_oo_exec_total - g_oo_exec_remaining;
+                                }
+                                if (completed > 0 && (completed % oo_autosave_every) == 0) {
+                                    int nb = 0;
+                                    EFI_STATUS st = llmk_oo_save_to_file_best_effort(oo_state_file, &nb);
+                                    if (!EFI_ERROR(st)) {
+                                        Print(L"[oo_autosave] saved %s (%d bytes)\r\n", oo_state_file, nb);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Print(L"\r\n[oo_exec] ERROR: internal state\r\n\r\n");
+                    g_oo_exec_active = 0;
+                    g_oo_exec_id = 0;
+                    g_oo_exec_remaining = 0;
+                    g_oo_exec_total = 0;
+                    g_oo_exec_plan_if_empty = 0;
+                    g_oo_exec_hint[0] = 0;
+                }
             }
 
             // Disable capture mode and restore sampling flags.
@@ -5971,6 +10736,7 @@ stats_done:
         
         // Update persistent KV cache position for next generation
         kv_pos += n_prompt_tokens + generated_count;
+        g_llmk_kv_pos = kv_pos;
         
         if (!g_capture_mode) {
             Print(L"\r\n\r\n");

@@ -29,6 +29,11 @@ strict_budget=0         # Hard-stop on budget overrun (0=log only, 1=trip sentin
 # autorun_file=llmk-autorun.txt
 # autorun_shutdown_when_done=0
 
+# Snapshot auto-resume (disabled by default)
+# Attempts to load a KV snapshot at boot so you can resume a conversation quickly.
+# snap_autoload=1
+# snap_file=llmk-snap.bin
+
 # Cycle budgets (tune per machine; higher = more tolerance, lower = earlier overrun detect)
 # Start conservative and adjust based on /ctx overrun counts.
 budget_prefill=80000000000

@@ -49,15 +49,75 @@ This file is a “complete” cheat-sheet of the commands available in the UEFI 
 - `/log [n]`: print the last n log entries
 - `/save_log [n]`: write the last n log entries to `llmk-log.txt`
 - `/save_dump`: write ctx+zones+sentinel+log to `llmk-dump.txt`
+- `/diag_status`: show Diagnostion status
+- `/diag_report [file]`: write a full diagnostic bundle (default `llmk-diag.txt`)
+- `/mem_status`: show Memorion status
+- `/mem_snap_info [file]`: print snapshot header (default `llmk-snap.bin`)
+- `/mem_snap_check [file]`: check snapshot compatibility vs current model
+- `/mem_manifest [snap] [out]`: write manifest (default out `llmk-manifest.txt`)
+
+## Orchestrion (workflow runner)
+
+- `/orch_on`: enable Orchestrion (observe mode)
+- `/orch_off`: disable Orchestrion
+- `/orch_enforce [0|1|2]`: set mode (0=off, 1=observe, 2=enforce)
+- `/orch_status`: show pipeline state + counters
+- `/orch_clear`: clear pipeline
+- `/orch_add <step> [; step2 ...]`: add step(s) to pipeline
+- `/orch_start [loops]`: start pipeline (default 1 loop)
+- `/orch_pause`: pause pipeline
+- `/orch_resume`: resume pipeline
+- `/orch_stop`: stop pipeline
+
+## Calibrion (auto-tuning sampling)
+
+- `/calib_on`: enable Calibrion (observe mode)
+- `/calib_off`: disable Calibrion
+- `/calib_enforce [0|1|2]`: set mode (0=off, 1=observe, 2=enforce)
+- `/calib_strategy <none|entropy|length|quality|hybrid>`: set strategy
+- `/calib_status`: show stats + recommendation
+- `/calib_reset`: reset stats
+- `/calib_apply`: apply recommendation to temp/top_k/top_p
+
+## Compatibilion (platform detection)
+
+- `/compat_on`: enable Compatibilion
+- `/compat_off`: disable Compatibilion
+- `/compat_status`: show CPU/platform capabilities + recommendations
+- `/compat_probe`: re-probe CPU features
 
 ## GOP / rendering
 
 - `/gop`: GOP framebuffer info
+- `/tui_on`: enable the GOP TUI overlay (status panel)
+- `/tui_off`: disable the GOP TUI overlay
+- `/tui_toggle`: toggle the GOP TUI overlay
+- `/tui_redraw`: force a redraw of the overlay
+- `/tui_mode <status|log|split|files>`: set the GOP UI mode
+- `/tui_log_on`: show the transcript log UI (same as `/tui_mode log`)
+- `/tui_log_off`: return to status-only UI (same as `/tui_mode status`)
+- `/tui_log_clear`: clear the transcript ring buffer
+- `/tui_log_up [n]`: scroll transcript up (older lines)
+- `/tui_log_down [n]`: scroll transcript down (newer lines)
+- `/tui_log_dump [file]`: dump transcript to a text file (default `llmk-transcript.txt`)
 - `/render <dsl>`: render simple shapes via DSL
 - `/save_img [f]`: save GOP framebuffer as PPM (default `llmk-img.ppm`)
 - `/draw <text>`: ask the model for DSL then execute `/render` (GOP required)
 
+### GOP file browser
+
+Minimal on-screen file browser rendered via GOP (works on the same FAT image / USB).
+
+- `/fb` or `/fb_on`: enable the file browser pane
+- `/fb_off`: disable the file browser pane
+- `/fb_refresh`: refresh the directory listing
+- `/fb_cd <dir>`: change directory
+- `/fb_up`: go to parent directory
+- `/fb_sel <n>`: select entry index `n`
+- `/fb_open`: open selection (directories: enter; files: preview)
+
 DSL quick ref:
+
 - `clear R G B; rect X Y W H R G B; pixel X Y R G B`
 
 ## LLM-OO (organism-oriented)
@@ -69,6 +129,7 @@ DSL quick ref:
 - `/oo_note <id> <text>`: append a note
 
 Agenda:
+
 - `/oo_plan <id> [prio] <action(s)>`: add actions (separator `;`, prio like `+2`)
 - `/oo_agenda <id>`: show agenda
 - `/oo_next <id>`: pick next action (marks “doing”)
@@ -77,17 +138,22 @@ Agenda:
 - `/oo_edit <id> <k> <text>`: edit action #k text
 
 Execution:
+
 - `/oo_step <id>`: advance one entity by one step
 - `/oo_run [n]`: run n cooperative steps
 - `/oo_digest <id>`: update digest + compress notes
 
 Persistence:
+
 - `/oo_save [f]`: save (default `oo-state.bin`)
 - `/oo_load [f]`: load (default `oo-state.bin`)
 - Note: a `*.bak` backup is created best-effort before overwrite.
 
 Think/auto:
+
 - `/oo_think <id> <prompt>`: ask the model, store the answer in notes
+- `/oo_exec <id> [n] [--plan] [hint]`: run agenda items for n cycles; stops when agenda is empty unless `--plan` (stop: `q` or Esc between cycles)
+- `/oo_exec_stop`: stop exec mode
 - `/oo_auto <id> [n] [prompt]`: n cycles think->store->step (stop: `q` or Esc between cycles)
 - `/oo_auto_stop`: stop auto mode
 
@@ -111,7 +177,104 @@ Think/auto:
 - `/reset`: reset budgets/log + untrip sentinel
 - `/clear`: clear KV cache (reset conversation context)
 
+## File shell
+
+Work with files directly from the UEFI REPL (FAT image / USB):
+
+- `/fs_ls [dir]`: list directory (default: root)
+- `/fs_cat <file>`: print a file (best-effort text; truncated)
+- `/fs_write <file> <text...>`: truncate/create and write text
+- `/fs_append <file> <text...>`: append text (create if missing)
+- `/fs_rm <file>`: delete file
+- `/fs_cp <src> <dst>`: copy file (best-effort)
+- `/fs_mv <src> <dst>`: move file (copy+delete best-effort)
+
+## Snapshot (fast resume)
+
+Save/load the KV cache so you can continue a conversation after reboot without rebuilding context.
+
+- `/snap_save [file]`: save snapshot (default: `llmk-snap.bin`)
+- `/snap_load [file]`: load snapshot (default: `llmk-snap.bin`)
+
+Convenience:
+
+- `/snap_autoload_on [file]`: write `repl.cfg` to enable snapshot auto-load at boot (optional `snap_file` override)
+- `/snap_autoload_off`: write `repl.cfg` to disable snapshot auto-load at boot
+
+### Snapshot auto-resume config (repl.cfg)
+
+- `snap_autoload=1` to attempt loading a snapshot at boot (disabled by default)
+- `snap_file=llmk-snap.bin` (optional override; default is `llmk-snap.bin`)
+
+Notes:
+
+- Snapshot files grow with `kv_pos` (only the used prefix is stored).
+- Snapshots are model-config dependent (must match dim/layers/heads/seq_len).
+
 ## DjibMark
 
 - `/djibmarks`: DjibMark trace
 - `/djibperf`: performance analysis by phase
+
+## Djibion (meta-engine of coherence)
+
+Djibion is a lightweight policy/validation engine that can gate critical actions.
+
+Currently, it can gate/transform:
+
+- filesystem mutations (`/fs_write`, `/fs_append`, `/fs_rm`)
+- filesystem copy/move (`/fs_cp`, `/fs_mv`) with destination prefix transform
+- OO cycles (`/oo_exec`, `/oo_auto`) via `max_oo_cycles`
+- OO persistence (`/oo_save`, `/oo_load`) via `allow_oo_persist`
+- autorun (`/autorun`) with optional prefix enforcement
+- snapshots (`/snap_save`, `/snap_load`, plus boot `snap_autoload=1`) with traversal protection and optional prefix transform
+- repl.cfg writes (e.g. `/snap_autoload_on`, `/snap_autoload_off`) via `allow_cfg_write`
+
+- `/djibion_on`: enable Djibion in observe mode (logs decisions, does not block)
+- `/djibion_off`: disable Djibion
+- `/djibion_enforce <0|1|2>`: set mode (0=off, 1=observe, 2=enforce)
+- `/djibion_status`: show current laws + counters
+- `/djibion_prefix <prefix>`: set allowed prefix for file actions (example: `\\test_dir\\`)
+- `/djibion_allow_delete <0|1>`: allow deleting files
+- `/djibion_max_write <bytes>`: set max bytes for `/fs_write` and `/fs_append`
+- `/djibion_max_oo <n>`: set max cycles per `/oo_exec` or `/oo_auto`
+- `/djibion_allow_autorun <0|1>`: allow `/autorun`
+- `/djibion_allow_oo_persist <0|1>`: allow `/oo_save` and `/oo_load`
+
+### Djibion config (repl.cfg)
+
+You can enable Djibion governance at boot by setting keys in `repl.cfg`:
+
+- `djibion_mode=0|1|2` (0=off, 1=observe, 2=enforce)
+- `djibion_prefix=\\test_dir\\` (optional prefix restriction)
+- `djibion_allow_write=0|1`
+- `djibion_allow_delete=0|1`
+- `djibion_max_write=<bytes>`
+- `djibion_max_oo=<n>`
+- `djibion_allow_autorun=0|1`
+- `djibion_allow_oo_persist=0|1`
+- `djibion_allow_snap_load=0|1`
+- `djibion_allow_snap_save=0|1`
+- `djibion_max_snap=<bytes>`
+- `djibion_allow_cfg_write=0|1`
+
+## Diopion (speed / burst engine)
+
+Diopion is a complementary engine focused on “bursty exploration” (temporary sampling knob overrides).
+It does not bypass Djibion safety gates; it only tweaks generation parameters.
+
+- `/diopion_on`: enable Diopion (observe mode)
+- `/diopion_off`: disable Diopion (also cancels any active burst)
+- `/diopion_enforce <0|1|2>`: set mode (0=off, 1=observe, 2=enforce)
+- `/diopion_profile <none|animal|vegetal|geom|bio>`: apply a preset profile (v0.1)
+- `/diopion_burst [turns] [temp_milli] [top_k] [max_tokens]`: start/refresh a burst
+- `/diopion_status`: show current mode/profile + burst defaults
+
+### Diopion config (repl.cfg)
+
+- `diopion_mode=0|1|2`
+- `diopion_profile=none|animal|vegetal|geom|bio`
+- `diopion_burst_turns=<n>` (1–16)
+- `diopion_burst_max_tokens=<n>` (16–1024)
+- `diopion_burst_topk=<n>` (1–200)
+- `diopion_burst_temp_milli=<n>` (50–2000, e.g. 900 => 0.900)

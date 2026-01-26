@@ -156,6 +156,12 @@ if [ -f repl.cfg ]; then
     echo "  ✅ Copied repl.cfg"
 fi
 
+# Optional splash screen (Cyberpunk Interface)
+if [ -f splash.bmp ]; then
+    mcopy splash.bmp z:/
+    echo "  ✅ Copied splash.bmp"
+fi
+
 # Optional autorun script. If present, copy to root.
 # This lets QEMU/CI run scripted REPL commands without manual typing.
 if [ -f llmk-autorun.txt ]; then

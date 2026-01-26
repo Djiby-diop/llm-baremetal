@@ -44,6 +44,17 @@ if (-not $PSBoundParameters.ContainsKey('ForceAvx2') -and ($Accel -eq 'whpx' -or
   $autoForceAvx2 = $true
 }
 
+# WHPX defaults that tend to behave better on Windows hosts.
+# - q35 chipset: fewer legacy devices; often more stable with WHPX
+# - CPU=max: exposes a broader feature set than 'host' on some QEMU builds
+if (-not $PSBoundParameters.ContainsKey('Machine') -and ($Accel -eq 'whpx' -or $Accel -eq 'auto')) {
+  $Machine = 'q35'
+}
+
+if (-not $PSBoundParameters.ContainsKey('Cpu') -and ($Accel -eq 'whpx' -or $Accel -eq 'auto')) {
+  $Cpu = 'max'
+}
+
 function Resolve-FirstExistingPath([string[]]$paths) {
   foreach ($p in $paths) {
     if ($p -and (Test-Path $p)) { return $p }
@@ -129,12 +140,11 @@ function Build-QemuArgs([string]$accelMode, [bool]$forceAvx2) {
   if ($accelArg -eq 'tcg') { $accelArg = 'tcg,thread=multi' }
 
   # Pick a CPU model suitable for the accelerator.
+  # For WHPX, 'max' is often a better default than 'host' on Windows.
   $cpuModel = 'qemu64'
-  if ($accelMode -eq 'whpx') { $cpuModel = 'host' }
+  if ($accelMode -eq 'whpx') { $cpuModel = 'max' }
 
-  if ($Cpu -ne 'auto') {
-    $cpuModel = $Cpu
-  }
+  if ($Cpu -ne 'auto') { $cpuModel = $Cpu }
 
   if ($forceAvx2) {
     # Best-effort feature exposure. Note: with some accelerators/CPU models,
