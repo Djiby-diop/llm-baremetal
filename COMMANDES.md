@@ -35,6 +35,7 @@ This file is a “complete” cheat-sheet of the commands available in the UEFI 
 - `/ctx`: show model + sampling + budgets
 - `/model`: loaded model info
 - `/model_info [file]`: show file header/metadata (supports `.bin` and `.gguf`)
+- `/models [dir]`: list available model files (`.bin` / `.gguf`) in root and `models\\`
 - `/cpu`: SIMD status
 - `/attn [auto|sse2|avx2]`: force the attention SIMD path
 - `/zones`: dump allocator zones + sentinel

@@ -2329,6 +2329,86 @@ static void llmk_fs_ls_best_effort(const CHAR16 *path, int max_entries) {
     if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
 }
 
+static int llmk_is_model_file_name16(const CHAR16 *name) {
+    if (!name || !name[0]) return 0;
+    if (llmk_char16_endswith_ci(name, L".bin")) return 1;
+    if (llmk_char16_endswith_ci(name, L".gguf")) return 1;
+    return 0;
+}
+
+static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries) {
+    if (!g_root) {
+        Print(L"\r\nERROR: file system not ready\r\n\r\n");
+        return;
+    }
+    if (max_entries <= 0) max_entries = 200;
+    if (max_entries > 500) max_entries = 500;
+
+    EFI_FILE_HANDLE dir = NULL;
+    int close_dir = 0;
+
+    if (!path || path[0] == 0 || llmk_char16_streq(path, L".") || llmk_char16_streq(path, L"\\")) {
+        dir = g_root;
+        close_dir = 0;
+    } else {
+        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &dir, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
+        if (EFI_ERROR(st) || !dir) {
+            Print(L"\r\nERROR: cannot open %s: %r\r\n\r\n", (CHAR16 *)path, st);
+            return;
+        }
+        close_dir = 1;
+    }
+
+    uefi_call_wrapper(dir->SetPosition, 2, dir, 0);
+
+    UINTN printed = 0;
+    UINTN matched = 0;
+    UINTN buf_cap = 1024;
+    void *buf = NULL;
+    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, buf_cap, &buf);
+    if (EFI_ERROR(st) || !buf) {
+        if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+        Print(L"\r\nERROR: OOM\r\n\r\n");
+        return;
+    }
+
+    while (printed < (UINTN)max_entries) {
+        UINTN sz = buf_cap;
+        st = uefi_call_wrapper(dir->Read, 3, dir, &sz, buf);
+        if (EFI_ERROR(st)) {
+            Print(L"\r\nERROR: ls read failed: %r\r\n\r\n", st);
+            break;
+        }
+        if (sz == 0) break;
+
+        EFI_FILE_INFO *info = (EFI_FILE_INFO *)buf;
+        if (!info->FileName) continue;
+        if (llmk_char16_streq(info->FileName, L".") || llmk_char16_streq(info->FileName, L"..")) continue;
+        if (info->Attribute & EFI_FILE_DIRECTORY) continue;
+        if (!llmk_is_model_file_name16(info->FileName)) continue;
+
+        if (matched == 0) {
+            Print(L"  size      name\r\n");
+        }
+        Print(L"  ");
+        llmk_print_u64(info->FileSize);
+        Print(L" ");
+        Print(L"%s\r\n", info->FileName);
+        printed++;
+        matched++;
+    }
+
+    if (matched == 0) {
+        Print(L"  (no .bin/.gguf found)\r\n");
+    }
+    if (printed >= (UINTN)max_entries) {
+        Print(L"  ... (truncated)\r\n");
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+}
+
 static void llmk_fs_cat_best_effort(const CHAR16 *path, UINTN max_bytes) {
     if (max_bytes == 0) max_bytes = (256U * 1024U);
     if (max_bytes > (1024U * 1024U)) max_bytes = (1024U * 1024U);
@@ -4705,6 +4785,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/stop_nl", L"Stop on double newline (0/1)" },
     { "/model", L"Show loaded model config" },
     { "/model_info", L"Show model header (bin) or metadata (gguf)" },
+    { "/models", L"List available .bin/.gguf files (root + models\\)" },
     { "/cpu", L"Show CPU SIMD status" },
     { "/zones", L"Dump allocator zones + sentinel" },
     { "/budget", L"Set budgets in cycles (p=prefill, d=decode)" },
@@ -4964,6 +5045,8 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/autostart_engines_on",
         "/autostart_engines_off",
         "/model",
+        "/model_info",
+        "/models",
         "/cpu",
         "/zones",
         "/budget",
@@ -7369,7 +7452,7 @@ snap_autoload_done:
                 }
                 Print(L"\r\nOK: autorun_autostart=0 (reboot to apply)\r\n\r\n");
                 continue;
-            } else if (my_strncmp(prompt, "/model", 6) == 0) {
+            } else if (my_strncmp(prompt, "/model", 6) == 0 && (prompt[6] == 0 || prompt[6] == ' ')) {
                 Print(L"\r\nModel:\r\n");
                 Print(L"  stories110M.bin\r\n");
                 Print(L"Config:\r\n");
@@ -7461,6 +7544,38 @@ snap_autoload_done:
                 Print(L"  file=%s\r\n", path16);
                 Print(L"  dim=%d layers=%d heads=%d kv=%d vocab=%d seq=%d shared_cls=%d\r\n\r\n",
                       c.dim, c.n_layers, c.n_heads, c.n_kv_heads, c.vocab_size, c.seq_len, shared);
+                continue;
+            } else if (my_strncmp(prompt, "/models", 7) == 0) {
+                // Usage:
+                //   /models            -> list root + models\\
+                //   /models <dir>      -> list .bin/.gguf in a directory (e.g. models, \\models)
+                CHAR16 path[128];
+                path[0] = 0;
+
+                int i = 7;
+                while (prompt[i] == ' ') i++;
+                if (prompt[i] != 0) {
+                    char p8[96];
+                    int n = 0;
+                    while (prompt[i] && prompt[i] != ' ' && n + 1 < (int)sizeof(p8)) {
+                        p8[n++] = prompt[i++];
+                    }
+                    p8[n] = 0;
+                    ascii_to_char16(path, p8, (int)(sizeof(path) / sizeof(path[0])));
+                }
+
+                Print(L"\r\nModels (.bin/.gguf):\r\n");
+                if (path[0]) {
+                    Print(L"Dir: %s\r\n", path);
+                    llmk_models_ls_best_effort(path, 200);
+                    Print(L"\r\n");
+                } else {
+                    Print(L"Root:\r\n");
+                    llmk_models_ls_best_effort(NULL, 200);
+                    Print(L"\r\nmodels\\:\r\n");
+                    llmk_models_ls_best_effort(L"models", 200);
+                    Print(L"\r\n");
+                }
                 continue;
             } else if (my_strncmp(prompt, "/cpu", 4) == 0) {
                 CPUFeatures f;
