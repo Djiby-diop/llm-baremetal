@@ -4,6 +4,10 @@ param(
 	[string]$Target = 'repl',
 
 	# Default unchanged (110M) unless overridden.
+	# NOTE: despite the name, this now supports:
+	#   - a full filename (stories110M.bin, my-instruct.gguf)
+	#   - a base name without extension (stories110M, my-instruct)
+	# In the base-name case, the image builder will copy .bin and/or .gguf if present.
 	[string]$ModelBin = 'stories110M.bin',
 
 	# Optional additional models to bundle into the image (copied to /models on the FAT partition).
@@ -23,12 +27,29 @@ if ($ExtraModelBins.Count -gt 0) {
 }
 
 # Fail fast with a helpful message when weights are not present.
-$modelHere = Join-Path $PSScriptRoot $ModelBin
-$modelParent = Join-Path (Split-Path $PSScriptRoot -Parent) $ModelBin
-if (-not (Test-Path $modelHere) -and -not (Test-Path $modelParent)) {
+function Test-ModelSpecPresent([string]$spec) {
+	if (-not $spec) { return $false }
+	$here = Join-Path $PSScriptRoot $spec
+	$parent = Join-Path (Split-Path $PSScriptRoot -Parent) $spec
+	if ((Test-Path $here) -or (Test-Path $parent)) { return $true }
+
+	# If no extension provided, accept .bin or .gguf
+	if ($spec -notmatch '\.[A-Za-z0-9]+$') {
+		$hereBin = Join-Path $PSScriptRoot ($spec + '.bin')
+		$hereGguf = Join-Path $PSScriptRoot ($spec + '.gguf')
+		$parBin = Join-Path (Split-Path $PSScriptRoot -Parent) ($spec + '.bin')
+		$parGguf = Join-Path (Split-Path $PSScriptRoot -Parent) ($spec + '.gguf')
+		return ((Test-Path $hereBin) -or (Test-Path $hereGguf) -or (Test-Path $parBin) -or (Test-Path $parGguf))
+	}
+
+	return $false
+}
+
+if (-not (Test-ModelSpecPresent $ModelBin)) {
 	Write-Host "" 
 	Write-Host "❌ Missing model weights: $ModelBin" -ForegroundColor Red
 	Write-Host "Place the model file in this folder or one level up, then re-run." -ForegroundColor Yellow
+	Write-Host "You can also pass a base name without extension (will accept .bin or .gguf)." -ForegroundColor Yellow
 	Write-Host "Tip: download the model from GitHub Releases (recommended) instead of committing weights." -ForegroundColor Yellow
 	throw "Missing model weights: $ModelBin"
 }
@@ -36,9 +57,7 @@ if (-not (Test-Path $modelHere) -and -not (Test-Path $modelParent)) {
 # Validate extra model files (if any)
 foreach ($m in $ExtraModelBins) {
 	if (-not $m) { continue }
-	$mHere = Join-Path $PSScriptRoot $m
-	$mParent = Join-Path (Split-Path $PSScriptRoot -Parent) $m
-	if (-not (Test-Path $mHere) -and -not (Test-Path $mParent)) {
+	if (-not (Test-ModelSpecPresent $m)) {
 		Write-Host "" 
 		Write-Host "❌ Missing extra model weights: $m" -ForegroundColor Red
 		throw "Missing extra model weights: $m"
@@ -122,7 +141,7 @@ $scriptBody = @(
 	'chmod +x create-boot-mtools.sh'
 	'make clean'
 	'make repl'
-	("MODEL_BIN='{0}' EXTRA_MODELS='{1}' ./create-boot-mtools.sh" -f $ModelBin, $extra)
+	("MODEL='{0}' MODEL_BIN='{0}' EXTRA_MODELS='{1}' ./create-boot-mtools.sh" -f $ModelBin, $extra)
 ) -join "\n"
 
 Set-Content -Path $tmpSh -Value $scriptBody -Encoding ASCII

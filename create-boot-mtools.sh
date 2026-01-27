@@ -10,10 +10,18 @@ echo "🚀 Creating Bootable USB Image (mtools method)"
 echo "════════════════════════════════════════════════"
 echo ""
 
-# Model selection (default: stories15M.bin)
-# Usage:
+#+#+#+#+########
+# Model selection
+#
+# Backward-compatible vars:
 #   MODEL_BIN=stories110M.bin ./create-boot-mtools.sh
+#
+# New preferred var (supports base name OR explicit file):
+#   MODEL=stories110M          ./create-boot-mtools.sh   # tries stories110M.bin then stories110M.gguf
+#   MODEL=models/my-instruct   ./create-boot-mtools.sh   # tries models/my-instruct.bin then .gguf
+#   MODEL=models/my-instruct.gguf ./create-boot-mtools.sh # will also copy sibling .bin if present
 MODEL_BIN="${MODEL_BIN:-stories15M.bin}"
+MODEL="${MODEL:-}"
 
 # Optional additional models (copied to /models on the FAT partition)
 # Usage:
@@ -34,40 +42,132 @@ for file in "$EFI_BIN" tokenizer.bin; do
     fi
 done
 
-MODEL_SRC="$MODEL_BIN"
-if [ ! -f "$MODEL_SRC" ] && [ -f "../$MODEL_BIN" ]; then
-    MODEL_SRC="../$MODEL_BIN"
+find_src() {
+    local rel="$1"
+    if [ -f "$rel" ]; then
+        echo "$rel"
+        return 0
+    fi
+    if [ -f "../$rel" ]; then
+        echo "../$rel"
+        return 0
+    fi
+    return 1
+}
+
+has_ext() {
+    local s="$1"
+    # crude but sufficient: has a dot after last slash
+    local base="${s##*/}"
+    [[ "$base" == *.* ]]
+}
+
+base_no_ext() {
+    local s="$1"
+    local base="${s%.*}"
+    echo "$base"
+}
+
+build_candidates() {
+    local spec="$1"
+    local cands=()
+
+    if has_ext "$spec"; then
+        cands+=("$spec")
+        case "$spec" in
+            *.gguf|*.GGUF)
+                cands+=("$(base_no_ext "$spec").bin")
+                ;;
+            *.bin|*.BIN)
+                cands+=("$(base_no_ext "$spec").gguf")
+                ;;
+        esac
+    else
+        cands+=("${spec}.bin")
+        cands+=("${spec}.gguf")
+    fi
+
+    printf "%s\n" "${cands[@]}"
+}
+
+add_resolved_files() {
+    # Args: spec, arrays (by name): SRCS_ARR, NAMES_ARR
+    local spec="$1"
+    local -n _srcs="$2"
+    local -n _names="$3"
+
+    local seen_local=()
+    while IFS= read -r cand; do
+        [ -z "$cand" ] && continue
+        # avoid duplicates in candidate list
+        local dup=0
+        for x in "${seen_local[@]}"; do
+            [ "$x" = "$cand" ] && dup=1 && break
+        done
+        [ $dup -eq 1 ] && continue
+        seen_local+=("$cand")
+
+        local src
+        src="$(find_src "$cand" 2>/dev/null || true)"
+        if [ -n "$src" ]; then
+            _srcs+=("$src")
+            _names+=("$(basename "$cand")")
+        fi
+    done < <(build_candidates "$spec")
+}
+
+# Resolve primary model spec -> one or two files (.bin/.gguf)
+MODEL_SPEC="$MODEL_BIN"
+if [ -n "$MODEL" ]; then
+    MODEL_SPEC="$MODEL"
 fi
-if [ ! -f "$MODEL_SRC" ]; then
-    echo "❌ Missing model: $MODEL_BIN (looked in current dir and parent dir)"
+
+PRIMARY_SRCS=()
+PRIMARY_NAMES=()
+add_resolved_files "$MODEL_SPEC" PRIMARY_SRCS PRIMARY_NAMES
+
+if [ ${#PRIMARY_SRCS[@]} -le 0 ]; then
+    echo "❌ Missing model: $MODEL_SPEC (looked in current dir and parent dir; supports base name + .bin/.gguf)"
     exit 1
 fi
+
+# The first resolved file is treated as the 'primary' for display purposes.
+MODEL_SRC="${PRIMARY_SRCS[0]}"
+MODEL_OUT_NAME="${PRIMARY_NAMES[0]}"
 
 # Resolve + validate extra models, and compute total size for auto-sizing.
 EXTRA_SRCS=()
 EXTRA_NAMES=()
-TOTAL_MODEL_BYTES=$(stat -c %s "$MODEL_SRC")
+TOTAL_MODEL_BYTES=0
+for src in "${PRIMARY_SRCS[@]}"; do
+    bytes=$(stat -c %s "$src")
+    TOTAL_MODEL_BYTES=$((TOTAL_MODEL_BYTES + bytes))
+done
 if [ -n "$EXTRA_MODELS" ]; then
     IFS=';' read -r -a extra_arr <<< "$EXTRA_MODELS"
     for m in "${extra_arr[@]}"; do
         m_trim="${m//[[:space:]]/}"
         [ -z "$m_trim" ] && continue
-        # Skip if same as primary
-        if [ "$(basename "$m_trim")" = "$(basename "$MODEL_BIN")" ]; then
+        # Skip if same as primary spec (by basename)
+        if [ "$(basename "$m_trim")" = "$(basename "$MODEL_SPEC")" ]; then
             continue
         fi
-        src="$m_trim"
-        if [ ! -f "$src" ] && [ -f "../$m_trim" ]; then
-            src="../$m_trim"
-        fi
-        if [ ! -f "$src" ]; then
-            echo "❌ Missing extra model: $m_trim (looked in current dir and parent dir)"
+
+        tmp_sr=()
+        tmp_nm=()
+        add_resolved_files "$m_trim" tmp_sr tmp_nm
+        if [ ${#tmp_sr[@]} -le 0 ]; then
+            echo "❌ Missing extra model: $m_trim (supports base name + .bin/.gguf; looked in current dir and parent dir)"
             exit 1
         fi
-        EXTRA_SRCS+=("$src")
-        EXTRA_NAMES+=("$(basename "$m_trim")")
-        bytes=$(stat -c %s "$src")
-        TOTAL_MODEL_BYTES=$((TOTAL_MODEL_BYTES + bytes))
+        for j in "${!tmp_sr[@]}"; do
+            src="${tmp_sr[$j]}"
+            name="${tmp_nm[$j]}"
+            EXTRA_SRCS+=("$src")
+            EXTRA_NAMES+=("$name")
+            bytes=$(stat -c %s "$src")
+            TOTAL_MODEL_BYTES=$((TOTAL_MODEL_BYTES + bytes))
+        done
     done
 fi
 echo "✅ All files present"
@@ -132,8 +232,13 @@ echo "  ✅ Copied BOOTX64.EFI"
 mcopy "$EFI_BIN" z:/KERNEL.EFI
 echo "  ✅ Copied KERNEL.EFI"
 
-mcopy "$MODEL_SRC" z:/"$(basename "$MODEL_BIN")"
-echo "  ✅ Copied $(basename "$MODEL_BIN") (${MODEL_MIB} MB)"
+for i in "${!PRIMARY_SRCS[@]}"; do
+    src="${PRIMARY_SRCS[$i]}"
+    name="${PRIMARY_NAMES[$i]}"
+    mcopy "$src" z:/"$name"
+    mib=$(( ( $(stat -c %s "$src") + 1024*1024 - 1) / (1024*1024) ))
+    echo "  ✅ Copied $name (${mib} MB)"
+done
 
 if [ ${#EXTRA_SRCS[@]} -gt 0 ]; then
     mmd z:/models

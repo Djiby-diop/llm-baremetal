@@ -25,7 +25,7 @@ MEMORION_OBJ = memorion-engine/core/memorion.o
 ORCHESTRION_OBJ = orchestrion-engine/core/orchestrion.o
 CALIBRION_OBJ = calibrion-engine/core/calibrion.o
 COMPATIBILION_OBJ = compatibilion-engine/core/compatibilion.o
-REPL_OBJS = $(REPL_OBJ) $(DJIBION_OBJ) $(DIOPION_OBJ) $(DIAGNOSTION_OBJ) $(MEMORION_OBJ) $(ORCHESTRION_OBJ) $(CALIBRION_OBJ) $(COMPATIBILION_OBJ) llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o djiblas.o djiblas_avx2.o attention_avx2.o
+REPL_OBJS = $(REPL_OBJ) $(DJIBION_OBJ) $(DIOPION_OBJ) $(DIAGNOSTION_OBJ) $(MEMORION_OBJ) $(ORCHESTRION_OBJ) $(CALIBRION_OBJ) $(COMPATIBILION_OBJ) llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o
 REPL_SO  = llama2_repl.so
 
 all: repl
@@ -48,6 +48,9 @@ llmk_sentinel.o: llmk_sentinel.c llmk_sentinel.h llmk_zones.h llmk_log.h
 
 llmk_oo.o: llmk_oo.c llmk_oo.h
 	$(CC) $(CFLAGS) -c llmk_oo.c -o llmk_oo.o
+
+gguf_loader.o: gguf_loader.c gguf_loader.h
+	$(CC) $(CFLAGS) -c gguf_loader.c -o gguf_loader.o
 
 djibion-engine/core/djibion.o: djibion-engine/core/djibion.c djibion-engine/core/djibion.h
 	$(CC) $(CFLAGS) -c djibion-engine/core/djibion.c -o djibion-engine/core/djibion.o

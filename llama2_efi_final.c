@@ -36,6 +36,122 @@
 #include "djibmark.h"
 #include "interface.h"
 
+// Minimal GGUF metadata reader (no inference yet)
+#include "gguf_loader.h"
+
+typedef enum {
+    LLMK_MODEL_FMT_UNKNOWN = 0,
+    LLMK_MODEL_FMT_BIN = 1,
+    LLMK_MODEL_FMT_GGUF = 2,
+} LlmkModelFormat;
+
+static LlmkModelFormat g_loaded_model_format = LLMK_MODEL_FMT_UNKNOWN;
+static CHAR16 g_loaded_model_path16[160];
+static GgufSummary g_loaded_model_gguf;
+
+static void llmk_model_set_loaded_path(const CHAR16 *path) {
+    if (!path) {
+        g_loaded_model_path16[0] = 0;
+        return;
+    }
+    // Truncate safely
+    UINTN n = StrLen(path);
+    if (n >= (sizeof(g_loaded_model_path16) / sizeof(g_loaded_model_path16[0]))) {
+        n = (sizeof(g_loaded_model_path16) / sizeof(g_loaded_model_path16[0])) - 1;
+    }
+    for (UINTN i = 0; i < n; i++) g_loaded_model_path16[i] = path[i];
+    g_loaded_model_path16[n] = 0;
+}
+
+static EFI_STATUS llmk_peek_magic4(EFI_FILE_HANDLE f, UINT8 out_magic[4]) {
+    if (!f || !out_magic) return EFI_INVALID_PARAMETER;
+    UINT64 pos = 0;
+    EFI_STATUS st = uefi_call_wrapper(f->GetPosition, 2, f, &pos);
+    if (EFI_ERROR(st)) return st;
+    st = uefi_call_wrapper(f->SetPosition, 2, f, 0);
+    if (EFI_ERROR(st)) return st;
+    UINTN n = 4;
+    st = uefi_call_wrapper(f->Read, 3, f, &n, out_magic);
+    // restore position best-effort
+    uefi_call_wrapper(f->SetPosition, 2, f, pos);
+    if (EFI_ERROR(st)) return st;
+    if (n != 4) return EFI_END_OF_FILE;
+    return EFI_SUCCESS;
+}
+
+static LlmkModelFormat llmk_detect_model_format(EFI_FILE_HANDLE f) {
+    UINT8 m[4];
+    EFI_STATUS st = llmk_peek_magic4(f, m);
+    if (EFI_ERROR(st)) return LLMK_MODEL_FMT_UNKNOWN;
+    if (m[0] == 'G' && m[1] == 'G' && m[2] == 'U' && m[3] == 'F') return LLMK_MODEL_FMT_GGUF;
+    // .bin (llama2.c weights) does not have a magic; treat as BIN by default.
+    return LLMK_MODEL_FMT_BIN;
+}
+
+static int llmk_char16_tolower(int c) {
+    if (c >= 'A' && c <= 'Z') return c + 32;
+    return c;
+}
+
+static int llmk_char16_endswith_ci(const CHAR16 *s, const CHAR16 *suffix) {
+    if (!s || !suffix) return 0;
+    UINTN sl = StrLen(s);
+    UINTN su = StrLen(suffix);
+    if (su == 0) return 1;
+    if (sl < su) return 0;
+    const CHAR16 *p = s + (sl - su);
+    for (UINTN i = 0; i < su; i++) {
+        if (llmk_char16_tolower((int)p[i]) != llmk_char16_tolower((int)suffix[i])) return 0;
+    }
+    return 1;
+}
+
+static int llmk_char16_has_dot_ext(const CHAR16 *s) {
+    if (!s) return 0;
+    // extension exists if there is a '.' after the last path separator.
+    const CHAR16 *last_sep = NULL;
+    const CHAR16 *last_dot = NULL;
+    for (const CHAR16 *p = s; *p; p++) {
+        if (*p == L'\\' || *p == L'/') last_sep = p;
+        if (*p == L'.') last_dot = p;
+    }
+    if (!last_dot) return 0;
+    if (last_sep && last_dot < last_sep) return 0;
+    // require something after dot
+    return last_dot[1] != 0;
+}
+
+static void llmk_char16_copy_cap(CHAR16 *dst, int cap, const CHAR16 *src) {
+    if (!dst || cap <= 0) return;
+    if (!src) { dst[0] = 0; return; }
+    int i = 0;
+    for (; i < cap - 1 && src[i]; i++) dst[i] = src[i];
+    dst[i] = 0;
+}
+
+static int llmk_try_open_with_ext(EFI_FILE_HANDLE Root, const CHAR16 *base, const CHAR16 *ext, EFI_FILE_HANDLE *out_file, CHAR16 *out_path, int out_path_cap) {
+    if (!Root || !base || !ext || !out_file) return 0;
+    *out_file = NULL;
+
+    CHAR16 path[192];
+    path[0] = 0;
+    llmk_char16_copy_cap(path, (int)(sizeof(path) / sizeof(path[0])), base);
+    if (!llmk_char16_endswith_ci(path, ext)) {
+        // Append extension
+        UINTN cur = StrLen(path);
+        UINTN exl = StrLen(ext);
+        if (cur + exl + 1 >= (sizeof(path) / sizeof(path[0]))) return 0;
+        StrCat(path, ext);
+    }
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &f, path, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(st) || !f) return 0;
+    *out_file = f;
+    if (out_path && out_path_cap > 0) llmk_char16_copy_cap(out_path, out_path_cap, path);
+    return 1;
+}
+
 static DjibionEngine g_djibion;
 static DiopionEngine g_diopion;
 static DiagnostionEngine g_diagnostion;
@@ -4588,6 +4704,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/stop_you", L"Stop on \\nYou: pattern (0/1)" },
     { "/stop_nl", L"Stop on double newline (0/1)" },
     { "/model", L"Show loaded model config" },
+    { "/model_info", L"Show model header (bin) or metadata (gguf)" },
     { "/cpu", L"Show CPU SIMD status" },
     { "/zones", L"Dump allocator zones + sentinel" },
     { "/budget", L"Set budgets in cycles (p=prefill, d=decode)" },
@@ -5446,13 +5563,61 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         // Optional: allow repl.cfg to override which model file to open.
         // Example in repl.cfg:
         //   model=models\\my-instruct.bin
+        //   model=models\\my-instruct.gguf
+        //   model=models\\my-instruct      (no extension: tries .bin then .gguf)
         //   model=stories110M.bin
         CHAR16 cfg_model[128];
         cfg_model[0] = 0;
         if (llmk_read_cfg_model_best_effort(Root, cfg_model, (int)(sizeof(cfg_model) / sizeof(cfg_model[0])))) {
             EFI_FILE_HANDLE f = 0;
-            EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &f, cfg_model, EFI_FILE_MODE_READ, 0);
+            EFI_STATUS st = EFI_NOT_FOUND;
+
+            // If no extension is provided, try .bin first (for inference), then .gguf.
+            if (!llmk_char16_has_dot_ext(cfg_model)) {
+                CHAR16 picked[192];
+                picked[0] = 0;
+                if (llmk_try_open_with_ext(Root, cfg_model, L".bin", &f, picked, (int)(sizeof(picked) / sizeof(picked[0])))) {
+                    llmk_char16_copy_cap(cfg_model, (int)(sizeof(cfg_model) / sizeof(cfg_model[0])), picked);
+                    st = EFI_SUCCESS;
+                } else if (llmk_try_open_with_ext(Root, cfg_model, L".gguf", &f, picked, (int)(sizeof(picked) / sizeof(picked[0])))) {
+                    llmk_char16_copy_cap(cfg_model, (int)(sizeof(cfg_model) / sizeof(cfg_model[0])), picked);
+                    st = EFI_SUCCESS;
+                }
+            } else {
+                st = uefi_call_wrapper(Root->Open, 5, Root, &f, cfg_model, EFI_FILE_MODE_READ, 0);
+            }
+
             if (!EFI_ERROR(st) && f) {
+                // If GGUF is selected, try best-effort fallback to a sibling .bin for inference.
+                LlmkModelFormat fmt = llmk_detect_model_format(f);
+                if (fmt == LLMK_MODEL_FMT_GGUF && llmk_char16_endswith_ci(cfg_model, L".gguf")) {
+                    // Replace extension with .bin
+                    CHAR16 alt[192];
+                    llmk_char16_copy_cap(alt, (int)(sizeof(alt) / sizeof(alt[0])), cfg_model);
+                    // Find last '.' and overwrite.
+                    for (int k = (int)StrLen(alt) - 1; k >= 0; k--) {
+                        if (alt[k] == L'.') {
+                            alt[k] = 0;
+                            break;
+                        }
+                        if (alt[k] == L'\\' || alt[k] == L'/') break;
+                    }
+                    if (StrLen(alt) + 4 < (sizeof(alt) / sizeof(alt[0]))) {
+                        StrCat(alt, L".bin");
+                        EFI_FILE_HANDLE fb = NULL;
+                        EFI_STATUS fst = uefi_call_wrapper(Root->Open, 5, Root, &fb, alt, EFI_FILE_MODE_READ, 0);
+                        if (!EFI_ERROR(fst) && fb) {
+                            uefi_call_wrapper(f->Close, 1, f);
+                            f = fb;
+                            llmk_char16_copy_cap(cfg_model, (int)(sizeof(cfg_model) / sizeof(cfg_model[0])), alt);
+                            fmt = LLMK_MODEL_FMT_BIN;
+                            Print(L"[cfg] NOTE: GGUF selected but inference needs .bin; using fallback: %s\r\n", alt);
+                        } else {
+                            Print(L"[cfg] NOTE: GGUF selected (%s). Metadata available via /model_info, but inference needs .bin.\r\n", cfg_model);
+                        }
+                    }
+                }
+
                 // Copy path to a stable buffer (stack buffer would not survive).
                 UINTN n = StrLen(cfg_model) + 1;
                 CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
@@ -5521,13 +5686,81 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         if (model_filename == NULL) {
             Print(L"ERROR: Model file not found.\r\n");
             Print(L"Expected one of (root or models\\): stories300M.bin stories260M.bin stories200M.bin stories110M.bin stories15M.bin model.bin\r\n");
-            Print(L"Or set repl.cfg: model=<path>\r\n");
+            Print(L"Or set repl.cfg: model=<path> (supports .bin; .gguf for /model_info)\r\n");
             return last;
         }
 model_selected:
         ;
     }
     
+    // Record the selected model path for /model_info.
+    llmk_model_set_loaded_path(model_filename);
+
+    // Detect format early.
+    g_loaded_model_format = llmk_detect_model_format(ModelFile);
+
+    if (g_loaded_model_format == LLMK_MODEL_FMT_GGUF) {
+        // Parse GGUF metadata best-effort, then fall back to a .bin model if available.
+        // (Inference path requires llama2.c-style .bin today.)
+        EFI_STATUS gst = gguf_read_summary(ModelFile, &g_loaded_model_gguf);
+        if (!EFI_ERROR(gst)) {
+            Print(L"GGUF detected: ");
+            llmk_print_ascii(g_loaded_model_gguf.architecture[0] ? g_loaded_model_gguf.architecture : "(unknown)");
+            Print(L" | ctx=%lu dim=%lu layers=%lu heads=%lu kv_heads=%lu\r\n",
+                  (UINT64)g_loaded_model_gguf.context_length,
+                  (UINT64)g_loaded_model_gguf.embedding_length,
+                  (UINT64)g_loaded_model_gguf.block_count,
+                  (UINT64)g_loaded_model_gguf.head_count,
+                  (UINT64)g_loaded_model_gguf.head_count_kv);
+        }
+
+        Print(L"NOTE: GGUF inference not wired yet; searching for a .bin fallback...\r\n");
+        uefi_call_wrapper(ModelFile->Close, 1, ModelFile);
+
+        // Minimal fallback search (root and models\\) to avoid bricking boot.
+        CHAR16 *fallbacks[] = {
+            L"stories300M.bin",
+            L"stories260M.bin",
+            L"stories200M.bin",
+            L"stories110M.bin",
+            L"stories15M.bin",
+            L"model.bin",
+        };
+        const int n_fallbacks = (int)(sizeof(fallbacks) / sizeof(fallbacks[0]));
+        EFI_FILE_HANDLE fb = NULL;
+        CHAR16 *fb_name = NULL;
+        for (int fi = 0; fi < n_fallbacks; fi++) {
+            EFI_FILE_HANDLE t = NULL;
+            EFI_STATUS fst = uefi_call_wrapper(Root->Open, 5, Root, &t, fallbacks[fi], EFI_FILE_MODE_READ, 0);
+            if (!EFI_ERROR(fst) && t) { fb = t; fb_name = fallbacks[fi]; break; }
+            {
+                CHAR16 pth[96];
+                StrCpy(pth, L"models\\");
+                StrCat(pth, fallbacks[fi]);
+                fst = uefi_call_wrapper(Root->Open, 5, Root, &t, pth, EFI_FILE_MODE_READ, 0);
+                if (!EFI_ERROR(fst) && t) {
+                    fb = t;
+                    UINTN n = StrLen(pth) + 1;
+                    CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
+                    fb_name = stable ? stable : fallbacks[fi];
+                    if (stable) StrCpy(stable, pth);
+                    break;
+                }
+            }
+        }
+
+        if (!fb || !fb_name) {
+            Print(L"ERROR: no .bin fallback found. Use /model_info to inspect GGUF, or provide a .bin export for inference.\r\n");
+            return EFI_UNSUPPORTED;
+        }
+
+        ModelFile = fb;
+        model_filename = fb_name;
+        llmk_model_set_loaded_path(model_filename);
+        g_loaded_model_format = LLMK_MODEL_FMT_BIN;
+        Print(L"OK: using .bin fallback: %s\r\n\r\n", model_filename);
+    }
+
     Config config;
     UINTN bytes_to_read = 7 * sizeof(int);
     uefi_call_wrapper(ModelFile->Read, 3, ModelFile, &bytes_to_read, &config);
@@ -7142,6 +7375,92 @@ snap_autoload_done:
                 Print(L"Config:\r\n");
                 Print(L"  dim=%d layers=%d heads=%d kv=%d vocab=%d seq=%d\r\n\r\n",
                       config.dim, config.n_layers, config.n_heads, config.n_kv_heads, config.vocab_size, config.seq_len);
+                continue;
+            } else if (my_strncmp(prompt, "/model_info", 11) == 0) {
+                // Usage:
+                //   /model_info           -> info for current loaded model path
+                //   /model_info <path>    -> info for a specific file
+                CHAR16 path16[192];
+                path16[0] = 0;
+
+                // Parse optional path argument from ASCII prompt.
+                int i = 11;
+                while (prompt[i] == ' ') i++;
+                if (prompt[i] != 0) {
+                    char p8[160];
+                    int n = 0;
+                    while (prompt[i] && prompt[i] != ' ' && n + 1 < (int)sizeof(p8)) {
+                        p8[n++] = prompt[i++];
+                    }
+                    p8[n] = 0;
+                    ascii_to_char16(path16, p8, (int)(sizeof(path16) / sizeof(path16[0])));
+                } else {
+                    // Default to last loaded model path (if known)
+                    if (g_loaded_model_path16[0]) {
+                        llmk_char16_copy_cap(path16, (int)(sizeof(path16) / sizeof(path16[0])), g_loaded_model_path16);
+                    } else if (model_filename) {
+                        llmk_char16_copy_cap(path16, (int)(sizeof(path16) / sizeof(path16[0])), model_filename);
+                    } else {
+                        StrCpy(path16, L"model.bin");
+                    }
+                }
+
+                EFI_FILE_HANDLE f = NULL;
+                EFI_STATUS st = llmk_open_read_file(&f, path16);
+                if (EFI_ERROR(st) || !f) {
+                    Print(L"\r\nERROR: open failed: %s (%r)\r\n\r\n", path16, st);
+                    continue;
+                }
+
+                LlmkModelFormat fmt = llmk_detect_model_format(f);
+                if (fmt == LLMK_MODEL_FMT_GGUF) {
+                    GgufSummary s;
+                    EFI_STATUS gst = gguf_read_summary(f, &s);
+                    uefi_call_wrapper(f->Close, 1, f);
+                    if (EFI_ERROR(gst)) {
+                        Print(L"\r\nGGUF: failed to parse (%r)\r\n\r\n", gst);
+                        continue;
+                    }
+
+                    Print(L"\r\nGGUF model info:\r\n");
+                    Print(L"  file=%s\r\n", path16);
+                    Print(L"  version=%u tensors=%lu kv=%lu header_bytes=%lu\r\n", (unsigned)s.version, (UINT64)s.tensor_count, (UINT64)s.kv_count, (UINT64)s.header_bytes);
+                    Print(L"  arch="); llmk_print_ascii(s.architecture[0] ? s.architecture : "(unknown)"); Print(L"\r\n");
+                    Print(L"  name="); llmk_print_ascii(s.name[0] ? s.name : "(none)"); Print(L"\r\n");
+                    Print(L"  file_type=%lu\r\n", (UINT64)s.file_type);
+                    if (s.context_length)   Print(L"  ctx=%lu\r\n", (UINT64)s.context_length);
+                    if (s.embedding_length) Print(L"  dim=%lu\r\n", (UINT64)s.embedding_length);
+                    if (s.block_count)      Print(L"  layers=%lu\r\n", (UINT64)s.block_count);
+                    if (s.head_count)       Print(L"  heads=%lu\r\n", (UINT64)s.head_count);
+                    if (s.head_count_kv)    Print(L"  kv_heads=%lu\r\n", (UINT64)s.head_count_kv);
+                    if (s.vocab_size)       Print(L"  vocab=%lu\r\n", (UINT64)s.vocab_size);
+                    if (s.tokenizer_model[0]) { Print(L"  tokenizer="); llmk_print_ascii(s.tokenizer_model); Print(L"\r\n"); }
+                    Print(L"\r\nNOTE: GGUF inference is not wired yet; use .bin for generation today.\r\n\r\n");
+                    continue;
+                }
+
+                // Default: treat as llama2.c .bin header (7 ints)
+                Config c;
+                EFI_STATUS pst = uefi_call_wrapper(f->SetPosition, 2, f, 0);
+                if (EFI_ERROR(pst)) {
+                    uefi_call_wrapper(f->Close, 1, f);
+                    Print(L"\r\nERROR: seek failed (%r)\r\n\r\n", pst);
+                    continue;
+                }
+                UINTN bytes = 7 * sizeof(int);
+                EFI_STATUS rst = uefi_call_wrapper(f->Read, 3, f, &bytes, &c);
+                uefi_call_wrapper(f->Close, 1, f);
+                if (EFI_ERROR(rst) || bytes != 7 * sizeof(int)) {
+                    Print(L"\r\nBIN: failed to read header (%r)\r\n\r\n", rst);
+                    continue;
+                }
+
+                int shared = (c.vocab_size < 0);
+                if (c.vocab_size < 0) c.vocab_size = -c.vocab_size;
+                Print(L"\r\nBIN model info:\r\n");
+                Print(L"  file=%s\r\n", path16);
+                Print(L"  dim=%d layers=%d heads=%d kv=%d vocab=%d seq=%d shared_cls=%d\r\n\r\n",
+                      c.dim, c.n_layers, c.n_heads, c.n_kv_heads, c.vocab_size, c.seq_len, shared);
                 continue;
             } else if (my_strncmp(prompt, "/cpu", 4) == 0) {
                 CPUFeatures f;
