@@ -17,6 +17,11 @@ stats=1                 # Print generation stats (0=off, 1=on)
 stop_you=1              # Stop on \nYou: pattern (0=off, 1=on)
 stop_nl=0               # Stop on double newline (0=off, 1=on)
 
+# Boot splash settings
+# Duration the splash image stays visible at boot (milliseconds).
+# 0 disables the pause; max 10000.
+splash_ms=5000
+
 # Performance/diagnostics
 attn=auto               # Attention SIMD (auto|sse2|avx2)
 strict_budget=0         # Hard-stop on budget overrun (0=log only, 1=trip sentinel)

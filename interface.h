@@ -66,6 +66,76 @@ static EFI_STATUS Interface_OpenFile(EFI_HANDLE ImageHandle, CHAR16 *Path, EFI_F
     return Status;
 }
 
+// Best-effort: read an integer value from repl.cfg (ASCII) by key.
+// Format expected: key=value (one per line). Returns 1 if found.
+static int Interface_ReadCfgU32(EFI_HANDLE ImageHandle, const char *key, UINT32 *out_value) {
+    if (!key || !out_value) return 0;
+    *out_value = 0;
+
+    EFI_FILE_HANDLE File;
+    EFI_STATUS Status = Interface_OpenFile(ImageHandle, L"repl.cfg", &File);
+    if (EFI_ERROR(Status)) return 0;
+
+    // Read a small prefix of the file (config is expected to be tiny).
+    // 4KB cap keeps it safe and fast.
+    UINTN cap = 4096;
+    CHAR8 *buf = AllocatePool(cap + 1);
+    if (!buf) {
+        uefi_call_wrapper(File->Close, 1, File);
+        return 0;
+    }
+    UINTN sz = cap;
+    Status = uefi_call_wrapper(File->Read, 3, File, &sz, buf);
+    uefi_call_wrapper(File->Close, 1, File);
+    if (EFI_ERROR(Status) || sz == 0) {
+        FreePool(buf);
+        return 0;
+    }
+    buf[sz] = 0;
+
+    // Parse lines.
+    UINTN key_len = 0;
+    while (key[key_len]) key_len++;
+
+    for (UINTN i = 0; i < sz; ) {
+        // Skip whitespace/newlines
+        while (i < sz && (buf[i] == '\r' || buf[i] == '\n' || buf[i] == ' ' || buf[i] == '\t')) i++;
+        if (i >= sz) break;
+
+        // Skip comments
+        if (buf[i] == '#') {
+            while (i < sz && buf[i] != '\n') i++;
+            continue;
+        }
+
+        // Match key
+        UINTN j = 0;
+        while (j < key_len && (i + j) < sz && buf[i + j] == (CHAR8)key[j]) j++;
+        if (j == key_len && (i + j) < sz && buf[i + j] == '=') {
+            i = i + j + 1;
+            // Parse unsigned integer
+            UINT32 v = 0;
+            int any = 0;
+            while (i < sz && buf[i] >= '0' && buf[i] <= '9') {
+                any = 1;
+                UINT32 d = (UINT32)(buf[i] - '0');
+                v = v * 10u + d;
+                i++;
+            }
+            FreePool(buf);
+            if (!any) return 0;
+            *out_value = v;
+            return 1;
+        }
+
+        // Skip rest of line
+        while (i < sz && buf[i] != '\n') i++;
+    }
+
+    FreePool(buf);
+    return 0;
+}
+
 // Helper: Draw Rect
 static void Interface_DrawRect(EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop, UINT32 X, UINT32 Y, UINT32 W, UINT32 H, EFI_GRAPHICS_OUTPUT_BLT_PIXEL Color) {
     uefi_call_wrapper(Gop->Blt, 10, Gop, &Color, EfiBltVideoFill, 0, 0, X, Y, W, H, 0);
@@ -186,9 +256,17 @@ static EFI_STATUS InterfaceFx_Begin(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Sy
     // 2. Load and Draw Static Splash Image
     Status = Interface_DrawBMP(ImageHandle, g_ifx.Gop, L"splash.bmp");
     
-    // 3. Pause for visibility (2 seconds)
+    // 3. Pause for visibility (configurable via repl.cfg: splash_ms=NNNN)
+    // Default: 2500ms. Clamp: 0..10000ms.
     if (!EFI_ERROR(Status)) {
-        uefi_call_wrapper(SystemTable->BootServices->Stall, 1, 2500000); // 2.5s
+        UINT32 splash_ms = 2500;
+        UINT32 cfg_ms = 0;
+        if (Interface_ReadCfgU32(ImageHandle, "splash_ms", &cfg_ms)) {
+            splash_ms = cfg_ms;
+        }
+        if (splash_ms > 10000) splash_ms = 10000;
+        // UEFI Stall takes microseconds.
+        uefi_call_wrapper(SystemTable->BootServices->Stall, 1, (UINTN)splash_ms * 1000u);
     }
 
     // 4. Fallback or Cleanup: we now return SUCCESS so the banner logic knows we ran.
