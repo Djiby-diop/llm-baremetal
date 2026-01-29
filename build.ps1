@@ -141,7 +141,9 @@ $scriptBody = @(
 	'chmod +x create-boot-mtools.sh'
 	'make clean'
 	'make repl'
-	("MODEL='{0}' MODEL_BIN='{0}' EXTRA_MODELS='{1}' ./create-boot-mtools.sh" -f $ModelBin, $extra)
+	# Force the EFI payload used by the image builder to be the freshly built one.
+	# This avoids accidentally picking an older EFI via an inherited EFI_BIN env var.
+	("EFI_BIN='llama2.efi' MODEL='{0}' MODEL_BIN='{0}' EXTRA_MODELS='{1}' ./create-boot-mtools.sh" -f $ModelBin, $extra)
 ) -join "\n"
 
 Set-Content -Path $tmpSh -Value $scriptBody -Encoding ASCII

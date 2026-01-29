@@ -9,6 +9,7 @@
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <emmintrin.h>
+#include <immintrin.h>
 #endif
 
 // djiblas optimized matmul
@@ -36,8 +37,9 @@
 #include "djibmark.h"
 #include "interface.h"
 
-// Minimal GGUF metadata reader (no inference yet)
+// GGUF support
 #include "gguf_loader.h"
+#include "gguf_infer.h"
 
 typedef enum {
     LLMK_MODEL_FMT_UNKNOWN = 0,
@@ -2767,6 +2769,14 @@ static CHAR16 g_cfg_autorun_file[96] = L"llmk-autorun.txt";
 static int g_boot_verbose = 0;
 static int g_cfg_loaded = 0;
 
+// GGUF Q8_0 blob mode (keeps matrices quantized in RAM). 1=enabled (default), 0=force float32 load.
+static int g_cfg_gguf_q8_blob = 1;
+// Q8_0 matmul option: quantize activations (x) to Q8_0 for faster AVX2 int8 dot kernels.
+// 0=off (default, higher fidelity)
+// 1=on for all Q8 matmuls (fastest, most approximation)
+// 2=FFN-only (w1/w3/w2), attention projections stay float (better quality/perf tradeoff)
+static int g_cfg_q8_act_quant = 0;
+
 // Rate-limit budget overrun prints (avoid flooding console).
 static UINT32 g_budget_overruns_prefill = 0;
 static UINT32 g_budget_overruns_decode = 0;
@@ -3022,6 +3032,8 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
     // Supported keys:
     //   boot_verbose=0/1
     //   boot_quiet=0/1  (inverse of boot_verbose)
+    //   gguf_q8_blob=0/1  (enable/disable Q8_0 blob mode)
+    //   q8_act_quant=0/1/2  (Q8 activation quantization mode)
     EFI_FILE_HANDLE f = NULL;
     EFI_STATUS st = llmk_open_read_file(&f, L"repl.cfg");
     if (EFI_ERROR(st) || !f) return;
@@ -3078,6 +3090,23 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
             int b;
             if (llmk_cfg_parse_bool(val, &b)) {
                 g_boot_verbose = (b != 0) ? 0 : 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "gguf_q8_blob") || llmk_cfg_streq_ci(key, "q8_blob") || llmk_cfg_streq_ci(key, "gguf_blob")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_gguf_q8_blob = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "q8_act_quant") || llmk_cfg_streq_ci(key, "q8_act_quantize") || llmk_cfg_streq_ci(key, "q8_x_quant")) {
+            int mode;
+            if (llmk_cfg_parse_i32(val, &mode)) {
+                if (mode < 0) mode = 0;
+                if (mode > 2) mode = 2;
+                g_cfg_q8_act_quant = mode;
+            } else {
+                int b;
+                if (llmk_cfg_parse_bool(val, &b)) {
+                    g_cfg_q8_act_quant = (b != 0) ? 1 : 0;
+                }
             }
         }
     }
@@ -3351,6 +3380,26 @@ static void llmk_load_repl_cfg_best_effort(
             if (val && val[0]) {
                 ascii_to_char16(g_cfg_autorun_file, val, (int)(sizeof(g_cfg_autorun_file) / sizeof(g_cfg_autorun_file[0])));
                 applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "gguf_q8_blob") || llmk_cfg_streq_ci(key, "q8_blob") || llmk_cfg_streq_ci(key, "gguf_blob")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_gguf_q8_blob = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "q8_act_quant") || llmk_cfg_streq_ci(key, "q8_act_quantize") || llmk_cfg_streq_ci(key, "q8_x_quant")) {
+            int mode;
+            if (llmk_cfg_parse_i32(val, &mode)) {
+                if (mode < 0) mode = 0;
+                if (mode > 2) mode = 2;
+                g_cfg_q8_act_quant = mode;
+                applied = 1;
+            } else {
+                int b;
+                if (llmk_cfg_parse_bool(val, &b)) {
+                    g_cfg_q8_act_quant = (b != 0) ? 1 : 0;
+                    applied = 1;
+                }
             }
         }
     }
@@ -3976,6 +4025,306 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     );
 }
 
+static UINT16 llmk_read_u16_unaligned(const void *p) {
+    const UINT8 *b = (const UINT8 *)p;
+    return (UINT16)((UINT16)b[0] | ((UINT16)b[1] << 8));
+}
+
+// IEEE-754 half -> float32. Handles normals/denormals/inf/nan.
+static float llmk_fp16_to_fp32(UINT16 h) {
+    UINT32 sign = (UINT32)(h >> 15) & 1u;
+    UINT32 exp  = (UINT32)(h >> 10) & 0x1Fu;
+    UINT32 mant = (UINT32)h & 0x3FFu;
+
+    UINT32 out_sign = sign << 31;
+    UINT32 out_exp;
+    UINT32 out_mant;
+
+    if (exp == 0) {
+        if (mant == 0) {
+            UINT32 u = out_sign;
+            return *(float *)&u;
+        }
+        // subnormal
+        exp = 1;
+        while ((mant & 0x400u) == 0) {
+            mant <<= 1;
+            exp--;
+        }
+        mant &= 0x3FFu;
+        out_exp  = (exp + (127 - 15)) << 23;
+        out_mant = mant << 13;
+    } else if (exp == 31) {
+        // inf/nan
+        out_exp  = 0xFFu << 23;
+        out_mant = mant ? (mant << 13) : 0;
+    } else {
+        out_exp  = (exp + (127 - 15)) << 23;
+        out_mant = mant << 13;
+    }
+
+    UINT32 u = out_sign | out_exp | out_mant;
+    return *(float *)&u;
+}
+
+static UINT64 llmk_align_up_u64(UINT64 x, UINT64 a) {
+    return (a == 0) ? x : ((x + a - 1ULL) / a) * a;
+}
+
+// GGML Q8_0 block format: fp16 scale + 32 int8 values.
+// bytes_per_row = (cols/32) * 34.
+static UINT64 llmk_q8_0_row_bytes(int cols) {
+    if (cols <= 0) return 0;
+    if ((cols % 32) != 0) return 0;
+    return ((UINT64)cols / 32ULL) * 34ULL;
+}
+
+static void llmk_dequantize_q8_0_row(float *dst, const UINT8 *row_q8, int cols) {
+    UINT64 rb = llmk_q8_0_row_bytes(cols);
+    if (!dst || !row_q8 || rb == 0) return;
+
+    const int nb = cols / 32;
+    const UINT8 *p = row_q8;
+    for (int b = 0; b < nb; b++) {
+        UINT16 dh = llmk_read_u16_unaligned(p);
+        float d = llmk_fp16_to_fp32(dh);
+        const INT8 *qs = (const INT8 *)(p + 2);
+        for (int i = 0; i < 32; i++) {
+            dst[b * 32 + i] = d * (float)qs[i];
+        }
+        p += 34;
+    }
+}
+
+// xout(d) = W(d×n) · x(n) where W is Q8_0 row-major blocks.
+static void matmul_q8_0_scalar(float *xout, const float *x, const UINT8 *w_q8, int n, int d) {
+    if (!xout || !x || !w_q8) return;
+    if ((n % 32) != 0) {
+        // Q8_0 requires cols multiple of 32.
+        for (int i = 0; i < d; i++) xout[i] = 0.0f;
+        return;
+    }
+
+    const UINT64 row_bytes = llmk_q8_0_row_bytes(n);
+    const int nb = n / 32;
+
+    for (int r = 0; r < d; r++) {
+        const UINT8 *row = w_q8 + (UINTN)r * (UINTN)row_bytes;
+        float acc = 0.0f;
+        const UINT8 *p = row;
+        for (int b = 0; b < nb; b++) {
+            float dscale = llmk_fp16_to_fp32(llmk_read_u16_unaligned(p));
+            const INT8 *qs = (const INT8 *)(p + 2);
+            float sum = 0.0f;
+            const float *xblk = x + b * 32;
+            for (int i = 0; i < 32; i++) {
+                sum += xblk[i] * (float)qs[i];
+            }
+            acc += dscale * sum;
+            p += 34;
+        }
+        xout[r] = acc;
+    }
+}
+
+#if defined(__x86_64__) || defined(_M_X64)
+// Shared activation quant buffers for Q8_0 matmuls (used only when q8_act_quant!=0).
+// Monotonic allocation is OK; we only grow a couple of times (dim/hidden_dim).
+static float *g_q8_act_scales = NULL;
+static INT8  *g_q8_act_qs = NULL;
+static int g_q8_act_cap_n = 0;
+
+static void llmk_q8_act_ensure(int n) {
+    if (n <= 0) return;
+    if ((n % 32) != 0) return;
+    if (g_q8_act_cap_n >= n && g_q8_act_scales && g_q8_act_qs) return;
+
+    const int nb = n / 32;
+    g_q8_act_scales = (float *)simple_alloc((unsigned long)nb * sizeof(float));
+    g_q8_act_qs = (INT8 *)simple_alloc((unsigned long)n * sizeof(INT8));
+    g_q8_act_cap_n = n;
+}
+
+static void llmk_quantize_f32_to_q8_blocks(const float *x, int n, INT8 *out_qs, float *out_scales) {
+    if (!x || !out_qs || !out_scales) return;
+    if (n <= 0 || (n % 32) != 0) return;
+    const int nb = n / 32;
+    for (int b = 0; b < nb; b++) {
+        const float *xb = x + b * 32;
+        float max_abs = 0.0f;
+        for (int i = 0; i < 32; i++) {
+            float v = xb[i];
+            if (v < 0.0f) v = -v;
+            if (v > max_abs) max_abs = v;
+        }
+        float dscale = (max_abs > 0.0f) ? (max_abs / 127.0f) : 0.0f;
+        out_scales[b] = dscale;
+        float inv = (dscale > 0.0f) ? (1.0f / dscale) : 0.0f;
+        INT8 *qdst = out_qs + b * 32;
+        for (int i = 0; i < 32; i++) {
+            float fv = xb[i] * inv;
+            int iv = (fv >= 0.0f) ? (int)(fv + 0.5f) : (int)(fv - 0.5f);
+            if (iv < -127) iv = -127;
+            if (iv > 127) iv = 127;
+            qdst[i] = (INT8)iv;
+        }
+    }
+}
+
+// Dot kernel for 32 signed int8 values using AVX2.
+// Returns int32 sum(a[i] * b[i]).
+__attribute__((target("avx2")))
+static int llmk_dot_i8_32_avx2(const INT8 *a, const INT8 *b) {
+    __m128i a0 = _mm_loadu_si128((const __m128i *)(a + 0));
+    __m128i a1 = _mm_loadu_si128((const __m128i *)(a + 16));
+    __m128i b0 = _mm_loadu_si128((const __m128i *)(b + 0));
+    __m128i b1 = _mm_loadu_si128((const __m128i *)(b + 16));
+
+    __m256i a16_0 = _mm256_cvtepi8_epi16(a0);
+    __m256i a16_1 = _mm256_cvtepi8_epi16(a1);
+    __m256i b16_0 = _mm256_cvtepi8_epi16(b0);
+    __m256i b16_1 = _mm256_cvtepi8_epi16(b1);
+
+    __m256i s0 = _mm256_madd_epi16(a16_0, b16_0);
+    __m256i s1 = _mm256_madd_epi16(a16_1, b16_1);
+    __m256i s = _mm256_add_epi32(s0, s1);
+
+    __m128i lo = _mm256_castsi256_si128(s);
+    __m128i hi = _mm256_extracti128_si256(s, 1);
+    __m128i sum = _mm_add_epi32(lo, hi);
+    __m128i shuf = _mm_shuffle_epi32(sum, _MM_SHUFFLE(2, 3, 0, 1));
+    sum = _mm_add_epi32(sum, shuf);
+    shuf = _mm_shuffle_epi32(sum, _MM_SHUFFLE(1, 0, 3, 2));
+    sum = _mm_add_epi32(sum, shuf);
+    return _mm_cvtsi128_si32(sum);
+}
+
+// AVX2 implementation: converts int8 weights to float on the fly.
+// Compiled as AVX2 even when the TU default is SSE2.
+__attribute__((target("avx2")))
+static void matmul_q8_0_avx2(float *xout, const float *x, const UINT8 *w_q8, int n, int d) {
+    if (!xout || !x || !w_q8) return;
+    if ((n % 32) != 0) {
+        for (int i = 0; i < d; i++) xout[i] = 0.0f;
+        return;
+    }
+
+    const UINT64 row_bytes = llmk_q8_0_row_bytes(n);
+    const int nb = n / 32;
+
+    for (int r = 0; r < d; r++) {
+        const UINT8 *row = w_q8 + (UINTN)r * (UINTN)row_bytes;
+        float acc = 0.0f;
+        const UINT8 *p = row;
+
+        for (int b = 0; b < nb; b++) {
+            float dscale = llmk_fp16_to_fp32(llmk_read_u16_unaligned(p));
+            const INT8 *qs = (const INT8 *)(p + 2);
+            const float *xblk = x + b * 32;
+
+            __m256 vacc = _mm256_setzero_ps();
+
+            // 32 values per block, process 8 at a time.
+            for (int i = 0; i < 32; i += 8) {
+                // Load 8 int8 values (unaligned) and sign-extend to 8 int32.
+                __m128i q8 = _mm_loadl_epi64((const __m128i *)(qs + i));
+                __m256i q32 = _mm256_cvtepi8_epi32(q8);
+                __m256 qf = _mm256_cvtepi32_ps(q32);
+
+                __m256 xf = _mm256_loadu_ps(xblk + i);
+                vacc = _mm256_add_ps(vacc, _mm256_mul_ps(xf, qf));
+            }
+
+            // Horizontal sum of vacc without requiring SSE3 (build uses -msse2).
+            __m128 lo = _mm256_castps256_ps128(vacc);
+            __m128 hi = _mm256_extractf128_ps(vacc, 1);
+            __m128 sum128 = _mm_add_ps(lo, hi);
+            __m128 shuf = _mm_shuffle_ps(sum128, sum128, _MM_SHUFFLE(2, 3, 0, 1));
+            sum128 = _mm_add_ps(sum128, shuf);
+            shuf = _mm_shuffle_ps(sum128, sum128, _MM_SHUFFLE(1, 0, 3, 2));
+            sum128 = _mm_add_ps(sum128, shuf);
+            float sum = _mm_cvtss_f32(sum128);
+            acc += dscale * sum;
+            p += 34;
+        }
+
+        xout[r] = acc;
+    }
+}
+
+// AVX2 implementation: quantize activations (x) into Q8_0 blocks and use int8 dot-products.
+// Faster on real AVX2 CPUs; adds extra approximation (beyond quantized weights).
+__attribute__((target("avx2")))
+static void matmul_q8_0_avx2_i8_prequant(float *xout, const INT8 *x_qs, const float *x_scales, const UINT8 *w_q8, int n, int d) {
+    if (!xout || !x_qs || !x_scales || !w_q8) return;
+    if ((n % 32) != 0) {
+        for (int i = 0; i < d; i++) xout[i] = 0.0f;
+        return;
+    }
+
+    const UINT64 row_bytes = llmk_q8_0_row_bytes(n);
+    const int nb = n / 32;
+
+    for (int r = 0; r < d; r++) {
+        const UINT8 *row = w_q8 + (UINTN)r * (UINTN)row_bytes;
+        float acc = 0.0f;
+        const UINT8 *p = row;
+        for (int b = 0; b < nb; b++) {
+            float wscale = llmk_fp16_to_fp32(llmk_read_u16_unaligned(p));
+            const INT8 *wqs = (const INT8 *)(p + 2);
+            const INT8 *blk = x_qs + b * 32;
+            int dot = llmk_dot_i8_32_avx2(blk, wqs);
+            acc += (wscale * x_scales[b]) * (float)dot;
+            p += 34;
+        }
+        xout[r] = acc;
+    }
+}
+
+__attribute__((target("avx2")))
+static void matmul_q8_0_avx2_i8(float *xout, const float *x, const UINT8 *w_q8, int n, int d) {
+    if (!xout || !x || !w_q8) return;
+    if ((n % 32) != 0) {
+        for (int i = 0; i < d; i++) xout[i] = 0.0f;
+        return;
+    }
+
+    llmk_q8_act_ensure(n);
+    if (!g_q8_act_qs || !g_q8_act_scales) return;
+    llmk_quantize_f32_to_q8_blocks(x, n, g_q8_act_qs, g_q8_act_scales);
+    matmul_q8_0_avx2_i8_prequant(xout, g_q8_act_qs, g_q8_act_scales, w_q8, n, d);
+}
+#endif
+
+static void matmul_q8_0(float *xout, const float *x, const UINT8 *w_q8, int n, int d) {
+    if (!xout || !x || !w_q8) return;
+    if ((n % 32) != 0) {
+        for (int i = 0; i < d; i++) xout[i] = 0.0f;
+        return;
+    }
+
+#if defined(__x86_64__) || defined(_M_X64)
+    static int g_q8_kernel_inited = 0;
+    static int g_q8_use_avx2 = 0;
+    if (!g_q8_kernel_inited) {
+        CPUFeatures f;
+        djiblas_detect_cpu(&f);
+        g_q8_use_avx2 = (f.has_avx2 != 0);
+        g_q8_kernel_inited = 1;
+    }
+    if (g_q8_use_avx2) {
+        if (g_cfg_q8_act_quant == 1) {
+            matmul_q8_0_avx2_i8(xout, x, w_q8, n, d);
+        } else {
+            matmul_q8_0_avx2(xout, x, w_q8, n, d);
+        }
+        return;
+    }
+#endif
+
+    matmul_q8_0_scalar(xout, x, w_q8, n, d);
+}
+
 void softmax(float* x, int size) {
     float max_val = x[0];
 #if defined(__x86_64__) || defined(_M_X64)
@@ -4141,6 +4490,9 @@ static void llmk_print_log(UINT32 n) {
 }
 
 typedef struct {
+    int kind; // 0 = float32, 1 = Q8_0 blob
+
+    // float32 pointers (always valid for norms; valid for matrices in float32 mode)
     float* token_embedding_table;
     float* rms_att_weight;
     float* wq;
@@ -4153,7 +4505,108 @@ typedef struct {
     float* w3;
     float* rms_final_weight;
     float* wcls;
+
+    // Q8_0 pointers (valid in Q8_0 blob mode)
+    const UINT8 *token_embedding_table_q8;
+    const UINT8 *wq_q8;
+    const UINT8 *wk_q8;
+    const UINT8 *wv_q8;
+    const UINT8 *wo_q8;
+    const UINT8 *w1_q8;
+    const UINT8 *w2_q8;
+    const UINT8 *w3_q8;
+    const UINT8 *wcls_q8;
+
+    // Strides/sizes for Q8_0 blob addressing
+    UINT64 tok_embd_row_bytes;
+    UINT64 wq_layer_bytes;
+    UINT64 wk_layer_bytes;
+    UINT64 wv_layer_bytes;
+    UINT64 wo_layer_bytes;
+    UINT64 w1_layer_bytes;
+    UINT64 w2_layer_bytes;
+    UINT64 w3_layer_bytes;
 } TransformerWeights;
+
+static void llmk_print_cfg(const Config *config,
+                           const CHAR16 *model_name,
+                           const TransformerWeights *weights,
+                           int kv_pos,
+                           float temperature,
+                           float min_p,
+                           float top_p,
+                           int top_k,
+                           int no_repeat_ngram,
+                           float repeat_penalty,
+                           int max_gen_tokens) {
+
+    Print(L"\r\nCFG\r\n");
+
+    Print(L"  repl_cfg_loaded=%d\r\n", g_cfg_loaded);
+    Print(L"  boot_verbose=%d\r\n", g_boot_verbose);
+
+    Print(L"  gguf_q8_blob=%d\r\n", g_cfg_gguf_q8_blob ? 1 : 0);
+    Print(L"  q8_act_quant=%d\r\n", g_cfg_q8_act_quant);
+    Print(L"  autorun_autostart=%d\r\n", g_cfg_autorun_autostart);
+    Print(L"  autorun_shutdown_when_done=%d\r\n", g_cfg_autorun_shutdown_when_done);
+    Print(L"  autorun_file=%s\r\n", g_cfg_autorun_file);
+
+    // Runtime state
+    if (g_loaded_model_path16[0]) {
+        Print(L"  loaded_model_path=%s\r\n", g_loaded_model_path16);
+    } else {
+        Print(L"  loaded_model_path=(unknown)\r\n");
+    }
+    Print(L"  model=%s\r\n", model_name ? model_name : L"(unknown)");
+
+    if (config) {
+        Print(L"  dim=%d layers=%d heads=%d kv=%d vocab=%d seq=%d\r\n",
+              config->dim, config->n_layers, config->n_heads, config->n_kv_heads, config->vocab_size, config->seq_len);
+        Print(L"  kv_pos=%d\r\n", kv_pos);
+    }
+
+    if (weights) {
+        Print(L"  weights_kind=%s\r\n", (weights->kind == 1) ? L"q8_0_blob" : L"float32");
+        if (weights->kind == 1) {
+            Print(L"  tok_embd_row_bytes=%lu\r\n", (UINT64)weights->tok_embd_row_bytes);
+            Print(L"  wq_layer_bytes=%lu\r\n", (UINT64)weights->wq_layer_bytes);
+            Print(L"  wk_layer_bytes=%lu\r\n", (UINT64)weights->wk_layer_bytes);
+            Print(L"  wv_layer_bytes=%lu\r\n", (UINT64)weights->wv_layer_bytes);
+            Print(L"  wo_layer_bytes=%lu\r\n", (UINT64)weights->wo_layer_bytes);
+            Print(L"  w1_layer_bytes=%lu\r\n", (UINT64)weights->w1_layer_bytes);
+            Print(L"  w2_layer_bytes=%lu\r\n", (UINT64)weights->w2_layer_bytes);
+            Print(L"  w3_layer_bytes=%lu\r\n", (UINT64)weights->w3_layer_bytes);
+        }
+    } else {
+        Print(L"  weights_kind=(unknown)\r\n");
+    }
+
+    // Attention SIMD mode
+    const CHAR16 *attn_mode = L"auto";
+    if (g_attn_force == 0) attn_mode = L"sse2 (forced)";
+    else if (g_attn_force == 1) attn_mode = L"avx2 (forced)";
+    Print(L"  attn_mode=%s\r\n", attn_mode);
+    Print(L"  attn_auto=%s\r\n", g_attn_use_avx2 ? L"avx2" : L"sse2");
+
+        Print(L"  sampling: temp=%d.%02d min_p=%d.%02d top_p=%d.%02d top_k=%d\r\n",
+            (int)temperature, (int)((temperature - (int)temperature) * 100.0f),
+            (int)min_p, (int)((min_p - (int)min_p) * 100.0f),
+            (int)top_p, (int)((top_p - (int)top_p) * 100.0f),
+            top_k);
+        Print(L"            norepeat=%d repeat=%d.%02d max_tokens=%d\r\n",
+            no_repeat_ngram,
+            (int)repeat_penalty, (int)((repeat_penalty - (int)repeat_penalty) * 100.0f),
+            max_gen_tokens);
+
+        if (g_llmk_ready) {
+          Print(L"  budgets: prefill_max=%lu decode_max=%lu strict=%d overruns(p=%d d=%d)\r\n",
+              g_budget_prefill_cycles, g_budget_decode_cycles,
+              (int)g_sentinel.cfg.strict_budget,
+              (int)g_budget_overruns_prefill, (int)g_budget_overruns_decode);
+        }
+
+    Print(L"\r\n");
+}
 
 typedef struct {
     float* x;
@@ -4196,11 +4649,21 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
     int head_size = dim / n_heads;
     int kv_dim = (dim * p->n_kv_heads) / n_heads;
     int kv_mul = n_heads / p->n_kv_heads;
+
+    const int q8_mode = g_cfg_q8_act_quant;
+    const int use_i8_attn = (q8_mode == 1) && llmk_has_avx2_cached();
+    const int use_i8_ffn = ((q8_mode == 1) || (q8_mode == 2)) && llmk_has_avx2_cached();
+    const int use_i8_cls = (q8_mode == 1) && llmk_has_avx2_cached();
     
     // Copy embedding
-    float* content_row = w->token_embedding_table + token * dim;
-    for (int i = 0; i < dim; i++) {
-        s->x[i] = content_row[i];
+    if (w->kind == 1) {
+        const UINT8 *row = w->token_embedding_table_q8 + (UINTN)token * (UINTN)w->tok_embd_row_bytes;
+        llmk_dequantize_q8_0_row(s->x, row, dim);
+    } else {
+        float* content_row = w->token_embedding_table + token * dim;
+        for (int i = 0; i < dim; i++) {
+            s->x[i] = content_row[i];
+        }
     }
     
     // Forward all layers
@@ -4209,9 +4672,23 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
         rmsnorm(s->xb, s->x, w->rms_att_weight + l*dim, dim);
         
         // Q, K, V matrices
-        matmul(s->q, s->xb, w->wq + l*dim*dim, dim, dim);
-        matmul(s->k, s->xb, w->wk + l*dim*kv_dim, dim, kv_dim);
-        matmul(s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim);
+        if (w->kind == 1) {
+            if (use_i8_attn) {
+                llmk_q8_act_ensure(dim);
+                llmk_quantize_f32_to_q8_blocks(s->xb, dim, g_q8_act_qs, g_q8_act_scales);
+                matmul_q8_0_avx2_i8_prequant(s->q, g_q8_act_qs, g_q8_act_scales, w->wq_q8 + (UINTN)l * (UINTN)w->wq_layer_bytes, dim, dim);
+                matmul_q8_0_avx2_i8_prequant(s->k, g_q8_act_qs, g_q8_act_scales, w->wk_q8 + (UINTN)l * (UINTN)w->wk_layer_bytes, dim, kv_dim);
+                matmul_q8_0_avx2_i8_prequant(s->v, g_q8_act_qs, g_q8_act_scales, w->wv_q8 + (UINTN)l * (UINTN)w->wv_layer_bytes, dim, kv_dim);
+            } else {
+                matmul_q8_0(s->q, s->xb, w->wq_q8 + (UINTN)l * (UINTN)w->wq_layer_bytes, dim, dim);
+                matmul_q8_0(s->k, s->xb, w->wk_q8 + (UINTN)l * (UINTN)w->wk_layer_bytes, dim, kv_dim);
+                matmul_q8_0(s->v, s->xb, w->wv_q8 + (UINTN)l * (UINTN)w->wv_layer_bytes, dim, kv_dim);
+            }
+        } else {
+            matmul(s->q, s->xb, w->wq + l*dim*dim, dim, dim);
+            matmul(s->k, s->xb, w->wk + l*dim*kv_dim, dim, kv_dim);
+            matmul(s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim);
+        }
         
         // Store in KV cache
         int loff = l * p->seq_len * kv_dim;
@@ -4250,7 +4727,17 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
         }
         
         // Output projection
-        matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
+        if (w->kind == 1) {
+            if (use_i8_attn) {
+                llmk_q8_act_ensure(dim);
+                llmk_quantize_f32_to_q8_blocks(s->xb, dim, g_q8_act_qs, g_q8_act_scales);
+                matmul_q8_0_avx2_i8_prequant(s->xb2, g_q8_act_qs, g_q8_act_scales, w->wo_q8 + (UINTN)l * (UINTN)w->wo_layer_bytes, dim, dim);
+            } else {
+                matmul_q8_0(s->xb2, s->xb, w->wo_q8 + (UINTN)l * (UINTN)w->wo_layer_bytes, dim, dim);
+            }
+        } else {
+            matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
+        }
         
         // Residual
         for (int i = 0; i < dim; i++) {
@@ -4261,8 +4748,20 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
         rmsnorm(s->xb, s->x, w->rms_ffn_weight + l*dim, dim);
         
         // FFN
-        matmul(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
-        matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
+        if (w->kind == 1) {
+            if (use_i8_ffn) {
+                llmk_q8_act_ensure(dim);
+                llmk_quantize_f32_to_q8_blocks(s->xb, dim, g_q8_act_qs, g_q8_act_scales);
+                matmul_q8_0_avx2_i8_prequant(s->hb, g_q8_act_qs, g_q8_act_scales, w->w1_q8 + (UINTN)l * (UINTN)w->w1_layer_bytes, dim, hidden_dim);
+                matmul_q8_0_avx2_i8_prequant(s->hb2, g_q8_act_qs, g_q8_act_scales, w->w3_q8 + (UINTN)l * (UINTN)w->w3_layer_bytes, dim, hidden_dim);
+            } else {
+                matmul_q8_0(s->hb, s->xb, w->w1_q8 + (UINTN)l * (UINTN)w->w1_layer_bytes, dim, hidden_dim);
+                matmul_q8_0(s->hb2, s->xb, w->w3_q8 + (UINTN)l * (UINTN)w->w3_layer_bytes, dim, hidden_dim);
+            }
+        } else {
+            matmul(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
+            matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
+        }
         
         // SwiGLU
         for (int i = 0; i < hidden_dim; i++) {
@@ -4271,7 +4770,17 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
             s->hb[i] = val * s->hb2[i];
         }
         
-        matmul(s->xb, s->hb, w->w2 + l*dim*hidden_dim, hidden_dim, dim);
+        if (w->kind == 1) {
+            if (use_i8_ffn) {
+                llmk_q8_act_ensure(hidden_dim);
+                llmk_quantize_f32_to_q8_blocks(s->hb, hidden_dim, g_q8_act_qs, g_q8_act_scales);
+                matmul_q8_0_avx2_i8_prequant(s->xb, g_q8_act_qs, g_q8_act_scales, w->w2_q8 + (UINTN)l * (UINTN)w->w2_layer_bytes, hidden_dim, dim);
+            } else {
+                matmul_q8_0(s->xb, s->hb, w->w2_q8 + (UINTN)l * (UINTN)w->w2_layer_bytes, hidden_dim, dim);
+            }
+        } else {
+            matmul(s->xb, s->hb, w->w2 + l*dim*hidden_dim, hidden_dim, dim);
+        }
         
         // Residual
         for (int i = 0; i < dim; i++) {
@@ -4283,7 +4792,17 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
     rmsnorm(s->x, s->x, w->rms_final_weight, dim);
     
     // Classifier
-    matmul(s->logits, s->x, w->wcls, dim, p->vocab_size);
+    if (w->kind == 1) {
+        if (use_i8_cls) {
+            llmk_q8_act_ensure(dim);
+            llmk_quantize_f32_to_q8_blocks(s->x, dim, g_q8_act_qs, g_q8_act_scales);
+            matmul_q8_0_avx2_i8_prequant(s->logits, g_q8_act_qs, g_q8_act_scales, w->wcls_q8, dim, p->vocab_size);
+        } else {
+            matmul_q8_0(s->logits, s->x, w->wcls_q8, dim, p->vocab_size);
+        }
+    } else {
+        matmul(s->logits, s->x, w->wcls, dim, p->vocab_size);
+    }
 }
 
 // Simple PRNG for sampling
@@ -4304,6 +4823,19 @@ static unsigned long long rdtsc(void) {
 
 // 0 means "unavailable / calibration failed".
 static unsigned long long tsc_per_sec = 0;
+
+// Cached CPU feature checks (avoid repeated CPUID).
+static int llmk_has_avx2_cached(void) {
+    static int inited = 0;
+    static int has = 0;
+    if (!inited) {
+        CPUFeatures f;
+        djiblas_detect_cpu(&f);
+        has = (f.has_avx2 != 0);
+        inited = 1;
+    }
+    return has;
+}
 
 // Best-effort wall-clock microsecond timestamp using UEFI GetTime.
 // Returns 1 on success, 0 on failure.
@@ -4792,11 +5324,14 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/attn", L"Force attention SIMD path: auto|sse2|avx2" },
     { "/test_failsafe", L"One-shot strict budget trip" },
     { "/ctx", L"Show model + sampling + budgets" },
+    { "/cfg", L"Show effective repl.cfg settings" },
     { "/log", L"Dump last n log entries" },
     { "/save_log", L"Write last n log entries to llmk-log.txt" },
     { "/save_dump", L"Write ctx+zones+sentinel+log to llmk-dump.txt" },
     { "/cls", L"Clear the screen" },
     { "/blas_bench", L"Benchmark Matrix Multiplication (Scalar vs SIMD)" },
+    { "/q8_bench", L"Benchmark Q8_0 matmul (scalar vs AVX2)" },
+    { "/q8_matvec", L"Benchmark Q8_0 model matvec (wq/wk/wv/wo/w1/w2/w3/cls)" },
     { "/gop", L"Show GOP framebuffer info" },
     { "/tui_on", L"Enable GOP TUI overlay" },
     { "/tui_off", L"Disable GOP TUI overlay" },
@@ -5671,35 +6206,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             }
 
             if (!EFI_ERROR(st) && f) {
-                // If GGUF is selected, try best-effort fallback to a sibling .bin for inference.
-                LlmkModelFormat fmt = llmk_detect_model_format(f);
-                if (fmt == LLMK_MODEL_FMT_GGUF && llmk_char16_endswith_ci(cfg_model, L".gguf")) {
-                    // Replace extension with .bin
-                    CHAR16 alt[192];
-                    llmk_char16_copy_cap(alt, (int)(sizeof(alt) / sizeof(alt[0])), cfg_model);
-                    // Find last '.' and overwrite.
-                    for (int k = (int)StrLen(alt) - 1; k >= 0; k--) {
-                        if (alt[k] == L'.') {
-                            alt[k] = 0;
-                            break;
-                        }
-                        if (alt[k] == L'\\' || alt[k] == L'/') break;
-                    }
-                    if (StrLen(alt) + 4 < (sizeof(alt) / sizeof(alt[0]))) {
-                        StrCat(alt, L".bin");
-                        EFI_FILE_HANDLE fb = NULL;
-                        EFI_STATUS fst = uefi_call_wrapper(Root->Open, 5, Root, &fb, alt, EFI_FILE_MODE_READ, 0);
-                        if (!EFI_ERROR(fst) && fb) {
-                            uefi_call_wrapper(f->Close, 1, f);
-                            f = fb;
-                            llmk_char16_copy_cap(cfg_model, (int)(sizeof(cfg_model) / sizeof(cfg_model[0])), alt);
-                            fmt = LLMK_MODEL_FMT_BIN;
-                            Print(L"[cfg] NOTE: GGUF selected but inference needs .bin; using fallback: %s\r\n", alt);
-                        } else {
-                            Print(L"[cfg] NOTE: GGUF selected (%s). Metadata available via /model_info, but inference needs .bin.\r\n", cfg_model);
-                        }
-                    }
-                }
+                // Keep the file as-selected. GGUF inference support (or fallback) is decided later,
+                // after we inspect the GGUF tensor types.
 
                 // Copy path to a stable buffer (stack buffer would not survive).
                 UINTN n = StrLen(cfg_model) + 1;
@@ -5769,7 +6277,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         if (model_filename == NULL) {
             Print(L"ERROR: Model file not found.\r\n");
             Print(L"Expected one of (root or models\\): stories300M.bin stories260M.bin stories200M.bin stories110M.bin stories15M.bin model.bin\r\n");
-            Print(L"Or set repl.cfg: model=<path> (supports .bin; .gguf for /model_info)\r\n");
+            Print(L"Or set repl.cfg: model=<path> (supports .bin/.gguf)\r\n");
             return last;
         }
 model_selected:
@@ -5782,9 +6290,27 @@ model_selected:
     // Detect format early.
     g_loaded_model_format = llmk_detect_model_format(ModelFile);
 
+    // GGUF inference support: F16/F32 and common quant types are supported by the loader.
+    LlmkGgufPlan *gguf_plan = NULL;
+    int use_gguf_inference = 0;
+    int gguf_has_output_weight = 0;
+
+    Config config;
+    // Default-init in case of early exits.
+    config.dim = 0;
+    config.hidden_dim = 0;
+    config.n_layers = 0;
+    config.n_heads = 0;
+    config.n_kv_heads = 0;
+    config.vocab_size = 0;
+    config.seq_len = 0;
+
+    // In llama2.c format, a negative vocab_size indicates shared classifier weights.
+    int shared_classifier = 0;
+
     if (g_loaded_model_format == LLMK_MODEL_FMT_GGUF) {
         // Parse GGUF metadata best-effort, then fall back to a .bin model if available.
-        // (Inference path requires llama2.c-style .bin today.)
+        // (If GGUF inference is unsupported, we keep the old safe .bin fallback behavior.)
         EFI_STATUS gst = gguf_read_summary(ModelFile, &g_loaded_model_gguf);
         if (!EFI_ERROR(gst)) {
             Print(L"GGUF detected: ");
@@ -5797,65 +6323,120 @@ model_selected:
                   (UINT64)g_loaded_model_gguf.head_count_kv);
         }
 
-        Print(L"NOTE: GGUF inference not wired yet; searching for a .bin fallback...\r\n");
-        uefi_call_wrapper(ModelFile->Close, 1, ModelFile);
+        // Try to build a GGUF inference plan. If this fails (e.g., quantized GGUF), fall back to .bin.
+        {
+            int dim = 0, hidden = 0, layers = 0, heads = 0, kv = 0, vocab = 0, seq = 0;
+            EFI_STATUS pst = llmk_gguf_build_plan(ModelFile, &gguf_plan, &dim, &hidden, &layers, &heads, &kv, &vocab, &seq, &gguf_has_output_weight);
+            if (!EFI_ERROR(pst) && gguf_plan) {
+                config.dim = dim;
+                config.hidden_dim = hidden;
+                config.n_layers = layers;
+                config.n_heads = heads;
+                config.n_kv_heads = kv;
+                config.vocab_size = vocab;
+                config.seq_len = seq;
 
-        // Minimal fallback search (root and models\\) to avoid bricking boot.
-        CHAR16 *fallbacks[] = {
-            L"stories300M.bin",
-            L"stories260M.bin",
-            L"stories200M.bin",
-            L"stories110M.bin",
-            L"stories15M.bin",
-            L"model.bin",
-        };
-        const int n_fallbacks = (int)(sizeof(fallbacks) / sizeof(fallbacks[0]));
-        EFI_FILE_HANDLE fb = NULL;
-        CHAR16 *fb_name = NULL;
-        for (int fi = 0; fi < n_fallbacks; fi++) {
-            EFI_FILE_HANDLE t = NULL;
-            EFI_STATUS fst = uefi_call_wrapper(Root->Open, 5, Root, &t, fallbacks[fi], EFI_FILE_MODE_READ, 0);
-            if (!EFI_ERROR(fst) && t) { fb = t; fb_name = fallbacks[fi]; break; }
-            {
-                CHAR16 pth[96];
-                StrCpy(pth, L"models\\");
-                StrCat(pth, fallbacks[fi]);
-                fst = uefi_call_wrapper(Root->Open, 5, Root, &t, pth, EFI_FILE_MODE_READ, 0);
-                if (!EFI_ERROR(fst) && t) {
-                    fb = t;
-                    UINTN n = StrLen(pth) + 1;
-                    CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
-                    fb_name = stable ? stable : fallbacks[fi];
-                    if (stable) StrCpy(stable, pth);
-                    break;
-                }
+                shared_classifier = gguf_has_output_weight ? 0 : 1;
+                use_gguf_inference = 1;
+                Print(L"OK: GGUF inference enabled (F16/F32/Q4/Q5/Q8).\r\n\r\n");
+            } else {
+                Print(L"NOTE: GGUF inference unsupported (%r); searching for a .bin fallback...\r\n", pst);
             }
         }
 
-        if (!fb || !fb_name) {
-            Print(L"ERROR: no .bin fallback found. Use /model_info to inspect GGUF, or provide a .bin export for inference.\r\n");
-            return EFI_UNSUPPORTED;
-        }
+        if (!use_gguf_inference) {
+            uefi_call_wrapper(ModelFile->Close, 1, ModelFile);
 
-        ModelFile = fb;
-        model_filename = fb_name;
-        llmk_model_set_loaded_path(model_filename);
-        g_loaded_model_format = LLMK_MODEL_FMT_BIN;
-        Print(L"OK: using .bin fallback: %s\r\n\r\n", model_filename);
+            // Preferred fallback: sibling .bin next to the selected .gguf (same basename).
+            if (model_filename && llmk_char16_endswith_ci(model_filename, L".gguf")) {
+                CHAR16 alt[192];
+                llmk_char16_copy_cap(alt, (int)(sizeof(alt) / sizeof(alt[0])), model_filename);
+                // Find last '.' and overwrite.
+                for (int k = (int)StrLen(alt) - 1; k >= 0; k--) {
+                    if (alt[k] == L'.') {
+                        alt[k] = 0;
+                        break;
+                    }
+                    if (alt[k] == L'\\' || alt[k] == L'/') break;
+                }
+                if (StrLen(alt) + 4 < (sizeof(alt) / sizeof(alt[0]))) {
+                    StrCat(alt, L".bin");
+                    EFI_FILE_HANDLE fb = NULL;
+                    EFI_STATUS fst = uefi_call_wrapper(Root->Open, 5, Root, &fb, alt, EFI_FILE_MODE_READ, 0);
+                    if (!EFI_ERROR(fst) && fb) {
+                        ModelFile = fb;
+                        UINTN n = StrLen(alt) + 1;
+                        CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
+                        model_filename = stable ? stable : model_filename;
+                        if (stable) StrCpy(stable, alt);
+                        llmk_model_set_loaded_path(model_filename);
+                        g_loaded_model_format = LLMK_MODEL_FMT_BIN;
+                        Print(L"OK: using sibling .bin fallback: %s\r\n\r\n", model_filename);
+                        goto gguf_fallback_done;
+                    }
+                }
+            }
+
+            // Minimal fallback search (root and models\\) to avoid bricking boot.
+            CHAR16 *fallbacks[] = {
+                L"stories300M.bin",
+                L"stories260M.bin",
+                L"stories200M.bin",
+                L"stories110M.bin",
+                L"stories15M.bin",
+                L"model.bin",
+            };
+            const int n_fallbacks = (int)(sizeof(fallbacks) / sizeof(fallbacks[0]));
+            EFI_FILE_HANDLE fb = NULL;
+            CHAR16 *fb_name = NULL;
+            for (int fi = 0; fi < n_fallbacks; fi++) {
+                EFI_FILE_HANDLE t = NULL;
+                EFI_STATUS fst = uefi_call_wrapper(Root->Open, 5, Root, &t, fallbacks[fi], EFI_FILE_MODE_READ, 0);
+                if (!EFI_ERROR(fst) && t) { fb = t; fb_name = fallbacks[fi]; break; }
+                {
+                    CHAR16 pth[96];
+                    StrCpy(pth, L"models\\");
+                    StrCat(pth, fallbacks[fi]);
+                    fst = uefi_call_wrapper(Root->Open, 5, Root, &t, pth, EFI_FILE_MODE_READ, 0);
+                    if (!EFI_ERROR(fst) && t) {
+                        fb = t;
+                        UINTN n = StrLen(pth) + 1;
+                        CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
+                        fb_name = stable ? stable : fallbacks[fi];
+                        if (stable) StrCpy(stable, pth);
+                        break;
+                    }
+                }
+            }
+
+            if (!fb || !fb_name) {
+                Print(L"ERROR: no .bin fallback found. Use /model_info to inspect GGUF, or provide a .bin export for inference.\r\n");
+                return EFI_UNSUPPORTED;
+            }
+
+            ModelFile = fb;
+            model_filename = fb_name;
+            llmk_model_set_loaded_path(model_filename);
+            g_loaded_model_format = LLMK_MODEL_FMT_BIN;
+            Print(L"OK: using .bin fallback: %s\r\n\r\n", model_filename);
+        }
+gguf_fallback_done:
+        ;
     }
 
-    Config config;
-    UINTN bytes_to_read = 7 * sizeof(int);
-    uefi_call_wrapper(ModelFile->Read, 3, ModelFile, &bytes_to_read, &config);
-    
-    // In llama2.c format, a negative vocab_size indicates shared classifier weights.
-    int shared_classifier = (config.vocab_size < 0);
-    if (config.vocab_size < 0) config.vocab_size = -config.vocab_size;
+    UINTN bytes_to_read = 0;
+    if (!use_gguf_inference) {
+        bytes_to_read = 7 * sizeof(int);
+        uefi_call_wrapper(ModelFile->Read, 3, ModelFile, &bytes_to_read, &config);
+
+        shared_classifier = (config.vocab_size < 0);
+        if (config.vocab_size < 0) config.vocab_size = -config.vocab_size;
+    }
 
     // Some exported model files may *still* share classifier weights even if vocab_size is positive.
     // Detect this by comparing expected weights size vs actual file size.
     UINT64 model_file_size = 0;
-    {
+    if (!use_gguf_inference) {
         EFI_GUID FileInfoGuid = EFI_FILE_INFO_ID;
         UINTN info_size = 0;
         EFI_STATUS st = uefi_call_wrapper(ModelFile->GetInfo, 4, ModelFile, &FileInfoGuid, &info_size, NULL);
@@ -5869,6 +6450,39 @@ model_selected:
                 }
                 uefi_call_wrapper(BS->FreePool, 1, info);
             }
+        }
+    }
+
+    // For GGUF, optionally load weights into a compact Q8_0 blob when possible.
+    // This keeps matrices quantized in RAM and dequantizes on-the-fly during matmuls.
+    int use_q8_blob = 0;
+    UINT64 q8_blob_bytes = 0;
+    if (g_cfg_gguf_q8_blob && use_gguf_inference && gguf_plan) {
+        if (llmk_gguf_plan_supports_q8_0_blob(gguf_plan, shared_classifier)) {
+            EFI_STATUS bst = llmk_gguf_calc_llama2_q8_0_blob_bytes(
+                gguf_plan,
+                config.dim,
+                config.hidden_dim,
+                config.n_layers,
+                config.n_heads,
+                config.n_kv_heads,
+                config.vocab_size,
+                config.seq_len,
+                shared_classifier,
+                &q8_blob_bytes
+            );
+            if (!EFI_ERROR(bst) && q8_blob_bytes > 0) {
+                use_q8_blob = 1;
+                if (g_boot_verbose) {
+                    Print(L"[gguf] Q8_0 blob enabled: %lu MB\r\n", (UINT64)(q8_blob_bytes / (1024ULL * 1024ULL)));
+                }
+            } else {
+                Print(L"NOTE: GGUF Q8_0 blob sizing failed (%r); using float32 load.\r\n", bst);
+            }
+        }
+    } else if (!g_cfg_gguf_q8_blob && use_gguf_inference && gguf_plan) {
+        if (g_boot_verbose) {
+            Print(L"[gguf] Q8_0 blob disabled by repl.cfg; using float32 load.\r\n");
         }
     }
     
@@ -5920,7 +6534,7 @@ model_selected:
     }
 
     UINTN n_floats = shared_classifier ? n_floats_base : n_floats_with_cls;
-    UINTN weights_bytes = n_floats * sizeof(float);
+    UINTN weights_bytes = use_q8_blob ? (UINTN)q8_blob_bytes : (n_floats * sizeof(float));
     UINTN state_bytes = 0;
     state_bytes += (UINTN)config.dim * sizeof(float) * 3; // x, xb, xb2
     state_bytes += (UINTN)config.hidden_dim * sizeof(float) * 2; // hb, hb2
@@ -6036,59 +6650,295 @@ model_selected:
         Print(L"[4/7] Mapping weights...\r\n");
     }
     bytes_to_read = weights_bytes;
-    float* weights_mem = (float*)llmk_alloc_weights((UINT64)bytes_to_read, L"weights");
-    if (weights_mem == NULL) {
+    void* weights_mem_raw = (void*)llmk_alloc_weights((UINT64)bytes_to_read, L"weights");
+    if (weights_mem_raw == NULL) {
         Print(L"ERROR: Out of heap while allocating weights (%d MB needed)\r\n", (int)(bytes_to_read / (1024 * 1024)));
         return EFI_OUT_OF_RESOURCES;
     }
-    status = read_exact(ModelFile, weights_mem, bytes_to_read);
-    if (EFI_ERROR(status)) {
-        Print(L"ERROR: Failed to read weights (need model file + enough RAM).\r\n");
-        return EFI_LOAD_ERROR;
-    }
-
-    float* weights_ptr = weights_mem;
 
     TransformerWeights weights;
-    weights.token_embedding_table = weights_ptr;
-    weights_ptr += config.vocab_size * config.dim;
+    // Default init.
+    weights.kind = 0;
+    weights.token_embedding_table = NULL;
+    weights.rms_att_weight = NULL;
+    weights.wq = NULL;
+    weights.wk = NULL;
+    weights.wv = NULL;
+    weights.wo = NULL;
+    weights.rms_ffn_weight = NULL;
+    weights.w1 = NULL;
+    weights.w2 = NULL;
+    weights.w3 = NULL;
+    weights.rms_final_weight = NULL;
+    weights.wcls = NULL;
+    weights.token_embedding_table_q8 = NULL;
+    weights.wq_q8 = NULL;
+    weights.wk_q8 = NULL;
+    weights.wv_q8 = NULL;
+    weights.wo_q8 = NULL;
+    weights.w1_q8 = NULL;
+    weights.w2_q8 = NULL;
+    weights.w3_q8 = NULL;
+    weights.wcls_q8 = NULL;
+    weights.tok_embd_row_bytes = 0;
+    weights.wq_layer_bytes = 0;
+    weights.wk_layer_bytes = 0;
+    weights.wv_layer_bytes = 0;
+    weights.wo_layer_bytes = 0;
+    weights.w1_layer_bytes = 0;
+    weights.w2_layer_bytes = 0;
+    weights.w3_layer_bytes = 0;
+
+    if (use_gguf_inference) {
+        if (use_q8_blob) {
+            status = llmk_gguf_load_into_llama2_q8_0_blob(
+                ModelFile,
+                gguf_plan,
+                weights_mem_raw,
+                q8_blob_bytes,
+                config.dim,
+                config.hidden_dim,
+                config.n_layers,
+                config.n_heads,
+                config.n_kv_heads,
+                config.vocab_size,
+                config.seq_len,
+                shared_classifier
+            );
+            if (gguf_plan) {
+                llmk_gguf_free_plan(gguf_plan);
+                gguf_plan = NULL;
+            }
+            if (EFI_ERROR(status)) {
+                Print(L"ERROR: Failed to load GGUF Q8_0 blob weights (%r).\r\n", status);
+                return EFI_LOAD_ERROR;
+            }
+
+            // Map Q8_0 blob layout into pointer fields.
+            {
+                const UINT64 A = 16;
+                UINT8 *base = (UINT8 *)weights_mem_raw;
+                UINT64 off = 0;
+
+                UINT64 dim_u = (UINT64)config.dim;
+                UINT64 hid_u = (UINT64)config.hidden_dim;
+                UINT64 lay_u = (UINT64)config.n_layers;
+                UINT64 vocab_u = (UINT64)config.vocab_size;
+                UINT64 kv_dim_u = (UINT64)kv_dim;
+                UINT64 head_size_u = (UINT64)head_size;
+
+                UINT64 tok_row = llmk_q8_0_row_bytes(config.dim);
+                UINT64 wq_row  = llmk_q8_0_row_bytes(config.dim);
+                UINT64 wk_row  = llmk_q8_0_row_bytes(config.dim);
+                UINT64 wo_row  = llmk_q8_0_row_bytes(config.dim);
+                UINT64 w1_row  = llmk_q8_0_row_bytes(config.dim);
+                UINT64 w2_row  = llmk_q8_0_row_bytes(config.hidden_dim);
+                UINT64 w3_row  = llmk_q8_0_row_bytes(config.dim);
+                if (!tok_row || !wq_row || !wk_row || !wo_row || !w1_row || !w2_row || !w3_row) {
+                    Print(L"ERROR: Q8_0 blob requires dims multiple of 32 (dim=%d hidden=%d).\r\n", config.dim, config.hidden_dim);
+                    return EFI_UNSUPPORTED;
+                }
+
+                weights.kind = 1;
+                weights.tok_embd_row_bytes = tok_row;
+                weights.wq_layer_bytes = (UINT64)config.dim * wq_row;
+                weights.wk_layer_bytes = (UINT64)kv_dim * wk_row;
+                weights.wv_layer_bytes = (UINT64)kv_dim * wk_row;
+                weights.wo_layer_bytes = (UINT64)config.dim * wo_row;
+                weights.w1_layer_bytes = (UINT64)config.hidden_dim * w1_row;
+                weights.w2_layer_bytes = (UINT64)config.dim * w2_row;
+                weights.w3_layer_bytes = (UINT64)config.hidden_dim * w3_row;
+
+                // token_embedding_table (Q8_0) [vocab, dim]
+                off = llmk_align_up_u64(off, A);
+                weights.token_embedding_table_q8 = base + (UINTN)off;
+                off += vocab_u * tok_row;
+
+                // rms_att_weight (F32) [n_layers, dim]
+                off = llmk_align_up_u64(off, A);
+                weights.rms_att_weight = (float *)(base + (UINTN)off);
+                off += lay_u * dim_u * 4ULL;
+
+                // wq (Q8_0) per-layer [dim, dim]
+                off = llmk_align_up_u64(off, A);
+                weights.wq_q8 = base + (UINTN)off;
+                off += lay_u * weights.wq_layer_bytes;
+
+                // wk (Q8_0) per-layer [kv_dim, dim]
+                off = llmk_align_up_u64(off, A);
+                weights.wk_q8 = base + (UINTN)off;
+                off += lay_u * weights.wk_layer_bytes;
+
+                // wv (Q8_0) per-layer [kv_dim, dim]
+                off = llmk_align_up_u64(off, A);
+                weights.wv_q8 = base + (UINTN)off;
+                off += lay_u * weights.wv_layer_bytes;
+
+                // wo (Q8_0) per-layer [dim, dim]
+                off = llmk_align_up_u64(off, A);
+                weights.wo_q8 = base + (UINTN)off;
+                off += lay_u * weights.wo_layer_bytes;
+
+                // rms_ffn_weight (F32) [n_layers, dim]
+                off = llmk_align_up_u64(off, A);
+                weights.rms_ffn_weight = (float *)(base + (UINTN)off);
+                off += lay_u * dim_u * 4ULL;
+
+                // w1 (Q8_0) per-layer [hidden_dim, dim]
+                off = llmk_align_up_u64(off, A);
+                weights.w1_q8 = base + (UINTN)off;
+                off += lay_u * weights.w1_layer_bytes;
+
+                // w2 (Q8_0) per-layer [dim, hidden_dim]
+                off = llmk_align_up_u64(off, A);
+                weights.w2_q8 = base + (UINTN)off;
+                off += lay_u * weights.w2_layer_bytes;
+
+                // w3 (Q8_0) per-layer [hidden_dim, dim]
+                off = llmk_align_up_u64(off, A);
+                weights.w3_q8 = base + (UINTN)off;
+                off += lay_u * weights.w3_layer_bytes;
+
+                // rms_final_weight (F32) [dim]
+                off = llmk_align_up_u64(off, A);
+                weights.rms_final_weight = (float *)(base + (UINTN)off);
+                off += dim_u * 4ULL;
+
+                // freq_cis_real + freq_cis_imag (F32 zeros) [seq_len * head_size / 2] each
+                off = llmk_align_up_u64(off, A);
+                off += (UINT64)config.seq_len * head_size_u / 2ULL * 4ULL;
+                off += (UINT64)config.seq_len * head_size_u / 2ULL * 4ULL;
+
+                // wcls (Q8_0) [vocab, dim] if not shared
+                if (shared_classifier) {
+                    weights.wcls_q8 = weights.token_embedding_table_q8;
+                } else {
+                    off = llmk_align_up_u64(off, A);
+                    weights.wcls_q8 = base + (UINTN)off;
+                    off += vocab_u * tok_row;
+                }
+
+                (void)hid_u;
+                (void)kv_dim_u;
+            }
+        } else {
+            float *weights_mem = (float *)weights_mem_raw;
+            status = llmk_gguf_load_into_llama2_layout(
+                ModelFile,
+                gguf_plan,
+                weights_mem,
+                config.dim,
+                config.hidden_dim,
+                config.n_layers,
+                config.n_heads,
+                config.n_kv_heads,
+                config.vocab_size,
+                config.seq_len,
+                shared_classifier
+            );
+            if (gguf_plan) {
+                llmk_gguf_free_plan(gguf_plan);
+                gguf_plan = NULL;
+            }
+            if (EFI_ERROR(status)) {
+                Print(L"ERROR: Failed to load GGUF weights (%r).\r\n", status);
+                return EFI_LOAD_ERROR;
+            }
+
+            float* weights_ptr = weights_mem;
+
+            weights.kind = 0;
+            weights.token_embedding_table = weights_ptr;
+            weights_ptr += config.vocab_size * config.dim;
     
-    weights.rms_att_weight = weights_ptr;
-    weights_ptr += config.n_layers * config.dim;
+            weights.rms_att_weight = weights_ptr;
+            weights_ptr += config.n_layers * config.dim;
     
-    weights.wq = weights_ptr;
-    weights_ptr += config.n_layers * config.dim * config.dim;
+            weights.wq = weights_ptr;
+            weights_ptr += config.n_layers * config.dim * config.dim;
     
-    weights.wk = weights_ptr;
-    weights_ptr += config.n_layers * config.dim * kv_dim;
+            weights.wk = weights_ptr;
+            weights_ptr += config.n_layers * config.dim * kv_dim;
     
-    weights.wv = weights_ptr;
-    weights_ptr += config.n_layers * config.dim * kv_dim;
+            weights.wv = weights_ptr;
+            weights_ptr += config.n_layers * config.dim * kv_dim;
     
-    weights.wo = weights_ptr;
-    weights_ptr += config.n_layers * config.dim * config.dim;
+            weights.wo = weights_ptr;
+            weights_ptr += config.n_layers * config.dim * config.dim;
     
-    weights.rms_ffn_weight = weights_ptr;
-    weights_ptr += config.n_layers * config.dim;
+            weights.rms_ffn_weight = weights_ptr;
+            weights_ptr += config.n_layers * config.dim;
     
-    weights.w1 = weights_ptr;
-    weights_ptr += config.n_layers * config.dim * config.hidden_dim;
+            weights.w1 = weights_ptr;
+            weights_ptr += config.n_layers * config.dim * config.hidden_dim;
     
-    weights.w2 = weights_ptr;
-    weights_ptr += config.n_layers * config.hidden_dim * config.dim;
+            weights.w2 = weights_ptr;
+            weights_ptr += config.n_layers * config.hidden_dim * config.dim;
     
-    weights.w3 = weights_ptr;
-    weights_ptr += config.n_layers * config.dim * config.hidden_dim;
+            weights.w3 = weights_ptr;
+            weights_ptr += config.n_layers * config.dim * config.hidden_dim;
     
-    weights.rms_final_weight = weights_ptr;
-    weights_ptr += config.dim;
+            weights.rms_final_weight = weights_ptr;
+            weights_ptr += config.dim;
     
-    // Skip freq_cis_real and freq_cis_imag (RoPE precomputed freqs)
-    weights_ptr += config.seq_len * head_size / 2;  // freq_cis_real
-    weights_ptr += config.seq_len * head_size / 2;  // freq_cis_imag
-    
-    weights.wcls = shared_classifier ? weights.token_embedding_table : weights_ptr;
-    
+            // Skip freq_cis_real and freq_cis_imag (RoPE precomputed freqs)
+            weights_ptr += config.seq_len * head_size / 2;  // freq_cis_real
+            weights_ptr += config.seq_len * head_size / 2;  // freq_cis_imag
+
+            weights.wcls = shared_classifier ? weights.token_embedding_table : weights_ptr;
+        }
+    } else {
+        float *weights_mem = (float *)weights_mem_raw;
+        status = read_exact(ModelFile, weights_mem, bytes_to_read);
+        if (EFI_ERROR(status)) {
+            Print(L"ERROR: Failed to read weights (need model file + enough RAM).\r\n");
+            return EFI_LOAD_ERROR;
+        }
+
+        float* weights_ptr = weights_mem;
+
+        weights.kind = 0;
+        weights.token_embedding_table = weights_ptr;
+        weights_ptr += config.vocab_size * config.dim;
+
+        weights.rms_att_weight = weights_ptr;
+        weights_ptr += config.n_layers * config.dim;
+
+        weights.wq = weights_ptr;
+        weights_ptr += config.n_layers * config.dim * config.dim;
+
+        weights.wk = weights_ptr;
+        weights_ptr += config.n_layers * config.dim * kv_dim;
+
+        weights.wv = weights_ptr;
+        weights_ptr += config.n_layers * config.dim * kv_dim;
+
+        weights.wo = weights_ptr;
+        weights_ptr += config.n_layers * config.dim * config.dim;
+
+        weights.rms_ffn_weight = weights_ptr;
+        weights_ptr += config.n_layers * config.dim;
+
+        weights.w1 = weights_ptr;
+        weights_ptr += config.n_layers * config.dim * config.hidden_dim;
+
+        weights.w2 = weights_ptr;
+        weights_ptr += config.n_layers * config.hidden_dim * config.dim;
+
+        weights.w3 = weights_ptr;
+        weights_ptr += config.n_layers * config.dim * config.hidden_dim;
+
+        weights.rms_final_weight = weights_ptr;
+        weights_ptr += config.dim;
+
+        // Skip freq_cis_real and freq_cis_imag (RoPE precomputed freqs)
+        weights_ptr += config.seq_len * head_size / 2;  // freq_cis_real
+        weights_ptr += config.seq_len * head_size / 2;  // freq_cis_imag
+
+        weights.wcls = shared_classifier ? weights.token_embedding_table : weights_ptr;
+
+    }
+
     uefi_call_wrapper(ModelFile->Close, 1, ModelFile);
     
     if (g_boot_verbose) {
@@ -7740,6 +8590,12 @@ snap_autoload_done:
                 Print(L"\r\n[test] fail-safe armed (strict_budget=1)\r\n");
                 Print(L"  prefill_max=%lu decode_max=%lu\r\n", g_budget_prefill_cycles, g_budget_decode_cycles);
                 Print(L"  Next prompt should trip and auto-dump ctx/zones/sentinel/log.\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/cfg", 4) == 0) {
+                llmk_print_cfg(&config, model_filename, &weights,
+                               kv_pos,
+                               temperature, min_p, top_p, top_k,
+                               no_repeat_ngram, repeat_penalty, max_gen_tokens);
                 continue;
             } else if (my_strncmp(prompt, "/ctx", 4) == 0) {
                 llmk_print_ctx(&config, model_filename, kv_pos, temperature, min_p, top_p, top_k, no_repeat_ngram, repeat_penalty, max_gen_tokens);
@@ -10471,6 +11327,287 @@ snap_autoload_done:
                 } else {
                     Print(L"AVX2:   Skipped (Not Supported)\r\n");
                 }
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/q8_bench", 9) == 0) {
+                // Usage:
+                //   /q8_bench           -> default n=d=256, reps=10
+                //   /q8_bench <n> <d>   -> custom sizes (n must be multiple of 32)
+                //   /q8_bench <n> <d> <reps>
+                int n = 256;
+                int d = 256;
+                int reps = 10;
+
+                int i = 9;
+                while (prompt[i] == ' ') i++;
+                if (prompt[i] >= '0' && prompt[i] <= '9') {
+                    n = 0;
+                    while (prompt[i] >= '0' && prompt[i] <= '9') { n = n * 10 + (prompt[i] - '0'); i++; }
+                    while (prompt[i] == ' ') i++;
+                }
+                if (prompt[i] >= '0' && prompt[i] <= '9') {
+                    d = 0;
+                    while (prompt[i] >= '0' && prompt[i] <= '9') { d = d * 10 + (prompt[i] - '0'); i++; }
+                    while (prompt[i] == ' ') i++;
+                }
+                if (prompt[i] >= '0' && prompt[i] <= '9') {
+                    reps = 0;
+                    while (prompt[i] >= '0' && prompt[i] <= '9') { reps = reps * 10 + (prompt[i] - '0'); i++; }
+                }
+                if (reps < 1) reps = 1;
+                if (reps > 100) reps = 100;
+
+                if ((n % 32) != 0 || n <= 0 || d <= 0) {
+                    Print(L"\r\nUsage: /q8_bench [n multiple-of-32] [d] [reps]\r\n\r\n");
+                    continue;
+                }
+
+                Print(L"\r\nRunning Q8_0 matmul benchmark (n=%d d=%d reps=%d)...\r\n", n, d, reps);
+
+                UINT64 row_bytes = llmk_q8_0_row_bytes(n);
+                if (row_bytes == 0) {
+                    Print(L"ERROR: invalid Q8 row_bytes\r\n\r\n");
+                    continue;
+                }
+
+                float *x = (float*)simple_alloc((UINTN)n * sizeof(float));
+                UINT8 *wq8 = (UINT8*)simple_alloc((UINTN)d * (UINTN)row_bytes);
+                float *y_sc = (float*)simple_alloc((UINTN)d * sizeof(float));
+                float *y_avx = (float*)simple_alloc((UINTN)d * sizeof(float));
+                if (!x || !wq8 || !y_sc || !y_avx) {
+                    Print(L"Benchmark aborted: Alloc failed\r\n\r\n");
+                    continue;
+                }
+
+                // Init deterministic input vector
+                for (int j = 0; j < n; j++) {
+                    x[j] = (float)(((j * 13) % 97) - 48) * 0.01f;
+                }
+
+                // Init deterministic Q8_0 weights: fp16 scale = 1.0 (0x3C00) and int8 values.
+                // Layout per block: [u16 d][32 i8 qs] = 34 bytes.
+                for (int r = 0; r < d; r++) {
+                    UINT8 *row = wq8 + (UINTN)r * (UINTN)row_bytes;
+                    UINT8 *p = row;
+                    int nb = n / 32;
+                    for (int b = 0; b < nb; b++) {
+                        // d = 1.0f in fp16
+                        p[0] = 0x00;
+                        p[1] = 0x3C;
+                        INT8 *qs = (INT8 *)(p + 2);
+                        for (int k = 0; k < 32; k++) {
+                            int v = (r * 31 + b * 17 + k * 7) & 255;
+                            v -= 128;
+                            if (v < -127) v = -127;
+                            if (v > 127) v = 127;
+                            qs[k] = (INT8)v;
+                        }
+                        p += 34;
+                    }
+                }
+
+                // Scalar baseline
+                unsigned long long best_sc = ~0ULL;
+                for (int it = 0; it < reps; it++) {
+                    unsigned long long t0 = rdtsc();
+                    matmul_q8_0_scalar(y_sc, x, wq8, n, d);
+                    unsigned long long dt = rdtsc() - t0;
+                    if (dt < best_sc) best_sc = dt;
+                }
+                Print(L"Q8 scalar: %lu cycles (best of %d)\r\n", best_sc, reps);
+
+                // AVX2 (if supported)
+                CPUFeatures f;
+                djiblas_detect_cpu(&f);
+                if (f.has_avx2) {
+                    unsigned long long best_avx = ~0ULL;
+                    for (int it = 0; it < reps; it++) {
+                        unsigned long long t0 = rdtsc();
+                        if (g_cfg_q8_act_quant != 0) {
+                            matmul_q8_0_avx2_i8(y_avx, x, wq8, n, d);
+                        } else {
+                            matmul_q8_0_avx2(y_avx, x, wq8, n, d);
+                        }
+                        unsigned long long dt = rdtsc() - t0;
+                        if (dt < best_avx) best_avx = dt;
+                    }
+
+                    int speedup = (best_avx > 0) ? (int)(best_sc / best_avx) : 0;
+                    int dec = (best_avx > 0) ? (int)(((best_sc * 10ULL) / best_avx) % 10ULL) : 0;
+                    Print(L"Q8 AVX2%s:   %lu cycles (Speedup: %d.%dx)\r\n", (g_cfg_q8_act_quant != 0) ? L"(i8)" : L"", best_avx, speedup, dec);
+
+                    // Verify (loose tolerance, since AVX path accumulates in float too).
+                    float max_err = 0.0f;
+                    for (int t = 0; t < d; t++) {
+                        float diff = y_sc[t] - y_avx[t];
+                        if (diff < 0) diff = -diff;
+                        if (diff > max_err) max_err = diff;
+                    }
+                    Print(L"Max Error: %d.%06d\r\n", (int)max_err, (int)((max_err - (int)max_err) * 1000000));
+                } else {
+                    Print(L"Q8 AVX2:   Skipped (Not Supported)\r\n");
+                }
+
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/q8_matvec", 10) == 0) {
+                // Bench a *real* model matrix-vector multiply when running in Q8_0 blob mode.
+                // Usage:
+                //   /q8_matvec                 -> wq layer0, reps=20
+                //   /q8_matvec <name>          -> e.g. wq|wk|wv|wo|w1|w2|w3|cls
+                //   /q8_matvec <name> <layer>  -> selects layer for per-layer matrices
+                //   /q8_matvec <name> <layer> <reps>
+                if (!g_llmk_ready) {
+                    Print(L"\r\n  (llmk not ready)\r\n\r\n");
+                    continue;
+                }
+                if (weights.kind != 1) {
+                    Print(L"\r\nERROR: /q8_matvec requires GGUF Q8_0 blob mode (weights_kind=q8_0_blob).\r\n");
+                    Print(L"Tip: set gguf_q8_blob=1 in repl.cfg and load a Q8_0 GGUF.\r\n\r\n");
+                    continue;
+                }
+
+                char name[8];
+                name[0] = 'w'; name[1] = 'q'; name[2] = 0;
+                int layer = 0;
+                int reps = 20;
+
+                int i = 10;
+                while (prompt[i] == ' ') i++;
+                if (prompt[i] != 0) {
+                    int n = 0;
+                    while (prompt[i] && prompt[i] != ' ' && n + 1 < (int)sizeof(name)) {
+                        name[n++] = prompt[i++];
+                    }
+                    name[n] = 0;
+                    while (prompt[i] == ' ') i++;
+                }
+                if (prompt[i] >= '0' && prompt[i] <= '9') {
+                    layer = 0;
+                    while (prompt[i] >= '0' && prompt[i] <= '9') { layer = layer * 10 + (prompt[i] - '0'); i++; }
+                    while (prompt[i] == ' ') i++;
+                }
+                if (prompt[i] >= '0' && prompt[i] <= '9') {
+                    reps = 0;
+                    while (prompt[i] >= '0' && prompt[i] <= '9') { reps = reps * 10 + (prompt[i] - '0'); i++; }
+                }
+                if (reps < 1) reps = 1;
+                if (reps > 100) reps = 100;
+                if (layer < 0) layer = 0;
+                if (layer >= config.n_layers) layer = config.n_layers - 1;
+
+                // Select matrix pointer + shape.
+                const UINT8 *W = NULL;
+                int n_in = 0;
+                int d_out = 0;
+                const char *kind = "";
+
+                const int dim = config.dim;
+                const int hidden_dim = config.hidden_dim;
+                const int kv_dim = (dim * config.n_kv_heads) / config.n_heads;
+
+                if (my_strncmp(name, "wq", 2) == 0) {
+                    W = weights.wq_q8 + (UINTN)layer * (UINTN)weights.wq_layer_bytes;
+                    n_in = dim; d_out = dim; kind = "wq";
+                } else if (my_strncmp(name, "wk", 2) == 0) {
+                    W = weights.wk_q8 + (UINTN)layer * (UINTN)weights.wk_layer_bytes;
+                    n_in = dim; d_out = kv_dim; kind = "wk";
+                } else if (my_strncmp(name, "wv", 2) == 0) {
+                    W = weights.wv_q8 + (UINTN)layer * (UINTN)weights.wv_layer_bytes;
+                    n_in = dim; d_out = kv_dim; kind = "wv";
+                } else if (my_strncmp(name, "wo", 2) == 0) {
+                    W = weights.wo_q8 + (UINTN)layer * (UINTN)weights.wo_layer_bytes;
+                    n_in = dim; d_out = dim; kind = "wo";
+                } else if (my_strncmp(name, "w1", 2) == 0) {
+                    W = weights.w1_q8 + (UINTN)layer * (UINTN)weights.w1_layer_bytes;
+                    n_in = dim; d_out = hidden_dim; kind = "w1";
+                } else if (my_strncmp(name, "w2", 2) == 0) {
+                    W = weights.w2_q8 + (UINTN)layer * (UINTN)weights.w2_layer_bytes;
+                    n_in = hidden_dim; d_out = dim; kind = "w2";
+                } else if (my_strncmp(name, "w3", 2) == 0) {
+                    W = weights.w3_q8 + (UINTN)layer * (UINTN)weights.w3_layer_bytes;
+                    n_in = dim; d_out = hidden_dim; kind = "w3";
+                } else if (my_strncmp(name, "cls", 3) == 0) {
+                    W = weights.wcls_q8;
+                    n_in = dim; d_out = config.vocab_size; kind = "cls";
+                } else {
+                    Print(L"\r\nUsage: /q8_matvec [wq|wk|wv|wo|w1|w2|w3|cls] [layer] [reps]\r\n\r\n");
+                    continue;
+                }
+
+                if (!W || n_in <= 0 || d_out <= 0) {
+                    Print(L"\r\nERROR: matrix not available for %a\r\n\r\n", kind);
+                    continue;
+                }
+                if ((n_in % 32) != 0) {
+                    Print(L"\r\nERROR: Q8_0 matvec requires n multiple of 32 (n=%d)\r\n\r\n", n_in);
+                    continue;
+                }
+
+                // Allocate input/output
+                float *x = (float*)simple_alloc((UINTN)n_in * sizeof(float));
+                float *y_sc = (float*)simple_alloc((UINTN)d_out * sizeof(float));
+                float *y_avx = (float*)simple_alloc((UINTN)d_out * sizeof(float));
+                if (!x || !y_sc || !y_avx) {
+                    Print(L"\r\nERROR: alloc failed\r\n\r\n");
+                    continue;
+                }
+
+                for (int t = 0; t < n_in; t++) {
+                    x[t] = (float)(((t * 29) % 101) - 50) * 0.01f;
+                }
+
+                Print(L"\r\nQ8 matvec (%a", kind);
+                if (kind[0] == 'w') Print(L" layer=%d", layer);
+                Print(L") n=%d d=%d reps=%d\r\n", n_in, d_out, reps);
+
+                unsigned long long best_sc = ~0ULL;
+                for (int it = 0; it < reps; it++) {
+                    unsigned long long t0 = rdtsc();
+                    matmul_q8_0_scalar(y_sc, x, W, n_in, d_out);
+                    unsigned long long dt = rdtsc() - t0;
+                    if (dt < best_sc) best_sc = dt;
+                }
+                Print(L"Scalar: %lu cycles (%.2f cyc/out)\r\n", best_sc, (double)best_sc / (double)d_out);
+
+                CPUFeatures f;
+                djiblas_detect_cpu(&f);
+                if (f.has_avx2) {
+                    int allow_i8 = 0;
+                    if (g_cfg_q8_act_quant == 1) {
+                        allow_i8 = 1;
+                    } else if (g_cfg_q8_act_quant == 2) {
+                        // Hybrid mode: enable i8 dot only for FFN matrices.
+                        if (kind[0] == 'w' && kind[2] == 0 && (kind[1] == '1' || kind[1] == '2' || kind[1] == '3')) {
+                            allow_i8 = 1;
+                        }
+                    }
+                    unsigned long long best_avx = ~0ULL;
+                    for (int it = 0; it < reps; it++) {
+                        unsigned long long t0 = rdtsc();
+                        if (allow_i8) {
+                            matmul_q8_0_avx2_i8(y_avx, x, W, n_in, d_out);
+                        } else {
+                            matmul_q8_0_avx2(y_avx, x, W, n_in, d_out);
+                        }
+                        unsigned long long dt = rdtsc() - t0;
+                        if (dt < best_avx) best_avx = dt;
+                    }
+                    int speedup = (best_avx > 0) ? (int)(best_sc / best_avx) : 0;
+                    int dec = (best_avx > 0) ? (int)(((best_sc * 10ULL) / best_avx) % 10ULL) : 0;
+                    Print(L"AVX2%s:   %lu cycles (%.2f cyc/out, %d.%dx)\r\n", allow_i8 ? L"(i8)" : L"", best_avx, (double)best_avx / (double)d_out, speedup, dec);
+
+                    float max_err = 0.0f;
+                    for (int t = 0; t < d_out; t++) {
+                        float diff = y_sc[t] - y_avx[t];
+                        if (diff < 0) diff = -diff;
+                        if (diff > max_err) max_err = diff;
+                    }
+                    Print(L"Max Error: %d.%06d\r\n", (int)max_err, (int)((max_err - (int)max_err) * 1000000));
+                } else {
+                    Print(L"AVX2:   Skipped (Not Supported)\r\n");
+                }
+
                 Print(L"\r\n");
                 continue;
             } else if (my_strncmp(prompt, "/help", 5) == 0) {

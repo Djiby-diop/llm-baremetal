@@ -33,8 +33,16 @@ This file is a “complete” cheat-sheet of the commands available in the UEFI 
 
 - `/version`: version + build + features
 - `/ctx`: show model + sampling + budgets
+- `/cfg`: show effective repl.cfg settings
 - `/model`: loaded model info
 - `/model_info [file]`: show file header/metadata (supports `.bin` and `.gguf`)
+- Note: GGUF inference supports **F16/F32/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0**.
+  - Default behavior: tensors are dequantized to float32 at load.
+  - `gguf_q8_blob=1`: keep Q8_0 matrices quantized in RAM (faster load + lower RAM).
+  - `q8_act_quant` (only relevant for Q8_0 blob + AVX2):
+    - `0`: off (highest fidelity)
+    - `1`: on for all Q8 matmuls (fastest, most approximation)
+    - `2`: FFN-only (w1/w3/w2 use i8 dot; attention projections stay float for better quality/perf tradeoff)
 - `/models [dir]`: list available model files (`.bin` / `.gguf`) in root and `models\\`
 - `/cpu`: SIMD status
 - `/attn [auto|sse2|avx2]`: force the attention SIMD path
@@ -45,6 +53,14 @@ This file is a “complete” cheat-sheet of the commands available in the UEFI 
   - examples: `/commands dump` (matches `/save_dump`), `/commands /oo_`
 - `/help [filter]`: help (same filtering rules)
   - examples: `/help save`, `/help /oo_`
+
+## Bench / perf
+
+- `/blas_bench`: float32 matmul benchmark (scalar vs SIMD)
+- `/q8_bench [n] [d] [reps]`: synthetic Q8_0 matmul benchmark (scalar vs AVX2)
+  - prints `AVX2(i8)` when `q8_act_quant!=0`
+- `/q8_matvec [wq|wk|wv|wo|w1|w2|w3|cls] [layer] [reps]`: real model Q8_0 matvec benchmark (requires Q8 blob weights)
+  - prints `AVX2(i8)` when the selected matrix is using the i8 path (all matrices for `q8_act_quant=1`, FFN-only for `q8_act_quant=2`)
 
 ## Logs / dumps
 

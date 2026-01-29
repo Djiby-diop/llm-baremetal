@@ -23,6 +23,17 @@ echo ""
 MODEL_BIN="${MODEL_BIN:-stories15M.bin}"
 MODEL="${MODEL:-}"
 
+# Build an image without embedding any model weights.
+# Useful for CI/release artifacts and for users who want to copy their own model later.
+NO_MODEL="${NO_MODEL:-0}"
+if [ -n "$MODEL" ]; then
+    case "${MODEL}" in
+        none|nomodel|no-model)
+            NO_MODEL=1
+            ;;
+    esac
+fi
+
 # Optional additional models (copied to /models on the FAT partition)
 # Usage:
 #   EXTRA_MODELS='stories110M.bin;my-instruct.bin' MODEL_BIN=stories110M.bin ./create-boot-mtools.sh
@@ -116,71 +127,82 @@ add_resolved_files() {
     done < <(build_candidates "$spec")
 }
 
-# Resolve primary model spec -> one or two files (.bin/.gguf)
+PRIMARY_SRCS=()
+PRIMARY_NAMES=()
+EXTRA_SRCS=()
+EXTRA_NAMES=()
+TOTAL_MODEL_BYTES=0
+
 MODEL_SPEC="$MODEL_BIN"
 if [ -n "$MODEL" ]; then
     MODEL_SPEC="$MODEL"
 fi
 
-PRIMARY_SRCS=()
-PRIMARY_NAMES=()
-add_resolved_files "$MODEL_SPEC" PRIMARY_SRCS PRIMARY_NAMES
+if [ "$NO_MODEL" -eq 1 ]; then
+    echo "⚠️  NO_MODEL=1: building image without embedding model weights"
+    MODEL_SRC=""
+    MODEL_OUT_NAME="(none)"
+else
+    # Resolve primary model spec -> one or two files (.bin/.gguf)
+    add_resolved_files "$MODEL_SPEC" PRIMARY_SRCS PRIMARY_NAMES
 
-if [ ${#PRIMARY_SRCS[@]} -le 0 ]; then
-    echo "❌ Missing model: $MODEL_SPEC (looked in current dir and parent dir; supports base name + .bin/.gguf)"
-    exit 1
-fi
+    if [ ${#PRIMARY_SRCS[@]} -le 0 ]; then
+        echo "❌ Missing model: $MODEL_SPEC (looked in current dir and parent dir; supports base name + .bin/.gguf)"
+        exit 1
+    fi
 
-# The first resolved file is treated as the 'primary' for display purposes.
-MODEL_SRC="${PRIMARY_SRCS[0]}"
-MODEL_OUT_NAME="${PRIMARY_NAMES[0]}"
+    # The first resolved file is treated as the 'primary' for display purposes.
+    MODEL_SRC="${PRIMARY_SRCS[0]}"
+    MODEL_OUT_NAME="${PRIMARY_NAMES[0]}"
 
-# Resolve + validate extra models, and compute total size for auto-sizing.
-EXTRA_SRCS=()
-EXTRA_NAMES=()
-TOTAL_MODEL_BYTES=0
-for src in "${PRIMARY_SRCS[@]}"; do
-    bytes=$(stat -c %s "$src")
-    TOTAL_MODEL_BYTES=$((TOTAL_MODEL_BYTES + bytes))
-done
-if [ -n "$EXTRA_MODELS" ]; then
-    IFS=';' read -r -a extra_arr <<< "$EXTRA_MODELS"
-    for m in "${extra_arr[@]}"; do
-        m_trim="${m//[[:space:]]/}"
-        [ -z "$m_trim" ] && continue
-        # Skip if same as primary spec (by basename)
-        if [ "$(basename "$m_trim")" = "$(basename "$MODEL_SPEC")" ]; then
-            continue
-        fi
-
-        tmp_sr=()
-        tmp_nm=()
-        add_resolved_files "$m_trim" tmp_sr tmp_nm
-        if [ ${#tmp_sr[@]} -le 0 ]; then
-            echo "❌ Missing extra model: $m_trim (supports base name + .bin/.gguf; looked in current dir and parent dir)"
-            exit 1
-        fi
-        for j in "${!tmp_sr[@]}"; do
-            src="${tmp_sr[$j]}"
-            name="${tmp_nm[$j]}"
-            EXTRA_SRCS+=("$src")
-            EXTRA_NAMES+=("$name")
-            bytes=$(stat -c %s "$src")
-            TOTAL_MODEL_BYTES=$((TOTAL_MODEL_BYTES + bytes))
-        done
+    # Resolve + validate extra models, and compute total size for auto-sizing.
+    for src in "${PRIMARY_SRCS[@]}"; do
+        bytes=$(stat -c %s "$src")
+        TOTAL_MODEL_BYTES=$((TOTAL_MODEL_BYTES + bytes))
     done
+    if [ -n "$EXTRA_MODELS" ]; then
+        IFS=';' read -r -a extra_arr <<< "$EXTRA_MODELS"
+        for m in "${extra_arr[@]}"; do
+            m_trim="${m//[[:space:]]/}"
+            [ -z "$m_trim" ] && continue
+            # Skip if same as primary spec (by basename)
+            if [ "$(basename "$m_trim")" = "$(basename "$MODEL_SPEC")" ]; then
+                continue
+            fi
+
+            tmp_sr=()
+            tmp_nm=()
+            add_resolved_files "$m_trim" tmp_sr tmp_nm
+            if [ ${#tmp_sr[@]} -le 0 ]; then
+                echo "❌ Missing extra model: $m_trim (supports base name + .bin/.gguf; looked in current dir and parent dir)"
+                exit 1
+            fi
+            for j in "${!tmp_sr[@]}"; do
+                src="${tmp_sr[$j]}"
+                name="${tmp_nm[$j]}"
+                EXTRA_SRCS+=("$src")
+                EXTRA_NAMES+=("$name")
+                bytes=$(stat -c %s "$src")
+                TOTAL_MODEL_BYTES=$((TOTAL_MODEL_BYTES + bytes))
+            done
+        done
+    fi
 fi
 echo "✅ All files present"
 
 # Create image file (auto-sized)
 echo ""
-MODEL_BYTES=$(stat -c %s "$MODEL_SRC")
-MODEL_MIB=$(( (MODEL_BYTES + 1024*1024 - 1) / (1024*1024) ))
 TOTAL_MIB=$(( (TOTAL_MODEL_BYTES + 1024*1024 - 1) / (1024*1024) ))
 # Slack for FAT + GPT + EFI + tokenizer + alignment
 SLACK_MIB=80
 IMAGE_MIB=$(( TOTAL_MIB + SLACK_MIB ))
 if [ $IMAGE_MIB -lt 100 ]; then IMAGE_MIB=100; fi
+
+if [ "$NO_MODEL" -eq 1 ]; then
+    # Make the no-model image large enough for users to drop in weights later.
+    # (Still modest for a release artifact.)
+    if [ $IMAGE_MIB -lt 300 ]; then IMAGE_MIB=300; fi
+fi
 
 echo "[2/4] Creating ${IMAGE_MIB}MB FAT32 image..."
 IMAGE="llm-baremetal-boot.img"
@@ -232,24 +254,28 @@ echo "  ✅ Copied BOOTX64.EFI"
 mcopy "$EFI_BIN" z:/KERNEL.EFI
 echo "  ✅ Copied KERNEL.EFI"
 
-for i in "${!PRIMARY_SRCS[@]}"; do
-    src="${PRIMARY_SRCS[$i]}"
-    name="${PRIMARY_NAMES[$i]}"
-    mcopy "$src" z:/"$name"
-    mib=$(( ( $(stat -c %s "$src") + 1024*1024 - 1) / (1024*1024) ))
-    echo "  ✅ Copied $name (${mib} MB)"
-done
-
-if [ ${#EXTRA_SRCS[@]} -gt 0 ]; then
-    mmd z:/models
-    echo "  ✅ Created /models"
-    for i in "${!EXTRA_SRCS[@]}"; do
-        src="${EXTRA_SRCS[$i]}"
-        name="${EXTRA_NAMES[$i]}"
-        mcopy "$src" z:/models/"$name"
+if [ "$NO_MODEL" -ne 1 ]; then
+    for i in "${!PRIMARY_SRCS[@]}"; do
+        src="${PRIMARY_SRCS[$i]}"
+        name="${PRIMARY_NAMES[$i]}"
+        mcopy "$src" z:/"$name"
         mib=$(( ( $(stat -c %s "$src") + 1024*1024 - 1) / (1024*1024) ))
-        echo "  ✅ Copied models/$name (${mib} MB)"
+        echo "  ✅ Copied $name (${mib} MB)"
     done
+
+    if [ ${#EXTRA_SRCS[@]} -gt 0 ]; then
+        mmd z:/models
+        echo "  ✅ Created /models"
+        for i in "${!EXTRA_SRCS[@]}"; do
+            src="${EXTRA_SRCS[$i]}"
+            name="${EXTRA_NAMES[$i]}"
+            mcopy "$src" z:/models/"$name"
+            mib=$(( ( $(stat -c %s "$src") + 1024*1024 - 1) / (1024*1024) ))
+            echo "  ✅ Copied models/$name (${mib} MB)"
+        done
+    fi
+else
+    echo "  ℹ️  Skipping model copy (NO_MODEL=1)"
 fi
 
 mcopy tokenizer.bin z:/
@@ -267,12 +293,13 @@ if [ -f splash.bmp ]; then
     echo "  ✅ Copied splash.bmp"
 fi
 
-# Optional autorun script. If present, copy to root.
+# Optional autorun scripts. If present, copy to root.
 # This lets QEMU/CI run scripted REPL commands without manual typing.
-if [ -f llmk-autorun.txt ]; then
-    mcopy llmk-autorun.txt z:/
-    echo "  ✅ Copied llmk-autorun.txt"
-fi
+for f in llmk-autorun*.txt; do
+    [ -f "$f" ] || continue
+    mcopy "$f" z:/
+    echo "  ✅ Copied $f"
+done
 
 # Create startup.nsh for auto-boot.
 # Keep the UEFI shell alive after BOOTX64.EFI returns (avoids landing in the firmware boot manager UI).

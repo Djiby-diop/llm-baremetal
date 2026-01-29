@@ -22,6 +22,34 @@ Example (base name):
 ./build.ps1 -ModelBin stories110M
 ```
 
+## Build (Linux)
+
+Prereqs (Ubuntu/Debian):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential gnu-efi mtools parted dosfstools grub-pc-bin
+```
+
+Then:
+
+```bash
+cd llm-baremetal
+make clean
+make repl
+
+# Build an image with a bundled model:
+# MODEL=stories110M ./create-boot-mtools.sh
+
+# Or build a small image without embedding weights (copy your model later):
+NO_MODEL=1 ./create-boot-mtools.sh
+```
+
+## Prebuilt image (x86_64)
+
+If you don’t have Windows+WSL, the intent is to provide a prebuilt **x86_64 no-model** boot image in GitHub Releases.
+You can then copy your `.bin`/`.gguf` model to the USB/FAT volume and run it from the REPL.
+
 ## Run (QEMU)
 
 ```powershell
