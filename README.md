@@ -47,8 +47,33 @@ NO_MODEL=1 ./create-boot-mtools.sh
 
 ## Prebuilt image (x86_64)
 
-If you don’t have Windows+WSL, the intent is to provide a prebuilt **x86_64 no-model** boot image in GitHub Releases.
-You can then copy your `.bin`/`.gguf` model to the USB/FAT volume and run it from the REPL.
+GitHub Releases provides a prebuilt **x86_64 no-model** boot image.
+It intentionally does **not** bundle any model weights, and it does **not** hardcode a model path.
+
+Download these assets from the latest Release:
+
+- `llm-baremetal-boot-nomodel-x86_64.img.xz`
+- `SHA256SUMS.txt`
+
+Verify + extract (Linux):
+
+```bash
+sha256sum -c SHA256SUMS.txt
+xz -d llm-baremetal-boot-nomodel-x86_64.img.xz
+```
+
+Flash to a USB drive (Linux, replace `/dev/sdX`):
+
+```bash
+sudo dd if=llm-baremetal-boot-nomodel-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
+Copy your model to the USB EFI/FAT partition:
+
+- Copy your model file (`.gguf` or legacy `.bin`) to the root of the FAT partition (or create a `models/` folder and put it there).
+- `tokenizer.bin` is already included in the Release image.
+
+Boot the USB on an x86_64 UEFI machine, then select/load your model from the REPL.
 
 ## Run (QEMU)
 
