@@ -2787,6 +2787,8 @@ static void set_seed(unsigned int seed);
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 // Forward decl (used by repl.cfg editor helper before definition)
 static int my_strlen(const char* s);
+// Forward decl (used by transformer_forward before definition)
+static int llmk_has_avx2_cached(void);
 
 static void llmk_reset_runtime_state(void) {
     // Budgets

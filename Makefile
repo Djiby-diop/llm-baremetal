@@ -4,13 +4,31 @@
 ARCH = x86_64
 CC = gcc
 
+# GNU-EFI paths differ between distros (e.g. /usr/lib vs /usr/lib/x86_64-linux-gnu).
+MULTIARCH ?= $(shell $(CC) -print-multiarch 2>/dev/null)
+EFI_LIBDIR_CANDIDATES := /usr/lib /usr/lib/$(MULTIARCH)
+
+EFI_LDS := $(firstword $(wildcard $(addsuffix /elf_$(ARCH)_efi.lds,$(EFI_LIBDIR_CANDIDATES))))
+EFI_CRT0 := $(firstword $(wildcard $(addsuffix /crt0-efi-$(ARCH).o,$(EFI_LIBDIR_CANDIDATES))))
+EFI_LIBDIR := $(firstword $(foreach d,$(EFI_LIBDIR_CANDIDATES),$(if $(wildcard $(d)/libgnuefi.a),$(d),)))
+
+ifeq ($(strip $(EFI_LDS)),)
+$(error Could not find elf_$(ARCH)_efi.lds (install gnu-efi))
+endif
+ifeq ($(strip $(EFI_CRT0)),)
+$(error Could not find crt0-efi-$(ARCH).o (install gnu-efi))
+endif
+ifeq ($(strip $(EFI_LIBDIR)),)
+EFI_LIBDIR := /usr/lib
+endif
+
 # Canonical GNU-EFI build flags (known-good for this project)
 CFLAGS = -ffreestanding -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
 		 -I/usr/include/efi -I/usr/include/efi/$(ARCH) -DEFI_FUNCTION_WRAPPER \
 		 -O2 -msse2
 
-LDFLAGS = -nostdlib -znocombreloc -T /usr/lib/elf_$(ARCH)_efi.lds \
-		  -shared -Bsymbolic -L/usr/lib /usr/lib/crt0-efi-$(ARCH).o
+LDFLAGS = -nostdlib -znocombreloc -T $(EFI_LDS) \
+		  -shared -Bsymbolic -L$(EFI_LIBDIR) $(EFI_CRT0)
 
 LIBS = -lefi -lgnuefi
 
