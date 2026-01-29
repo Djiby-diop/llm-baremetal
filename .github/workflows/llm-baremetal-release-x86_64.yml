@@ -25,6 +25,10 @@ jobs:
             mtools parted dosfstools grub-pc-bin \
             xz-utils coreutils
 
+      - name: Ensure scripts executable
+        run: |
+          chmod +x ./create-boot-mtools.sh || true
+
       - name: Build UEFI binary
         working-directory: .
         run: |
@@ -42,7 +46,7 @@ jobs:
           autorun_autostart=0
           EOF
 
-          NO_MODEL=1 EFI_BIN=llama2.efi ./create-boot-mtools.sh
+          NO_MODEL=1 EFI_BIN=llama2.efi bash ./create-boot-mtools.sh
           mv -f llm-baremetal-boot.img llm-baremetal-boot-nomodel-x86_64.img
 
       - name: Compress + checksum
