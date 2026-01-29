@@ -143,7 +143,8 @@ $scriptBody = @(
 	'make repl'
 	# Force the EFI payload used by the image builder to be the freshly built one.
 	# This avoids accidentally picking an older EFI via an inherited EFI_BIN env var.
-	("EFI_BIN='llama2.efi' MODEL='{0}' MODEL_BIN='{0}' EXTRA_MODELS='{1}' ./create-boot-mtools.sh" -f $ModelBin, $extra)
+		# Also force NO_MODEL=0 to avoid inheriting NO_MODEL=1 from the user's environment.
+		("NO_MODEL='0' EFI_BIN='llama2.efi' MODEL='{0}' MODEL_BIN='{0}' EXTRA_MODELS='{1}' ./create-boot-mtools.sh" -f $ModelBin, $extra)
 ) -join "\n"
 
 Set-Content -Path $tmpSh -Value $scriptBody -Encoding ASCII
