@@ -20,6 +20,9 @@ llmk-autorun.txt
 *.safetensors
 *.gguf
 
+# Tokenizer is required even for NO_MODEL images
+!tokenizer.bin
+
 # Firmware (on GitHub Releases only)
 *.ucode
 *.tgz
