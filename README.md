@@ -83,7 +83,7 @@ Recommended target:
 
 - Size: ~0.5B–1B parameters
 - Format: `.gguf`
-- Quantization: prefer Q4 variants (often `Q4_K_*` in the filename)
+- Quantization: prefer variants that are supported by the current GGUF inferencer: `Q4_0/Q4_1/Q5_0/Q5_1/Q8_0` (avoid `Q4_K_*` / `Q5_K_*` for now)
 
 Suggested first-run settings:
 

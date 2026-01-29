@@ -37,6 +37,7 @@ This file is a “complete” cheat-sheet of the commands available in the UEFI 
 - `/model`: loaded model info
 - `/model_info [file]`: show file header/metadata (supports `.bin` and `.gguf`)
 - Note: GGUF inference supports **F16/F32/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0**.
+  - Note: `Q4_K_*` / `Q5_K_*` (K-quants) are not supported yet.
   - Default behavior: tensors are dequantized to float32 at load.
   - `gguf_q8_blob=1`: keep Q8_0 matrices quantized in RAM (faster load + lower RAM).
   - `q8_act_quant` (only relevant for Q8_0 blob + AVX2):
