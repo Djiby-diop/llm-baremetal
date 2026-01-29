@@ -75,6 +75,31 @@ Copy your model to the USB EFI/FAT partition:
 
 Boot the USB on an x86_64 UEFI machine, then select/load your model from the REPL.
 
+## Recommended conversational setup (8GB RAM)
+
+On an 8GB machine, “conversational” works best with a **small instruct/chat GGUF model** rather than a large 7B model.
+
+Recommended target:
+
+- Size: ~0.5B–1B parameters
+- Format: `.gguf`
+- Quantization: prefer Q4 variants (often `Q4_K_*` in the filename)
+
+Suggested first-run settings:
+
+- Keep context small at first (e.g. 256–512) to avoid running out of RAM (KV cache grows with context).
+- If your model is Q8_0 and you want lower RAM usage, enable `gguf_q8_blob=1` (default in the Release image).
+
+Useful REPL commands:
+
+- `/models` to list `.gguf`/`.bin` found in the root and `models\\`
+- `/model_info <file>` to inspect a model before loading
+- `/cfg` to confirm effective `repl.cfg` settings
+
+### Flashing from Windows
+
+- Use Rufus: select the `.img` (or extract from `.img.xz` first), partition scheme **GPT**, target **UEFI (non CSM)**.
+
 ## Run (QEMU)
 
 ```powershell

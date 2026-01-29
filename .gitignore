@@ -43,6 +43,9 @@ repl.cfg
 # Local archived artifacts
 artifacts/
 
+# Local image scratch dir
+bootable_img_temp/
+
 # Local backups
 *.bak
 *.backup
