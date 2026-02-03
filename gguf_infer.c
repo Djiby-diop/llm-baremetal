@@ -58,6 +58,63 @@ typedef struct {
     int present;
 } LlmkGgufTensorRef;
 
+// -----------------------------------------------------------------------------
+// Minimal serial debug (COM1) so QEMU -serial file captures diagnostics.
+// OVMF typically exposes COM1 at 0x3F8.
+// -----------------------------------------------------------------------------
+
+#if defined(__x86_64__) || defined(_M_X64)
+static __inline__ UINT8 llmk_inb(UINT16 port) {
+    UINT8 ret;
+    __asm__ __volatile__("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+static __inline__ void llmk_outb(UINT16 port, UINT8 val) {
+    __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static void llmk_serial_putc(UINT8 c) {
+    const UINT16 COM1 = 0x3F8;
+    const UINT16 LSR = (UINT16)(COM1 + 5);
+    // Wait for THR empty (bit 5). Bounded spin to avoid hangs on platforms without a UART.
+    for (UINT32 spin = 0; spin < 200000; spin++) {
+        if (llmk_inb(LSR) & 0x20) {
+            llmk_outb(COM1, c);
+            return;
+        }
+    }
+}
+
+static void llmk_serial_write_ascii(const char *s) {
+    if (!s) return;
+    for (UINTN i = 0; s[i]; i++) {
+        UINT8 c = (UINT8)s[i];
+        if (c == '\n') llmk_serial_putc('\r');
+        llmk_serial_putc(c);
+    }
+}
+
+static void llmk_serial_write_char16(const CHAR16 *s) {
+    if (!s) return;
+    for (UINTN i = 0; s[i]; i++) {
+        CHAR16 wc = s[i];
+        UINT8 c = (wc >= 0x20 && wc < 0x7f) ? (UINT8)wc : (UINT8)'?';
+        if (c == '\n') llmk_serial_putc('\r');
+        llmk_serial_putc(c);
+    }
+}
+#else
+static void llmk_serial_write_ascii(const char *s) { (void)s; }
+static void llmk_serial_write_char16(const CHAR16 *s) { (void)s; }
+#endif
+
+static void llmk_dbg_print_both(const CHAR16 *msg) {
+    if (!msg) return;
+    Print(msg);
+    llmk_serial_write_char16(msg);
+}
+
 struct LlmkGgufPlan {
     UINT32 version;
     UINT64 tensor_count;
@@ -289,6 +346,17 @@ static int llmk_parse_role(const char *name, int *out_layer, LlmkTensorRole *out
         }
         if (lit[k] == 0 && name[k] == 0) {
             *out_role = ROLE_OUTPUT;
+            return 1;
+        }
+
+        // output_norm.weight (final)
+        lit = "output_norm.weight";
+        k = 0;
+        for (; lit[k]; k++) {
+            if (name[k] != lit[k]) break;
+        }
+        if (lit[k] == 0 && name[k] == 0) {
+            *out_role = ROLE_RMS_FINAL;
             return 1;
         }
     }
@@ -1092,6 +1160,10 @@ EFI_STATUS llmk_gguf_build_plan(
     st = gguf_read_exact(f, magic, 4);
     if (EFI_ERROR(st)) return st;
     if (!(magic[0] == 'G' && magic[1] == 'G' && magic[2] == 'U' && magic[3] == 'F')) {
+        CHAR16 msg[160];
+        SPrint(msg, sizeof(msg), L"GGUF: bad magic: %02x %02x %02x %02x\r\n",
+               (unsigned)magic[0], (unsigned)magic[1], (unsigned)magic[2], (unsigned)magic[3]);
+        llmk_dbg_print_both(msg);
         return EFI_UNSUPPORTED;
     }
 
@@ -1114,15 +1186,33 @@ EFI_STATUS llmk_gguf_build_plan(
     UINT64 vocab = 0;
     UINT64 ctx = 0;
 
+    int debug_prints_left = 12;
+
+    // Unconditional marker so we can see gguf_infer.c diagnostics in the QEMU serial log.
+    {
+        CHAR16 msg[160];
+        SPrint(msg, sizeof(msg), L"GGUF: build_plan start v=%u tensors=%lu kv=%lu\r\n", (unsigned)version, n_tensors, n_kv);
+        llmk_dbg_print_both(msg);
+    }
+
     // KV section
+    // NOTE: GGUF key length is a uint32 (see gguf_loader.c). Only string lengths are uint64.
     for (UINT64 i = 0; i < n_kv; i++) {
-        UINT32 key_len = 0;
-        st = gguf_read_u32(f, &key_len);
+        UINT32 key_len32 = 0;
+        st = gguf_read_u32(f, &key_len32);
         if (EFI_ERROR(st)) return st;
-        if (key_len == 0 || key_len > 4096) return EFI_COMPROMISED_DATA;
+        if (key_len32 == 0 || key_len32 > 4096) {
+            UINT64 pos = 0;
+            (void)gguf_get_pos(f, &pos);
+            CHAR16 msg[256];
+            SPrint(msg, sizeof(msg), L"GGUF: COMPROMISED_DATA: bad key_len=%u at kv[%lu] (pos=%lu)\r\n",
+                   (unsigned)key_len32, i, pos);
+            llmk_dbg_print_both(msg);
+            return EFI_COMPROMISED_DATA;
+        }
 
         char key_buf[192];
-        UINT32 keep = key_len;
+        UINT32 keep = key_len32;
         if (keep > (UINT32)(sizeof(key_buf) - 1)) keep = (UINT32)(sizeof(key_buf) - 1);
 
         if (keep > 0) {
@@ -1131,8 +1221,8 @@ EFI_STATUS llmk_gguf_build_plan(
         }
         key_buf[keep] = 0;
 
-        if (key_len > keep) {
-            st = gguf_skip(f, (UINT64)(key_len - keep));
+        if (key_len32 > keep) {
+            st = gguf_skip(f, (UINT64)(key_len32 - keep));
             if (EFI_ERROR(st)) return st;
         }
 
@@ -1175,7 +1265,10 @@ EFI_STATUS llmk_gguf_build_plan(
             } else {
                 // unexpected type
                 st = gguf_skip_kv_value(f, vt);
-                if (EFI_ERROR(st)) return st;
+                if (EFI_ERROR(st)) {
+                    Print(L"GGUF: failed to skip matched key '%a' value type=%u (status=%r)\r\n", key_buf, (unsigned)vt_u32, st);
+                    return st;
+                }
                 continue;
             }
 
@@ -1193,15 +1286,34 @@ EFI_STATUS llmk_gguf_build_plan(
 
         // Unhandled key
         st = gguf_skip_kv_value(f, vt);
-        if (EFI_ERROR(st)) return st;
+        if (EFI_ERROR(st)) {
+            Print(L"GGUF: failed to skip key '%a' value type=%u (status=%r)\r\n", key_buf, (unsigned)vt_u32, st);
+            return st;
+        }
     }
 
-    if (dim == 0 || hidden == 0 || n_layers == 0 || n_heads == 0 || vocab == 0 || ctx == 0) {
+    // Some GGUF files (including common llama.cpp exports) may omit llama.vocab_size.
+    // In that case, we infer vocab from the token embedding tensor dims during the tensor table scan.
+    if (dim == 0 || hidden == 0 || n_layers == 0 || n_heads == 0 || ctx == 0) {
+        if (debug_prints_left-- > 0) {
+            CHAR16 msg[256];
+            SPrint(msg, sizeof(msg), L"GGUF: missing hyperparams after KV scan: dim=%lu hidden=%lu layers=%lu heads=%lu kv_heads=%lu vocab=%lu ctx=%lu\r\n",
+                   dim, hidden, n_layers, n_heads, n_kv_heads, vocab, ctx);
+            llmk_dbg_print_both(msg);
+        }
         return EFI_UNSUPPORTED;
     }
     if (n_kv_heads == 0) n_kv_heads = n_heads;
 
-    if (n_layers > 512 || n_heads > 512 || n_kv_heads > 512) return EFI_COMPROMISED_DATA;
+    if (n_layers > 512 || n_heads > 512 || n_kv_heads > 512) {
+        UINT64 pos = 0;
+        (void)gguf_get_pos(f, &pos);
+        CHAR16 msg[320];
+        SPrint(msg, sizeof(msg), L"GGUF: COMPROMISED_DATA: insane hyperparams layers=%lu heads=%lu kv_heads=%lu (pos=%lu)\r\n",
+               n_layers, n_heads, n_kv_heads, pos);
+        llmk_dbg_print_both(msg);
+        return EFI_COMPROMISED_DATA;
+    }
 
     // Allocate plan
     LlmkGgufPlan *plan = NULL;
@@ -1224,28 +1336,47 @@ EFI_STATUS llmk_gguf_build_plan(
     int all_supported_types = 1;
 
     for (UINT64 ti = 0; ti < n_tensors; ti++) {
-        UINT32 name_len = 0;
-        st = gguf_read_u32(f, &name_len);
+        // NOTE: GGUF tensor name length is a uint32 (see gguf_loader.c).
+        UINT32 name_len32 = 0;
+        st = gguf_read_u32(f, &name_len32);
         if (EFI_ERROR(st)) { llmk_gguf_free_plan(plan); return st; }
-        if (name_len == 0 || name_len > 1024 * 1024) { llmk_gguf_free_plan(plan); return EFI_COMPROMISED_DATA; }
+        if (name_len32 == 0 || name_len32 > 1024U * 1024U) {
+            UINT64 pos = 0;
+            (void)gguf_get_pos(f, &pos);
+            CHAR16 msg[320];
+            SPrint(msg, sizeof(msg), L"GGUF: COMPROMISED_DATA: bad tensor name_len=%u at tensor[%lu] (pos=%lu)\r\n",
+                   (unsigned)name_len32, ti, pos);
+            llmk_dbg_print_both(msg);
+            llmk_gguf_free_plan(plan);
+            return EFI_COMPROMISED_DATA;
+        }
 
         char name_buf[160];
-        UINT32 keep = name_len;
+        UINT32 keep = name_len32;
         if (keep > (UINT32)(sizeof(name_buf) - 1)) keep = (UINT32)(sizeof(name_buf) - 1);
         if (keep > 0) {
             st = gguf_read_exact(f, name_buf, (UINTN)keep);
             if (EFI_ERROR(st)) { llmk_gguf_free_plan(plan); return st; }
         }
         name_buf[keep] = 0;
-        if (name_len > keep) {
-            st = gguf_skip(f, (UINT64)(name_len - keep));
+        if (name_len32 > keep) {
+            st = gguf_skip(f, (UINT64)(name_len32 - keep));
             if (EFI_ERROR(st)) { llmk_gguf_free_plan(plan); return st; }
         }
 
         UINT32 n_dims_u32 = 0;
         st = gguf_read_u32(f, &n_dims_u32);
         if (EFI_ERROR(st)) { llmk_gguf_free_plan(plan); return st; }
-        if (n_dims_u32 == 0 || n_dims_u32 > 16) { llmk_gguf_free_plan(plan); return EFI_COMPROMISED_DATA; }
+        if (n_dims_u32 == 0 || n_dims_u32 > 16) {
+            UINT64 pos = 0;
+            (void)gguf_get_pos(f, &pos);
+            CHAR16 msg[320];
+            SPrint(msg, sizeof(msg), L"GGUF: COMPROMISED_DATA: bad n_dims=%u at tensor[%lu] (pos=%lu)\r\n",
+                   (unsigned)n_dims_u32, ti, pos);
+            llmk_dbg_print_both(msg);
+            llmk_gguf_free_plan(plan);
+            return EFI_COMPROMISED_DATA;
+        }
 
         UINT64 dims_arr[4];
         for (int k = 0; k < 4; k++) dims_arr[k] = 0;
@@ -1271,7 +1402,20 @@ EFI_STATUS llmk_gguf_build_plan(
         LlmkTensorRole role = ROLE_NONE;
         if (llmk_parse_role(name_buf, &layer, &role)) {
             // Only allow types we can dequantize.
-            if (!llmk_type_supported(ttype)) all_supported_types = 0;
+            if (!llmk_type_supported(ttype)) {
+                all_supported_types = 0;
+                if (debug_prints_left-- > 0) {
+                    CHAR16 name16[164];
+                    for (UINTN k = 0; k + 1 < (UINTN)(sizeof(name16) / sizeof(name16[0])) && name_buf[k]; k++) {
+                        name16[k] = (CHAR16)((UINT8)name_buf[k]);
+                        name16[k + 1] = 0;
+                    }
+                    CHAR16 msg[320];
+                    SPrint(msg, sizeof(msg), L"GGUF: unsupported ggml_type=%u for tensor '%s' dims=[%lu,%lu,%lu,%lu]\r\n",
+                           (unsigned)ttype, name16, dims_arr[0], dims_arr[1], dims_arr[2], dims_arr[3]);
+                    llmk_dbg_print_both(msg);
+                }
+            }
 
             // Validate row shape constraints for quant types (cols multiple-of-32) and track max raw bytes.
             {
@@ -1279,6 +1423,17 @@ EFI_STATUS llmk_gguf_build_plan(
                 EFI_STATUS st_need = llmk_row_raw_bytes(ttype, dims_arr[0], &need);
                 if (EFI_ERROR(st_need)) {
                     all_supported_types = 0;
+                    if (debug_prints_left-- > 0) {
+                        CHAR16 name16[164];
+                        for (UINTN k = 0; k + 1 < (UINTN)(sizeof(name16) / sizeof(name16[0])) && name_buf[k]; k++) {
+                            name16[k] = (CHAR16)((UINT8)name_buf[k]);
+                            name16[k + 1] = 0;
+                        }
+                        CHAR16 msg[320];
+                        SPrint(msg, sizeof(msg), L"GGUF: unsupported row layout for tensor '%s' type=%u cols=%lu (status=%r)\r\n",
+                               name16, (unsigned)ttype, dims_arr[0], st_need);
+                        llmk_dbg_print_both(msg);
+                    }
                 } else {
                     if (need > max_raw_row) max_raw_row = need;
                 }
@@ -1292,6 +1447,13 @@ EFI_STATUS llmk_gguf_build_plan(
             for (int k = 0; k < 4; k++) tr.dims[k] = dims_arr[k];
 
             if (role == ROLE_TOK_EMBD) {
+                // Infer vocab size if missing from KV.
+                if (vocab == 0 && n_dims_u32 == 2) {
+                    // GGML storage order: dims[0] is fastest-changing.
+                    // Token embedding is typically [dim, vocab] or [vocab, dim].
+                    if (dims_arr[0] == dim) vocab = dims_arr[1];
+                    else if (dims_arr[1] == dim) vocab = dims_arr[0];
+                }
                 plan->tok_embd = tr;
             } else if (role == ROLE_OUTPUT) {
                 plan->output = tr;
@@ -1334,6 +1496,21 @@ EFI_STATUS llmk_gguf_build_plan(
     if (!plan->tok_embd.present || !plan->rms_final.present) {
         llmk_gguf_free_plan(plan);
         return EFI_NOT_FOUND;
+    }
+
+    if (vocab == 0) {
+        if (debug_prints_left-- > 0) {
+            CHAR16 msg[256];
+            SPrint(msg, sizeof(msg), L"GGUF: vocab_size unknown (KV missing and token_embd dims did not match dim=%lu).\r\n", dim);
+            llmk_dbg_print_both(msg);
+            if (plan->tok_embd.present) {
+                SPrint(msg, sizeof(msg), L"GGUF: token_embd dims=[%lu,%lu,%lu,%lu] type=%u\r\n",
+                       plan->tok_embd.dims[0], plan->tok_embd.dims[1], plan->tok_embd.dims[2], plan->tok_embd.dims[3], (unsigned)plan->tok_embd.type);
+                llmk_dbg_print_both(msg);
+            }
+        }
+        llmk_gguf_free_plan(plan);
+        return EFI_UNSUPPORTED;
     }
     for (int l = 0; l < plan->n_layers; l++) {
         if (!plan->attn_norm[l].present || !plan->wq[l].present || !plan->wk[l].present || !plan->wv[l].present || !plan->wo[l].present ||

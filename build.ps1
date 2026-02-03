@@ -3,6 +3,10 @@ param(
 	[ValidateSet('repl')]
 	[string]$Target = 'repl',
 
+	# Build an image without embedding any model weights.
+	# Useful for release artifacts and for users who want to copy their own model later.
+	[switch]$NoModel,
+
 	# Default unchanged (110M) unless overridden.
 	# NOTE: despite the name, this now supports:
 	#   - a full filename (stories110M.bin, my-instruct.gguf)
@@ -20,7 +24,11 @@ $ErrorActionPreference = 'Stop'
 
 Write-Host "`n[Build] Build + Image (WSL)" -ForegroundColor Cyan
 Write-Host "  Target: $Target" -ForegroundColor Gray
-Write-Host "  Model:  $ModelBin" -ForegroundColor Gray
+if ($NoModel) {
+	Write-Host "  Model:  (no-model image)" -ForegroundColor Gray
+} else {
+	Write-Host "  Model:  $ModelBin" -ForegroundColor Gray
+}
 
 if ($ExtraModelBins.Count -gt 0) {
 	Write-Host "  Extra:  $($ExtraModelBins -join ', ')" -ForegroundColor Gray
@@ -45,7 +53,7 @@ function Test-ModelSpecPresent([string]$spec) {
 	return $false
 }
 
-if (-not (Test-ModelSpecPresent $ModelBin)) {
+if (-not $NoModel -and -not (Test-ModelSpecPresent $ModelBin)) {
 	Write-Host "" 
 	Write-Host "❌ Missing model weights: $ModelBin" -ForegroundColor Red
 	Write-Host "Place the model file in this folder or one level up, then re-run." -ForegroundColor Yellow
@@ -55,12 +63,14 @@ if (-not (Test-ModelSpecPresent $ModelBin)) {
 }
 
 # Validate extra model files (if any)
-foreach ($m in $ExtraModelBins) {
-	if (-not $m) { continue }
-	if (-not (Test-ModelSpecPresent $m)) {
-		Write-Host "" 
-		Write-Host "❌ Missing extra model weights: $m" -ForegroundColor Red
-		throw "Missing extra model weights: $m"
+if (-not $NoModel) {
+	foreach ($m in $ExtraModelBins) {
+		if (-not $m) { continue }
+		if (-not (Test-ModelSpecPresent $m)) {
+			Write-Host "" 
+			Write-Host "❌ Missing extra model weights: $m" -ForegroundColor Red
+			throw "Missing extra model weights: $m"
+		}
 	}
 }
 
@@ -108,55 +118,54 @@ function Update-SplashBmpFromPng-BestEffort {
 Update-SplashBmpFromPng-BestEffort
 
 function ConvertTo-WslPath([string]$winPath) {
-	# Normalize to forward slashes first.
+	# Deterministic conversion (avoids occasional unreliable `wslpath` output).
 	$norm = ($winPath -replace '\\','/')
-	try {
-		$wsl = (wsl wslpath -a $norm 2>$null)
-		if ($wsl) { return $wsl.Trim() }
-	} catch {
-		# fall through
-	}
-
-	# Fallback: C:/foo/bar -> /mnt/c/foo/bar
 	if ($norm -match '^([A-Za-z]):/(.*)$') {
 		$drive = $Matches[1].ToLowerInvariant()
 		$rest = $Matches[2]
 		return "/mnt/$drive/$rest"
 	}
-	throw "Failed to convert path to WSL path: $winPath"
+	throw "Failed to convert path to WSL path: $winPath (normalized=$norm)"
 }
 
 $wslRepo = ConvertTo-WslPath $PSScriptRoot
 
 $extra = ($ExtraModelBins | Where-Object { $_ -and $_.Trim().Length -gt 0 }) -join ';'
 
-# Avoid brittle quoting by writing a temporary script and running it from WSL.
-$tmpSh = Join-Path $env:TEMP ("llmk-build-{0}.sh" -f ([Guid]::NewGuid().ToString('N')))
-$tmpShWsl = ConvertTo-WslPath $tmpSh
+$buildStartUtc = (Get-Date).ToUniversalTime()
 
-$scriptBody = @(
-	'#!/usr/bin/env bash'
+# Build + image creation in WSL (single shot). Using -lc avoids temp-script pitfalls.
+$noModelFlag = if ($NoModel) { '1' } else { '0' }
+$modelSpec = if ($NoModel) { 'nomodel' } else { $ModelBin }
+$bash = @(
 	'set -e'
 	("cd '{0}'" -f $wslRepo)
 	'chmod +x create-boot-mtools.sh'
 	'make clean'
 	'make repl'
 	# Force the EFI payload used by the image builder to be the freshly built one.
-	# This avoids accidentally picking an older EFI via an inherited EFI_BIN env var.
-		# Also force NO_MODEL=0 to avoid inheriting NO_MODEL=1 from the user's environment.
-		("NO_MODEL='0' EFI_BIN='llama2.efi' MODEL='{0}' MODEL_BIN='{0}' EXTRA_MODELS='{1}' ./create-boot-mtools.sh" -f $ModelBin, $extra)
-) -join "\n"
+	# Force NO_MODEL explicitly to avoid inheriting from the user's environment.
+	("NO_MODEL='{0}' EFI_BIN='llama2.efi' MODEL='{1}' MODEL_BIN='{1}' EXTRA_MODELS='{2}' ./create-boot-mtools.sh" -f $noModelFlag, $modelSpec, $extra)
+) -join '; '
 
-Set-Content -Path $tmpSh -Value $scriptBody -Encoding ASCII
-
-try {
-	wsl bash "$tmpShWsl"
-} finally {
-	Remove-Item -Force -ErrorAction SilentlyContinue $tmpSh
-}
+wsl bash -lc $bash
 
 if ($LASTEXITCODE -ne 0) {
 	throw "WSL build failed with exit code $LASTEXITCODE"
+}
+
+# Sanity check: ensure llama2.efi was actually produced/updated by this run.
+$efiOut = Join-Path $PSScriptRoot 'llama2.efi'
+if (-not (Test-Path $efiOut)) {
+	throw "Build did not produce $efiOut"
+}
+try {
+	$efiTime = (Get-Item $efiOut).LastWriteTimeUtc
+	if ($efiTime -lt $buildStartUtc.AddSeconds(-2)) {
+		throw "Build may have been skipped: llama2.efi timestamp ($efiTime) is older than build start ($buildStartUtc)."
+	}
+} catch {
+	throw
 }
 
 $img = Get-ChildItem -Path $PSScriptRoot -Filter 'llm-baremetal-boot*.img' -ErrorAction SilentlyContinue |
@@ -165,6 +174,20 @@ $img = Get-ChildItem -Path $PSScriptRoot -Filter 'llm-baremetal-boot*.img' -Erro
 
 if ($img) {
 	Write-Host "`n[OK] Done: $($img.Name)" -ForegroundColor Green
+
+	# Prune older images to avoid accidentally running a stale image.
+	# Best-effort: if an older image is locked (e.g., by QEMU), deletion may fail.
+	$allImgs = Get-ChildItem -Path $PSScriptRoot -Filter 'llm-baremetal-boot*.img' -ErrorAction SilentlyContinue |
+		Sort-Object LastWriteTime -Descending
+	if ($allImgs -and $allImgs.Count -gt 1) {
+		foreach ($old in ($allImgs | Select-Object -Skip 1)) {
+			try {
+				Remove-Item -Force -ErrorAction Stop $old.FullName
+			} catch {
+				Write-Host "[Build] Prune: could not delete $($old.Name) (maybe in use)" -ForegroundColor Yellow
+			}
+		}
+	}
 } else {
 	Write-Host "`n[OK] Done" -ForegroundColor Green
 }

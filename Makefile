@@ -27,6 +27,13 @@ CFLAGS = -ffreestanding -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
 		 -I/usr/include/efi -I/usr/include/efi/$(ARCH) -DEFI_FUNCTION_WRAPPER \
 		 -O2 -msse2
 
+# Embed a build identifier for /version output (UTC). Override: make BUILD_ID=...
+# NOTE: $(shell ...) in a recursively-expanded variable would re-run on each expansion,
+# leading to different timestamps per object file. Force a single evaluation per make run.
+BUILD_ID ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILD_ID := $(BUILD_ID)
+CFLAGS += -DLLMB_BUILD_ID=L\"$(BUILD_ID)\"
+
 LDFLAGS = -nostdlib -znocombreloc -T $(EFI_LDS) \
 		  -shared -Bsymbolic -L$(EFI_LIBDIR) $(EFI_CRT0)
 
@@ -52,7 +59,9 @@ repl: $(TARGET)
 	@echo "✅ Build complete: $(TARGET)"
 	@ls -lh $(TARGET)
 
-$(REPL_OBJ): $(REPL_SRC) djiblas.h
+
+# Rebuild when key headers change (Make doesn't auto-detect includes).
+$(REPL_OBJ): $(REPL_SRC) djiblas.h interface.h
 	$(CC) $(CFLAGS) -c $(REPL_SRC) -o $(REPL_OBJ)
 
 llmk_zones.o: llmk_zones.c llmk_zones.h

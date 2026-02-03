@@ -35,7 +35,9 @@
 
 // DjibMark - Omnipresent execution tracing (Made in Senegal 🇸🇳)
 #include "djibmark.h"
-#include "interface.h"
+// #include "interface.h"      // Original "Spaceship" UI
+// #include "interface_nova.h" // Alternate "Singularity" UI
+#include "interface_desktop.h" // Persistent "Cosmic OS" UI
 
 // GGUF support
 #include "gguf_loader.h"
@@ -49,9 +51,11 @@ typedef enum {
 
 static LlmkModelFormat g_loaded_model_format = LLMK_MODEL_FMT_UNKNOWN;
 static CHAR16 g_loaded_model_path16[160];
+static volatile UINT32 g_loaded_model_path16_canary = 0xD1B1D1B1u;
 static GgufSummary g_loaded_model_gguf;
 
 static void llmk_model_set_loaded_path(const CHAR16 *path) {
+    g_loaded_model_path16_canary = 0xD1B1D1B1u;
     if (!path) {
         g_loaded_model_path16[0] = 0;
         return;
@@ -63,6 +67,83 @@ static void llmk_model_set_loaded_path(const CHAR16 *path) {
     }
     for (UINTN i = 0; i < n; i++) g_loaded_model_path16[i] = path[i];
     g_loaded_model_path16[n] = 0;
+}
+
+static void llmk_debug_print_loaded_model_path(const CHAR16 *tag) {
+    if (!tag) tag = L"(tag)";
+    Print(L"[dbg] %s: loaded_model_path16_canary=0x%08x\r\n", tag, (UINT32)g_loaded_model_path16_canary);
+    if (g_loaded_model_path16[0]) {
+        Print(L"[dbg] %s: loaded_model_path=%s\r\n", tag, g_loaded_model_path16);
+        Print(L"[dbg] %s: loaded_model_path_u16[0..7]=", tag);
+        for (int i = 0; i < 8; i++) {
+            Print(L"%04x ", (UINT16)g_loaded_model_path16[i]);
+            if (g_loaded_model_path16[i] == 0) break;
+        }
+        Print(L"\r\n");
+    } else {
+        Print(L"[dbg] %s: loaded_model_path=(empty)\r\n", tag);
+    }
+}
+
+#ifndef LLMB_BUILD_ID
+#define LLMB_BUILD_ID L"(unknown)"
+#endif
+
+// Forward decl (defined later).
+static int uefi_wall_us(unsigned long long *out_us);
+
+typedef struct {
+    const CHAR16 *name;
+    unsigned long long us;
+} LlmkBootMark;
+
+static LlmkBootMark g_boot_marks[16];
+static int g_boot_mark_count = 0;
+
+static unsigned long long g_overlay_stage_start_us = 0;
+static unsigned long long g_overlay_stage_prev_us = 0;
+
+static void llmk_overlay_stage(UINT32 stage_index_1based, UINT32 stage_count) {
+    InterfaceFx_Stage(stage_index_1based, stage_count);
+
+    unsigned long long us;
+    if (!uefi_wall_us(&us)) return;
+    if (g_overlay_stage_start_us == 0) {
+        g_overlay_stage_start_us = us;
+        g_overlay_stage_prev_us = us;
+    }
+
+    unsigned long long delta_us = (us >= g_overlay_stage_prev_us) ? (us - g_overlay_stage_prev_us) : 0;
+    unsigned long long total_us = (us >= g_overlay_stage_start_us) ? (us - g_overlay_stage_start_us) : 0;
+    g_overlay_stage_prev_us = us;
+
+    InterfaceFx_SetTimingMs((UINT32)(delta_us / 1000ULL), (UINT32)(total_us / 1000ULL));
+}
+
+static void llmk_boot_mark(const CHAR16 *name) {
+    if (!name) return;
+    if (g_boot_mark_count >= (int)(sizeof(g_boot_marks) / sizeof(g_boot_marks[0]))) return;
+    unsigned long long us;
+    if (!uefi_wall_us(&us)) return;
+    g_boot_marks[g_boot_mark_count].name = name;
+    g_boot_marks[g_boot_mark_count].us = us;
+    g_boot_mark_count++;
+}
+
+static void llmk_boot_print_timing_summary(void) {
+    if (g_boot_mark_count < 2) return;
+    // Keep it compact; seconds-of-day is fine for short boots.
+    Print(L"\r\n[boot] timing (ms):\r\n");
+    unsigned long long base = g_boot_marks[0].us;
+    unsigned long long prev = base;
+    for (int i = 1; i < g_boot_mark_count; i++) {
+        unsigned long long curr = g_boot_marks[i].us;
+        unsigned long long delta = (curr >= prev) ? (curr - prev) : 0;
+        unsigned long long total = (curr >= base) ? (curr - base) : 0;
+        Print(L"  +%5lu  (%5lu total)  %s\r\n", (UINT64)(delta / 1000ULL), (UINT64)(total / 1000ULL), g_boot_marks[i].name);
+        prev = curr;
+    }
+    Print(L"\r\n");
 }
 
 static EFI_STATUS llmk_peek_magic4(EFI_FILE_HANDLE f, UINT8 out_magic[4]) {
@@ -451,6 +532,47 @@ static void uefi_print_utf8_decode(const unsigned char *p, int len) {
         uefi_call_wrapper(ST->ConOut->OutputString, 2, ST->ConOut, out);
     }
 }
+
+// -----------------------------------------------------------------------------
+// Minimal serial debug (COM1) so QEMU -serial file captures key diagnostics.
+// OVMF typically exposes COM1 at 0x3F8.
+// -----------------------------------------------------------------------------
+
+#if defined(__x86_64__) || defined(_M_X64)
+static __inline__ UINT8 llmk_inb(UINT16 port) {
+    UINT8 ret;
+    __asm__ __volatile__("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+static __inline__ void llmk_outb(UINT16 port, UINT8 val) {
+    __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static void llmk_serial_putc(UINT8 c) {
+    const UINT16 COM1 = 0x3F8;
+    const UINT16 LSR = (UINT16)(COM1 + 5);
+    // Wait for THR empty (bit 5). Bounded spin to avoid hangs on platforms without a UART.
+    for (UINT32 spin = 0; spin < 200000; spin++) {
+        if (llmk_inb(LSR) & 0x20) {
+            llmk_outb(COM1, c);
+            return;
+        }
+    }
+}
+
+static void llmk_serial_write_char16(const CHAR16 *s) {
+    if (!s) return;
+    for (UINTN i = 0; s[i]; i++) {
+        CHAR16 wc = s[i];
+        UINT8 c = (wc >= 0x20 && wc < 0x7f) ? (UINT8)wc : (UINT8)'?';
+        if (c == '\n') llmk_serial_putc('\r');
+        llmk_serial_putc(c);
+    }
+}
+#else
+static void llmk_serial_write_char16(const CHAR16 *s) { (void)s; }
+#endif
 
 // Some generations still contain the classic mojibake sequence "ÔÇÖ" for U+2019.
 // This can span token boundaries, so keep a small byte tail and repair across calls.
@@ -2333,9 +2455,394 @@ static void llmk_fs_ls_best_effort(const CHAR16 *path, int max_entries) {
 
 static int llmk_is_model_file_name16(const CHAR16 *name) {
     if (!name || !name[0]) return 0;
+    // tokenizer.bin is a required runtime asset, but it is not a model.
+    if (llmk_char16_endswith_ci(name, L"tokenizer.bin")) return 0;
     if (llmk_char16_endswith_ci(name, L".bin")) return 1;
     if (llmk_char16_endswith_ci(name, L".gguf")) return 1;
     return 0;
+}
+
+static int llmk_try_open_first_model_in_dir_best_effort(const CHAR16 *dir_path, EFI_FILE_HANDLE *out_f, CHAR16 *out_path, int out_cap) {
+    if (out_f) *out_f = NULL;
+    if (out_path && out_cap > 0) out_path[0] = 0;
+    if (!g_root || !out_f || !out_path || out_cap <= 1) return 0;
+
+    EFI_FILE_HANDLE dir = NULL;
+    int close_dir = 0;
+
+    if (!dir_path || dir_path[0] == 0 || llmk_char16_streq(dir_path, L".") || llmk_char16_streq(dir_path, L"\\")) {
+        dir = g_root;
+        close_dir = 0;
+    } else {
+        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &dir, (CHAR16 *)dir_path, EFI_FILE_MODE_READ, 0);
+        if (EFI_ERROR(st) || !dir) {
+            return 0;
+        }
+        close_dir = 1;
+    }
+
+    uefi_call_wrapper(dir->SetPosition, 2, dir, 0);
+
+    UINTN buf_cap = 1024;
+    void *buf = NULL;
+    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, buf_cap, &buf);
+    if (EFI_ERROR(st) || !buf) {
+        if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+        return 0;
+    }
+
+    int found = 0;
+    while (!found) {
+        UINTN sz = buf_cap;
+        st = uefi_call_wrapper(dir->Read, 3, dir, &sz, buf);
+        if (EFI_ERROR(st) || sz == 0) break;
+
+        EFI_FILE_INFO *info = (EFI_FILE_INFO *)buf;
+        if (!info->FileName) continue;
+        if (llmk_char16_streq(info->FileName, L".") || llmk_char16_streq(info->FileName, L"..")) continue;
+        if (info->Attribute & EFI_FILE_DIRECTORY) continue;
+        if (!llmk_is_model_file_name16(info->FileName)) continue;
+
+        CHAR16 path[192];
+        path[0] = 0;
+        if (!dir_path || dir_path[0] == 0 || llmk_char16_streq(dir_path, L".") || llmk_char16_streq(dir_path, L"\\")) {
+            llmk_char16_copy_cap(path, (int)(sizeof(path) / sizeof(path[0])), info->FileName);
+        } else {
+            llmk_char16_copy_cap(path, (int)(sizeof(path) / sizeof(path[0])), dir_path);
+            // Ensure trailing backslash
+            UINTN n = StrLen(path);
+            if (n > 0 && path[n - 1] != L'\\' && n + 1 < (sizeof(path) / sizeof(path[0]))) {
+                path[n] = L'\\';
+                path[n + 1] = 0;
+            }
+            if (StrLen(path) + StrLen(info->FileName) + 1 < (sizeof(path) / sizeof(path[0]))) {
+                StrCat(path, info->FileName);
+            }
+        }
+
+        EFI_FILE_HANDLE f = NULL;
+        EFI_STATUS fst = uefi_call_wrapper(g_root->Open, 5, g_root, &f, path, EFI_FILE_MODE_READ, 0);
+        if (!EFI_ERROR(fst) && f) {
+            *out_f = f;
+            llmk_char16_copy_cap(out_path, out_cap, path);
+            found = 1;
+            break;
+        }
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+    return found;
+}
+
+// Forward declarations used by model picker.
+void read_user_input(CHAR16* buffer, int max_len);
+void char16_to_char(char* dest, CHAR16* src, int max_len);
+
+typedef struct {
+    CHAR16 path[192];
+    UINT64 size;
+} LlmkModelEntry;
+
+static int llmk_collect_models_in_dir(const CHAR16 *dir_path, LlmkModelEntry *out, int cap) {
+    if (!g_root || !out || cap <= 0) return 0;
+
+    EFI_FILE_HANDLE dir = NULL;
+    int close_dir = 0;
+    if (!dir_path || dir_path[0] == 0 || llmk_char16_streq(dir_path, L".") || llmk_char16_streq(dir_path, L"\\")) {
+        dir = g_root;
+        close_dir = 0;
+    } else {
+        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &dir, (CHAR16 *)dir_path, EFI_FILE_MODE_READ, 0);
+        if (EFI_ERROR(st) || !dir) return 0;
+        close_dir = 1;
+    }
+
+    uefi_call_wrapper(dir->SetPosition, 2, dir, 0);
+
+    UINTN buf_cap = 1024;
+    void *buf = NULL;
+    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, buf_cap, &buf);
+    if (EFI_ERROR(st) || !buf) {
+        if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+        return 0;
+    }
+
+    int count = 0;
+    while (count < cap) {
+        UINTN sz = buf_cap;
+        st = uefi_call_wrapper(dir->Read, 3, dir, &sz, buf);
+        if (EFI_ERROR(st) || sz == 0) break;
+
+        EFI_FILE_INFO *info = (EFI_FILE_INFO *)buf;
+        if (!info->FileName) continue;
+        if (llmk_char16_streq(info->FileName, L".") || llmk_char16_streq(info->FileName, L"..")) continue;
+        if (info->Attribute & EFI_FILE_DIRECTORY) continue;
+        if (!llmk_is_model_file_name16(info->FileName)) continue;
+
+        CHAR16 path[192];
+        path[0] = 0;
+        if (!dir_path || dir_path[0] == 0 || llmk_char16_streq(dir_path, L".") || llmk_char16_streq(dir_path, L"\\")) {
+            llmk_char16_copy_cap(path, (int)(sizeof(path) / sizeof(path[0])), info->FileName);
+        } else {
+            llmk_char16_copy_cap(path, (int)(sizeof(path) / sizeof(path[0])), dir_path);
+            UINTN n = StrLen(path);
+            if (n > 0 && path[n - 1] != L'\\' && n + 1 < (sizeof(path) / sizeof(path[0]))) {
+                path[n] = L'\\';
+                path[n + 1] = 0;
+            }
+            if (StrLen(path) + StrLen(info->FileName) + 1 < (sizeof(path) / sizeof(path[0]))) {
+                StrCat(path, info->FileName);
+            }
+        }
+
+        llmk_char16_copy_cap(out[count].path, (int)(sizeof(out[count].path) / sizeof(out[count].path[0])), path);
+        out[count].size = info->FileSize;
+        count++;
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+    return count;
+}
+
+static int llmk_collect_models(LlmkModelEntry *out, int cap) {
+    int n = 0;
+    if (cap <= 0) return 0;
+    n += llmk_collect_models_in_dir(NULL, out + n, cap - n);
+    if (n < cap) {
+        n += llmk_collect_models_in_dir(L"models", out + n, cap - n);
+    }
+    return n;
+}
+
+static int llmk_model_picker(EFI_FILE_HANDLE *out_f, CHAR16 *out_path, int out_cap) {
+    if (out_f) *out_f = NULL;
+    if (out_path && out_cap > 0) out_path[0] = 0;
+    if (!g_root || !out_f || !out_path || out_cap <= 1) return 0;
+
+    LlmkModelEntry entries[48];
+    int n = llmk_collect_models(entries, (int)(sizeof(entries) / sizeof(entries[0])));
+    if (n <= 0) return 0;
+
+    if (n == 1) {
+        EFI_FILE_HANDLE f = NULL;
+        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &f, entries[0].path, EFI_FILE_MODE_READ, 0);
+        if (EFI_ERROR(st) || !f) return 0;
+        *out_f = f;
+        llmk_char16_copy_cap(out_path, out_cap, entries[0].path);
+        return 1;
+    }
+
+    Print(L"\r\nModel picker:\r\n");
+    for (int i = 0; i < n; i++) {
+        UINT64 mb = entries[i].size / (1024ULL * 1024ULL);
+        Print(L"  %d) %s  (%lu MB)\r\n", i + 1, entries[i].path, mb);
+    }
+    Print(L"  0) cancel\r\n\r\n");
+
+    CHAR16 input16[64];
+    char input8[64];
+    Print(L"Select model number: ");
+    read_user_input(input16, (int)(sizeof(input16) / sizeof(input16[0])));
+    char16_to_char(input8, input16, (int)sizeof(input8));
+
+    int sel = 0;
+    int i = 0;
+    while (input8[i] == ' ' || input8[i] == '\t') i++;
+    while (input8[i] >= '0' && input8[i] <= '9') {
+        sel = sel * 10 + (input8[i] - '0');
+        i++;
+    }
+    if (sel <= 0 || sel > n) {
+        Print(L"\r\nModel picker canceled.\r\n\r\n");
+        return 0;
+    }
+
+    int idx = sel - 1;
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &f, entries[idx].path, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(st) || !f) {
+        Print(L"\r\nERROR: open failed: %s (%r)\r\n\r\n", entries[idx].path, st);
+        return 0;
+    }
+    *out_f = f;
+    llmk_char16_copy_cap(out_path, out_cap, entries[idx].path);
+    return 1;
+}
+
+static int llmk_try_open_first_model_best_effort(EFI_FILE_HANDLE *out_f, CHAR16 *out_path, int out_cap) {
+    if (out_f) *out_f = NULL;
+    if (out_path && out_cap > 0) out_path[0] = 0;
+    if (!g_root || !out_f || !out_path || out_cap <= 1) return 0;
+
+    // Prefer root models (common for single-model images), then /models
+    if (llmk_try_open_first_model_in_dir_best_effort(NULL, out_f, out_path, out_cap)) return 1;
+    if (llmk_try_open_first_model_in_dir_best_effort(L"models", out_f, out_path, out_cap)) return 1;
+    return 0;
+}
+
+static void llmk_print_no_model_help(void) {
+    Print(L"\r\nNo model loaded.\r\n");
+    Print(L"Commands:\r\n");
+    Print(L"  /models               List .bin/.gguf in root + models\\\r\n");
+    Print(L"  /model_info [path]    Inspect a .bin/.gguf header/metadata\r\n");
+    Print(L"  /cat <path>           Print a text file (e.g. repl.cfg)\r\n");
+    Print(L"  reboot | reset        Reboot\r\n");
+    Print(L"  shutdown              Power off\r\n");
+    Print(L"  exit                  Return to UEFI shell\r\n\r\n");
+    Print(L"To boot with a model: copy a supported .gguf/.bin to the USB root (or models\\)\r\n");
+    Print(L"and set repl.cfg: model=<filename> then reboot.\r\n\r\n");
+}
+
+// Forward declarations for the no-model REPL (definitions appear later in this file).
+void read_user_input(CHAR16* buffer, int max_len);
+void char16_to_char(char* dest, CHAR16* src, int max_len);
+int my_strncmp(const char* s1, const char* s2, int n);
+static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
+static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries);
+static void llmk_fs_cat_best_effort(const CHAR16 *path, UINTN max_bytes);
+
+static void llmk_repl_no_model_loop(void) {
+    Print(L"OK: REPL ready (no model). Type /help\r\n\r\n");
+    while (1) {
+        CHAR16 user_input[512];
+        char prompt[512];
+        prompt[0] = 0;
+        Print(L"llmk> ");
+        read_user_input(user_input, 512);
+        char16_to_char(prompt, user_input, 512);
+        if (prompt[0] == 0) continue;
+
+        if (my_strncmp(prompt, "/help", 5) == 0 || my_strncmp(prompt, "/commands", 9) == 0) {
+            llmk_print_no_model_help();
+            continue;
+        }
+        if (my_strncmp(prompt, "/models", 7) == 0) {
+            Print(L"\r\nModels (.bin/.gguf):\r\n");
+            Print(L"Root:\r\n");
+            llmk_models_ls_best_effort(NULL, 200);
+            Print(L"\r\nmodels\\:\r\n");
+            llmk_models_ls_best_effort(L"models", 200);
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/model_info", 11) == 0) {
+            CHAR16 path16[192];
+            path16[0] = 0;
+
+            int i = 11;
+            while (prompt[i] == ' ') i++;
+            if (prompt[i] != 0) {
+                char p8[160];
+                int n = 0;
+                while (prompt[i] && prompt[i] != ' ' && n + 1 < (int)sizeof(p8)) {
+                    p8[n++] = prompt[i++];
+                }
+                p8[n] = 0;
+                ascii_to_char16(path16, p8, (int)(sizeof(path16) / sizeof(path16[0])));
+            } else {
+                StrCpy(path16, L"model.bin");
+            }
+
+            EFI_FILE_HANDLE f = NULL;
+            EFI_STATUS st = llmk_open_read_file(&f, path16);
+            if (EFI_ERROR(st) || !f) {
+                Print(L"\r\nERROR: open failed: %s (%r)\r\n\r\n", path16, st);
+                continue;
+            }
+
+            LlmkModelFormat fmt = llmk_detect_model_format(f);
+            if (fmt == LLMK_MODEL_FMT_GGUF) {
+                GgufSummary s;
+                EFI_STATUS gst = gguf_read_summary(f, &s);
+                uefi_call_wrapper(f->Close, 1, f);
+                if (EFI_ERROR(gst)) {
+                    Print(L"\r\nGGUF: failed to parse (%r)\r\n\r\n", gst);
+                    continue;
+                }
+                Print(L"\r\nGGUF model info:\r\n");
+                Print(L"  file=%s\r\n", path16);
+                Print(L"  version=%u tensors=%lu kv=%lu header_bytes=%lu\r\n", (unsigned)s.version, (UINT64)s.tensor_count, (UINT64)s.kv_count, (UINT64)s.header_bytes);
+                Print(L"  arch="); llmk_print_ascii(s.architecture[0] ? s.architecture : "(unknown)"); Print(L"\r\n");
+                Print(L"  name="); llmk_print_ascii(s.name[0] ? s.name : "(none)"); Print(L"\r\n");
+                Print(L"  file_type=%lu\r\n", (UINT64)s.file_type);
+                if (s.context_length)   Print(L"  ctx=%lu\r\n", (UINT64)s.context_length);
+                if (s.embedding_length) Print(L"  dim=%lu\r\n", (UINT64)s.embedding_length);
+                if (s.block_count)      Print(L"  layers=%lu\r\n", (UINT64)s.block_count);
+                if (s.head_count)       Print(L"  heads=%lu\r\n", (UINT64)s.head_count);
+                if (s.head_count_kv)    Print(L"  kv_heads=%lu\r\n", (UINT64)s.head_count_kv);
+                if (s.vocab_size)       Print(L"  vocab=%lu\r\n", (UINT64)s.vocab_size);
+                if (s.tokenizer_model[0]) { Print(L"  tokenizer="); llmk_print_ascii(s.tokenizer_model); Print(L"\r\n"); }
+                Print(L"\r\n");
+                continue;
+            }
+
+            EFI_STATUS pst = uefi_call_wrapper(f->SetPosition, 2, f, 0);
+            if (EFI_ERROR(pst)) {
+                uefi_call_wrapper(f->Close, 1, f);
+                Print(L"\r\nERROR: seek failed (%r)\r\n\r\n", pst);
+                continue;
+            }
+            int hdr[7];
+            for (int k = 0; k < 7; k++) hdr[k] = 0;
+            UINTN bytes = (UINTN)(7 * sizeof(int));
+            EFI_STATUS rst = uefi_call_wrapper(f->Read, 3, f, &bytes, hdr);
+            uefi_call_wrapper(f->Close, 1, f);
+            if (EFI_ERROR(rst) || bytes != (UINTN)(7 * sizeof(int))) {
+                Print(L"\r\nBIN: failed to read header (%r)\r\n\r\n", rst);
+                continue;
+            }
+
+            int dim = hdr[0];
+            int n_layers = hdr[2];
+            int n_heads = hdr[3];
+            int n_kv_heads = hdr[4];
+            int vocab = hdr[5];
+            int seq_len = hdr[6];
+            int shared = (vocab < 0);
+            if (vocab < 0) vocab = -vocab;
+            Print(L"\r\nBIN model info:\r\n");
+            Print(L"  file=%s\r\n", path16);
+            Print(L"  dim=%d layers=%d heads=%d kv=%d vocab=%d seq=%d shared_cls=%d\r\n\r\n",
+                  dim, n_layers, n_heads, n_kv_heads, vocab, seq_len, shared);
+            continue;
+        }
+        if (my_strncmp(prompt, "/cat", 4) == 0) {
+            int i = 4;
+            while (prompt[i] == ' ') i++;
+            if (prompt[i] == 0) {
+                Print(L"\r\nUsage: /cat <path>\r\n\r\n");
+                continue;
+            }
+            char p8[192];
+            int n = 0;
+            while (prompt[i] && n + 1 < (int)sizeof(p8)) p8[n++] = prompt[i++];
+            p8[n] = 0;
+            CHAR16 path16[256];
+            ascii_to_char16(path16, p8, (int)(sizeof(path16) / sizeof(path16[0])));
+            llmk_fs_cat_best_effort(path16, 256U * 1024U);
+            Print(L"\r\n");
+            continue;
+        }
+
+        if (my_strncmp(prompt, "exit", 4) == 0 || my_strncmp(prompt, "quit", 4) == 0) {
+            Print(L"\r\nBye.\r\n");
+            return;
+        }
+        if (my_strncmp(prompt, "reboot", 6) == 0 || my_strncmp(prompt, "reset", 5) == 0) {
+            Print(L"\r\nRebooting...\r\n");
+            uefi_call_wrapper(RT->ResetSystem, 4, EfiResetCold, EFI_SUCCESS, 0, NULL);
+            return;
+        }
+        if (my_strncmp(prompt, "shutdown", 8) == 0 || my_strncmp(prompt, "poweroff", 8) == 0) {
+            Print(L"\r\nShutting down...\r\n");
+            uefi_call_wrapper(RT->ResetSystem, 4, EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+            return;
+        }
+
+        Print(L"\r\nNo model loaded. Use /models then set repl.cfg: model=<file> and reboot.\r\n\r\n");
+    }
 }
 
 static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries) {
@@ -2767,6 +3274,8 @@ static CHAR16 g_cfg_autorun_file[96] = L"llmk-autorun.txt";
 
 // Boot logging verbosity. 0=quiet (default), 1=verbose.
 static int g_boot_verbose = 0;
+// Boot logo. 1=show ASCII logo after repl.cfg is loaded, 0=skip.
+static int g_boot_logo = 1;
 static int g_cfg_loaded = 0;
 
 // GGUF Q8_0 blob mode (keeps matrices quantized in RAM). 1=enabled (default), 0=force float32 load.
@@ -2776,6 +3285,22 @@ static int g_cfg_gguf_q8_blob = 1;
 // 1=on for all Q8 matmuls (fastest, most approximation)
 // 2=FFN-only (w1/w3/w2), attention projections stay float (better quality/perf tradeoff)
 static int g_cfg_q8_act_quant = 0;
+
+typedef enum {
+    LLMK_CHAT_FMT_YOU_AI = 0,
+    LLMK_CHAT_FMT_LLAMA2 = 1,
+    LLMK_CHAT_FMT_CHATML = 2,
+    LLMK_CHAT_FMT_ALPACA = 3,
+    LLMK_CHAT_FMT_RAW = 4,
+} LlmkChatFormat;
+
+// Chat formatting (default: You/AI). Used to wrap user turns for instruct/chat models.
+static int g_cfg_chat_format = LLMK_CHAT_FMT_YOU_AI;
+static char g_cfg_system_prompt[256] = {0};
+
+// Model picker and context override (repl.cfg)
+static int g_cfg_model_picker = 1;
+static int g_cfg_ctx_len = 0;
 
 // Rate-limit budget overrun prints (avoid flooding console).
 static UINT32 g_budget_overruns_prefill = 0;
@@ -2885,6 +3410,7 @@ static EFI_STATUS read_exact(EFI_FILE_HANDLE file, void *dst, UINTN total_bytes)
         // Animated UI (cheap): update every ~8MB for large reads.
         if (total_bytes >= (64U * 1024U * 1024U)) {
             if (done >= next_ui) {
+                InterfaceFx_Tick();
                 InterfaceFx_ProgressBytes(done, total_bytes);
                 next_ui = done + (8U * 1024U * 1024U);
             }
@@ -3032,8 +3558,9 @@ static int llmk_read_cfg_model_best_effort(EFI_FILE_HANDLE Root, CHAR16 *out, in
 static void llmk_load_repl_cfg_boot_best_effort(void) {
     // Best-effort: read repl.cfg early and pick only boot verbosity keys.
     // Supported keys:
-    //   boot_verbose=0/1
+    //   boot_verbose=0/1/2   (2 enables extra debug)
     //   boot_quiet=0/1  (inverse of boot_verbose)
+    //   boot_logo=0/1
     //   gguf_q8_blob=0/1  (enable/disable Q8_0 blob mode)
     //   q8_act_quant=0/1/2  (Q8 activation quantization mode)
     EFI_FILE_HANDLE f = NULL;
@@ -3084,14 +3611,26 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
         for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
 
         if (llmk_cfg_streq_ci(key, "boot_verbose") || llmk_cfg_streq_ci(key, "verbose_boot")) {
-            int b;
-            if (llmk_cfg_parse_bool(val, &b)) {
-                g_boot_verbose = (b != 0);
+            int mode;
+            if (llmk_cfg_parse_i32(val, &mode)) {
+                if (mode < 0) mode = 0;
+                if (mode > 2) mode = 2;
+                g_boot_verbose = mode;
+            } else {
+                int b;
+                if (llmk_cfg_parse_bool(val, &b)) {
+                    g_boot_verbose = (b != 0) ? 1 : 0;
+                }
             }
         } else if (llmk_cfg_streq_ci(key, "boot_quiet") || llmk_cfg_streq_ci(key, "quiet_boot")) {
             int b;
             if (llmk_cfg_parse_bool(val, &b)) {
                 g_boot_verbose = (b != 0) ? 0 : 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "boot_logo") || llmk_cfg_streq_ci(key, "logo_boot")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_boot_logo = (b != 0);
             }
         } else if (llmk_cfg_streq_ci(key, "gguf_q8_blob") || llmk_cfg_streq_ci(key, "q8_blob") || llmk_cfg_streq_ci(key, "gguf_blob")) {
             int b;
@@ -3110,8 +3649,34 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
                     g_cfg_q8_act_quant = (b != 0) ? 1 : 0;
                 }
             }
+        } else if (llmk_cfg_streq_ci(key, "model_picker") || llmk_cfg_streq_ci(key, "model_menu")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_model_picker = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "ctx_len") || llmk_cfg_streq_ci(key, "context") || llmk_cfg_streq_ci(key, "context_len")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = -v;
+                g_cfg_ctx_len = v;
+            }
         }
     }
+}
+
+static void llmk_print_logo(void) {
+    // Keep it ASCII-only (UEFI consoles vary) and within ~80 cols.
+    Print(L"\r\n");
+    Print(L" _      _      __  __              _        _ \r\n");
+    Print(L"| |    | |    |  \\/  |            | |      | |\r\n");
+    Print(L"| |    | |    | \\  / |  __ _  ___ | |_ __ _| |\r\n");
+    Print(L"| |    | |    | |\\/| | / _` |/ __|| __/ _` | |\r\n");
+    Print(L"| |____| |____| |  | || (_| |\\__ \\| || (_| | |\r\n");
+    Print(L"|______|______|_|  |_| \\__,_||___/ \\__\\__,_|_|\r\n");
+    Print(L"             Baremetal UEFI Chat REPL\r\n\r\n");
+
+    // Serial-visible marker (keeps automated logs honest).
+    llmk_serial_write_char16(L"[logo] printed\r\n");
 }
 
 static int llmk_cfg_parse_u64(const char *s, UINT64 *out) {
@@ -3191,6 +3756,8 @@ static int llmk_cfg_parse_bool(const char *s, int *out) {
     }
     return 0;
 }
+
+static void llmk_cfg_copy_ascii_token(char *dst, int cap, const char *src);
 
 static void llmk_load_repl_cfg_best_effort(
     float *temperature,
@@ -3403,6 +3970,30 @@ static void llmk_load_repl_cfg_best_effort(
                     applied = 1;
                 }
             }
+        } else if (llmk_cfg_streq_ci(key, "chat_format") || llmk_cfg_streq_ci(key, "prompt_format")) {
+            char fmt[32];
+            llmk_cfg_copy_ascii_token(fmt, (int)sizeof(fmt), val);
+            if (llmk_cfg_streq_ci(fmt, "you_ai") || llmk_cfg_streq_ci(fmt, "you")) {
+                g_cfg_chat_format = LLMK_CHAT_FMT_YOU_AI;
+                applied = 1;
+            } else if (llmk_cfg_streq_ci(fmt, "llama2") || llmk_cfg_streq_ci(fmt, "llama2_chat")) {
+                g_cfg_chat_format = LLMK_CHAT_FMT_LLAMA2;
+                applied = 1;
+            } else if (llmk_cfg_streq_ci(fmt, "chatml") || llmk_cfg_streq_ci(fmt, "qwen") || llmk_cfg_streq_ci(fmt, "qwen2")) {
+                g_cfg_chat_format = LLMK_CHAT_FMT_CHATML;
+                applied = 1;
+            } else if (llmk_cfg_streq_ci(fmt, "alpaca") || llmk_cfg_streq_ci(fmt, "instruction")) {
+                g_cfg_chat_format = LLMK_CHAT_FMT_ALPACA;
+                applied = 1;
+            } else if (llmk_cfg_streq_ci(fmt, "raw")) {
+                g_cfg_chat_format = LLMK_CHAT_FMT_RAW;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "system_prompt") || llmk_cfg_streq_ci(key, "system")) {
+            llmk_cfg_copy_ascii_token(g_cfg_system_prompt,
+                                      (int)sizeof(g_cfg_system_prompt),
+                                      val);
+            applied = 1;
         }
     }
 
@@ -3437,6 +4028,85 @@ static void llmk_cfg_copy_ascii_token(char *dst, int cap, const char *src) {
     dst[p] = 0;
 
     while (p > 0 && llmk_cfg_is_space(dst[p - 1])) dst[--p] = 0;
+}
+
+static const char *llmk_chat_format_name_ascii(int fmt) {
+    switch (fmt) {
+        case LLMK_CHAT_FMT_LLAMA2: return "llama2";
+        case LLMK_CHAT_FMT_CHATML: return "chatml";
+        case LLMK_CHAT_FMT_ALPACA: return "alpaca";
+        case LLMK_CHAT_FMT_RAW: return "raw";
+        case LLMK_CHAT_FMT_YOU_AI:
+        default: return "you_ai";
+    }
+}
+
+static int llmk_prompt_append(char *dst, int cap, int p, const char *s) {
+    if (!dst || cap <= 0) return p;
+    if (!s) return p;
+    while (*s && p + 1 < cap) {
+        dst[p++] = *s++;
+    }
+    dst[p] = 0;
+    return p;
+}
+
+static const char *llmk_build_chat_prompt(char *out, int cap, const char *user, int kv_pos) {
+    if (!out || cap <= 0 || !user) return user;
+
+    if (g_cfg_chat_format == LLMK_CHAT_FMT_RAW) {
+        return user;
+    }
+
+    out[0] = 0;
+    int p = 0;
+
+    if (g_cfg_chat_format == LLMK_CHAT_FMT_YOU_AI) {
+        const char *pre = (kv_pos == 0) ? "You: " : "\nYou: ";
+        p = llmk_prompt_append(out, cap, p, pre);
+        p = llmk_prompt_append(out, cap, p, user);
+        p = llmk_prompt_append(out, cap, p, "\nAI: ");
+        return out;
+    }
+
+    if (g_cfg_chat_format == LLMK_CHAT_FMT_LLAMA2) {
+        if (kv_pos == 0 && g_cfg_system_prompt[0]) {
+            p = llmk_prompt_append(out, cap, p, "[INST] <<SYS>>\n");
+            p = llmk_prompt_append(out, cap, p, g_cfg_system_prompt);
+            p = llmk_prompt_append(out, cap, p, "\n<</SYS>>\n\n");
+            p = llmk_prompt_append(out, cap, p, user);
+            p = llmk_prompt_append(out, cap, p, " [/INST]");
+        } else {
+            p = llmk_prompt_append(out, cap, p, "[INST] ");
+            p = llmk_prompt_append(out, cap, p, user);
+            p = llmk_prompt_append(out, cap, p, " [/INST]");
+        }
+        return out;
+    }
+
+    if (g_cfg_chat_format == LLMK_CHAT_FMT_CHATML) {
+        if (kv_pos == 0 && g_cfg_system_prompt[0]) {
+            p = llmk_prompt_append(out, cap, p, "<|im_start|>system\n");
+            p = llmk_prompt_append(out, cap, p, g_cfg_system_prompt);
+            p = llmk_prompt_append(out, cap, p, "<|im_end|>\n");
+        }
+        p = llmk_prompt_append(out, cap, p, "<|im_start|>user\n");
+        p = llmk_prompt_append(out, cap, p, user);
+        p = llmk_prompt_append(out, cap, p, "<|im_end|>\n<|im_start|>assistant\n");
+        return out;
+    }
+
+    // Alpaca-style
+    if (kv_pos == 0 && g_cfg_system_prompt[0]) {
+        p = llmk_prompt_append(out, cap, p, "### Instruction:\n");
+        p = llmk_prompt_append(out, cap, p, g_cfg_system_prompt);
+        p = llmk_prompt_append(out, cap, p, "\n\n");
+    } else {
+        p = llmk_prompt_append(out, cap, p, "### Instruction:\n");
+    }
+    p = llmk_prompt_append(out, cap, p, user);
+    p = llmk_prompt_append(out, cap, p, "\n\n### Response:\n");
+    return out;
 }
 
 static void llmk_load_repl_cfg_oo_best_effort(
@@ -4491,6 +5161,27 @@ static void llmk_print_log(UINT32 n) {
     Print(L"\r\n");
 }
 
+static void llmk_print_ram_budget(void) {
+    if (!g_llmk_ready) {
+        Print(L"\r\nRAM budget: (llmk not ready)\r\n\r\n");
+        return;
+    }
+
+    Print(L"\r\nRAM budget (Zone B):\r\n");
+    for (int i = 0; i < LLMK_ARENA_COUNT; i++) {
+        const LlmkArena *a = &g_zones.arenas[i];
+        UINT64 used = llmk_arena_used_bytes(&g_zones, (LlmkArenaId)i);
+        UINT64 rem = llmk_arena_remaining_bytes(&g_zones, (LlmkArenaId)i);
+        UINT64 total = a->size;
+        UINT64 used_mb = used / (1024ULL * 1024ULL);
+        UINT64 total_mb = total / (1024ULL * 1024ULL);
+        UINT64 rem_mb = rem / (1024ULL * 1024ULL);
+        Print(L"  %s: used=%lu MB  free=%lu MB  total=%lu MB\r\n",
+              a->name, used_mb, rem_mb, total_mb);
+    }
+    Print(L"\r\n");
+}
+
 typedef struct {
     int kind; // 0 = float32, 1 = Q8_0 blob
 
@@ -4549,6 +5240,18 @@ static void llmk_print_cfg(const Config *config,
 
     Print(L"  gguf_q8_blob=%d\r\n", g_cfg_gguf_q8_blob ? 1 : 0);
     Print(L"  q8_act_quant=%d\r\n", g_cfg_q8_act_quant);
+    Print(L"  model_picker=%d\r\n", g_cfg_model_picker ? 1 : 0);
+    Print(L"  ctx_len_cfg=%d\r\n", g_cfg_ctx_len);
+    Print(L"  chat_format=");
+    llmk_print_ascii(llmk_chat_format_name_ascii(g_cfg_chat_format));
+    Print(L"\r\n");
+    Print(L"  system_prompt=");
+    if (g_cfg_system_prompt[0]) {
+        llmk_print_ascii(g_cfg_system_prompt);
+    } else {
+        Print(L"(empty)");
+    }
+    Print(L"\r\n");
     Print(L"  autorun_autostart=%d\r\n", g_cfg_autorun_autostart);
     Print(L"  autorun_shutdown_when_done=%d\r\n", g_cfg_autorun_shutdown_when_done);
     Print(L"  autorun_file=%s\r\n", g_cfg_autorun_file);
@@ -4808,12 +5511,12 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
 }
 
 // Simple PRNG for sampling
-static unsigned int g_seed = 1234567;
+static unsigned int g_sample_seed = 1234567;
 
 static void set_seed(unsigned int seed) {
     // Avoid a zero seed getting stuck in some LCGs.
     if (seed == 0) seed = 1;
-    g_seed = seed;
+    g_sample_seed = seed;
 }
 
 static unsigned long long rdtsc(void) {
@@ -4874,8 +5577,8 @@ static void calibrate_tsc_once(void) {
 }
 
 static float randf(void) {
-    g_seed = g_seed * 1664525 + 1013904223;
-    return (float)(g_seed >> 8) / 16777216.0f;
+    g_sample_seed = g_sample_seed * 1664525 + 1013904223;
+    return (float)(g_sample_seed >> 8) / 16777216.0f;
 }
 
 // Sample with temperature + min_p + top-p + top-k + repetition penalty
@@ -5321,6 +6024,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/model_info", L"Show model header (bin) or metadata (gguf)" },
     { "/models", L"List available .bin/.gguf files (root + models\\)" },
     { "/cpu", L"Show CPU SIMD status" },
+    { "/ram", L"Show RAM budget (weights/kv/scratch/acts)" },
     { "/zones", L"Dump allocator zones + sentinel" },
     { "/budget", L"Set budgets in cycles (p=prefill, d=decode)" },
     { "/attn", L"Force attention SIMD path: auto|sse2|avx2" },
@@ -5331,6 +6035,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/save_log", L"Write last n log entries to llmk-log.txt" },
     { "/save_dump", L"Write ctx+zones+sentinel+log to llmk-dump.txt" },
     { "/cls", L"Clear the screen" },
+    { "/logo", L"Print startup ASCII logo" },
     { "/blas_bench", L"Benchmark Matrix Multiplication (Scalar vs SIMD)" },
     { "/q8_bench", L"Benchmark Q8_0 matmul (scalar vs AVX2)" },
     { "/q8_matvec", L"Benchmark Q8_0 model matvec (wq/wk/wv/wo/w1/w2/w3/cls)" },
@@ -5673,6 +6378,7 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/diopion_profile",
         "/diopion_burst",
         "/diopion_status",
+        "/logo",
         "/commands",
         "/help",
     };
@@ -5803,10 +6509,16 @@ void read_user_input(CHAR16* buffer, int max_len) {
     draft[0] = 0;
     
     while (pos < max_len - 1) {
-        // Wait for key
-        UINTN index;
-        uefi_call_wrapper(BS->WaitForEvent, 3, 1, &ST->ConIn->WaitForKey, &index);
-        uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &Key);
+        // Wait for key (Polling with UI Update for SentienceOS)
+        while (1) {
+             EFI_STATUS Status = uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &Key);
+             if (!EFI_ERROR(Status)) break;
+             InterfaceFx_Tick(); // Animate Desktop
+             uefi_call_wrapper(BS->Stall, 1, 10000); // 10ms stall
+        }
+        // UINTN index;
+        // uefi_call_wrapper(BS->WaitForEvent, 3, 1, &ST->ConIn->WaitForKey, &index);
+        // uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &Key);
 
         // Any non-Tab key cancels completion cycling.
         if (Key.UnicodeChar != L'\t') {
@@ -6074,16 +6786,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     Print(L"/_____/_/  |_/_/ |_/_____/_/  /_/_____/ /_/ /_/  |_/_____/\r\n\r\n");
     Print(L"LLM Baremetal UEFI - LLAMA2 Chat REPL\r\n");
     Print(L"--------------------------------------------------------------------------\r\n");
-    Print(L"Tips: /help | /compat_status | /calib_status | /orch_status\r\n\r\n");
+    Print(L"Tips: /help | /logo | /compat_status | /calib_status | /orch_status\r\n\r\n");
     
     if (!g_boot_verbose) {
-        Print(L"Booting... (set boot_verbose=1 in repl.cfg for details)\r\n\r\n");
+        Print(L"Booting... (set boot_verbose=1 in repl.cfg for details; 2 for debug)\r\n\r\n");
     }
+
+    llmk_boot_mark(L"banner");
     
     // ========================================================================
     // [1/7] File System
     // ========================================================================
-    InterfaceFx_Stage(1, 7);
+    llmk_overlay_stage(1, 7);
     if (g_boot_verbose) {
         Print(L"[1/7] Opening file system...\r\n");
     }
@@ -6115,9 +6829,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // Best-effort: read boot verbosity from repl.cfg now that the FS is ready.
     llmk_load_repl_cfg_boot_best_effort();
 
+    if (g_boot_logo) {
+        llmk_print_logo();
+    }
+
     if (g_boot_verbose) {
         Print(L"OK: File system ready\r\n\r\n");
     }
+
+    llmk_boot_mark(L"fs_ready");
 
     // Best-effort enable AVX/AVX2 state before feature detection.
     enable_avx_best_effort();
@@ -6146,6 +6866,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
 
+    llmk_boot_mark(L"cpu_detect");
+
     // Best-effort graphics init (GOP). Optional: REPL still works without it.
     {
         EFI_STATUS gst = llmk_gop_init_best_effort();
@@ -6163,6 +6885,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
 
+    llmk_boot_mark(L"gop_init");
+
     // LLM-OO runtime: init early, then optionally hook to GOP for heartbeat.
     llmk_oo_init();
     llmk_oo_set_on_step(llmk_oo_on_step_gop);
@@ -6171,7 +6895,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // [2/7] Load Model Header
     // ========================================================================
 
-    InterfaceFx_Stage(2, 7);
+    llmk_overlay_stage(2, 7);
     
     if (g_boot_verbose) {
         Print(L"[2/7] Loading model...\r\n");
@@ -6210,16 +6934,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             if (!EFI_ERROR(st) && f) {
                 // Keep the file as-selected. GGUF inference support (or fallback) is decided later,
                 // after we inspect the GGUF tensor types.
-
-                // Copy path to a stable buffer (stack buffer would not survive).
-                UINTN n = StrLen(cfg_model) + 1;
-                CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
-                if (stable) {
-                    StrCpy(stable, cfg_model);
-                    model_filename = stable;
-                } else {
-                    model_filename = cfg_model;
-                }
+                // Always store the selected path in stable global storage.
+                // (Early heap allocations can be overwritten later during weight mapping.)
+                llmk_model_set_loaded_path(cfg_model);
+                model_filename = g_loaded_model_path16;
                 ModelFile = f;
                 status = st;
             } else {
@@ -6230,6 +6948,34 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         if (model_filename != NULL) {
             // Using cfg override.
             goto model_selected;
+        }
+
+        // If the model picker is enabled and there are multiple models available,
+        // prompt the user before auto-picking from the legacy candidate list.
+        // This prevents e.g. stories110M.bin from bypassing the picker.
+        if (g_cfg_model_picker != 0) {
+            LlmkModelEntry entries2[2];
+            int n_models = llmk_collect_models(entries2, (int)(sizeof(entries2) / sizeof(entries2[0])));
+            if (n_models >= 2) {
+                EFI_FILE_HANDLE f = NULL;
+                CHAR16 picked[192];
+                picked[0] = 0;
+
+                int picked_ok = llmk_model_picker(&f, picked, (int)(sizeof(picked) / sizeof(picked[0])));
+                if (picked_ok && f) {
+                    ModelFile = f;
+                    llmk_model_set_loaded_path(picked);
+                    model_filename = g_loaded_model_path16;
+                    status = EFI_SUCCESS;
+                    goto model_selected;
+                }
+
+                // Picker was shown and the user canceled (or selection failed).
+                // Keep the app alive so /models + /model_info are usable.
+                InterfaceFx_End();
+                llmk_repl_no_model_loop();
+                return EFI_NOT_FOUND;
+            }
         }
 
         // Try larger models first when present. Keep the list small and explicit
@@ -6249,7 +6995,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &f, candidates[i], EFI_FILE_MODE_READ, 0);
             if (!EFI_ERROR(st)) {
                 ModelFile = f;
-                model_filename = candidates[i];
+                llmk_model_set_loaded_path(candidates[i]);
+                model_filename = g_loaded_model_path16;
                 status = st;
                 break;
             }
@@ -6261,15 +7008,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 st = uefi_call_wrapper(Root->Open, 5, Root, &f, path, EFI_FILE_MODE_READ, 0);
                 if (!EFI_ERROR(st) && f) {
                     ModelFile = f;
-                    // Copy to stable buffer for later printing.
-                    UINTN n = StrLen(path) + 1;
-                    CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
-                    if (stable) {
-                        StrCpy(stable, path);
-                        model_filename = stable;
-                    } else {
-                        model_filename = candidates[i];
-                    }
+                    llmk_model_set_loaded_path(path);
+                    model_filename = g_loaded_model_path16;
                     status = st;
                     break;
                 }
@@ -6277,10 +7017,37 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             last = st;
         }
         if (model_filename == NULL) {
-            Print(L"ERROR: Model file not found.\r\n");
-            Print(L"Expected one of (root or models\\): stories300M.bin stories260M.bin stories200M.bin stories110M.bin stories15M.bin model.bin\r\n");
-            Print(L"Or set repl.cfg: model=<path> (supports .bin/.gguf)\r\n");
-            return last;
+            // Last-chance: model picker (menu), otherwise first match in root/models.
+            EFI_FILE_HANDLE f = NULL;
+            CHAR16 picked[192];
+            picked[0] = 0;
+
+            int picked_ok = 0;
+            int picker_used = (g_cfg_model_picker != 0);
+            if (picker_used) {
+                picked_ok = llmk_model_picker(&f, picked, (int)(sizeof(picked) / sizeof(picked[0])));
+            }
+            if (!picked_ok && !picker_used) {
+                picked[0] = 0;
+                if (llmk_try_open_first_model_best_effort(&f, picked, (int)(sizeof(picked) / sizeof(picked[0])))) {
+                    picked_ok = 1;
+                }
+            }
+
+            if (picked_ok && f) {
+                ModelFile = f;
+                llmk_model_set_loaded_path(picked);
+                model_filename = g_loaded_model_path16;
+                status = EFI_SUCCESS;
+            } else {
+                Print(L"ERROR: Model file not found.\r\n");
+                Print(L"Expected one of (root or models\\): stories300M.bin stories260M.bin stories200M.bin stories110M.bin stories15M.bin model.bin\r\n");
+                Print(L"Or set repl.cfg: model=<path> (supports .bin/.gguf)\r\n");
+                // Do not exit: keep the app alive so /models + /model_info are usable.
+                InterfaceFx_End();
+                llmk_repl_no_model_loop();
+                return last;
+            }
         }
 model_selected:
         ;
@@ -6288,6 +7055,7 @@ model_selected:
     
     // Record the selected model path for /model_info.
     llmk_model_set_loaded_path(model_filename);
+    if (g_boot_verbose >= 2) llmk_debug_print_loaded_model_path(L"after_select");
 
     // Detect format early.
     g_loaded_model_format = llmk_detect_model_format(ModelFile);
@@ -6489,15 +7257,35 @@ gguf_fallback_done:
     }
     
     if (g_boot_verbose) {
-        Print(L"OK: Model loaded: %s (dim=%d, layers=%d, heads=%d, kv=%d, vocab=%d, seq=%d)\r\n\r\n",
-              model_filename, config.dim, config.n_layers, config.n_heads, config.n_kv_heads, config.vocab_size, config.seq_len);
+        if (g_boot_verbose >= 2) llmk_debug_print_loaded_model_path(L"before_model_loaded_print");
+        char model8[192];
+        llmk_char16_to_ascii_cap(model8, (int)sizeof(model8), g_loaded_model_path16);
+        Print(L"OK: Model loaded: ");
+        llmk_print_ascii(model8[0] ? model8 : "(unknown)");
+        Print(L" (dim=%d, layers=%d, heads=%d, kv=%d, vocab=%d, seq=%d)\r\n\r\n",
+              config.dim, config.n_layers, config.n_heads, config.n_kv_heads, config.vocab_size, config.seq_len);
     }
+
+    llmk_boot_mark(L"model_header_loaded");
 
     // ========================================================================
     // [3/7] Kernel zones + heap (auto-sized)
     // ========================================================================
 
-    InterfaceFx_Stage(3, 7);
+    llmk_overlay_stage(3, 7);
+
+    if (g_cfg_ctx_len > 0) {
+        int min_ctx = 64;
+        int target = g_cfg_ctx_len;
+        if (target < min_ctx) target = min_ctx;
+        if (target < config.seq_len) {
+            if (g_boot_verbose) {
+                Print(L"[cfg] ctx_len=%d -> effective seq_len=%d (model=%d)\r\n",
+                      g_cfg_ctx_len, target, config.seq_len);
+            }
+            config.seq_len = target;
+        }
+    }
 
     int kv_dim = (config.dim * config.n_kv_heads) / config.n_heads;
     int head_size = config.dim / config.n_heads;
@@ -6646,7 +7434,7 @@ gguf_fallback_done:
     // [4/7] Weight Pointers
     // ========================================================================
 
-    InterfaceFx_Stage(4, 7);
+    llmk_overlay_stage(4, 7);
     
     if (g_boot_verbose) {
         Print(L"[4/7] Mapping weights...\r\n");
@@ -6654,7 +7442,8 @@ gguf_fallback_done:
     bytes_to_read = weights_bytes;
     void* weights_mem_raw = (void*)llmk_alloc_weights((UINT64)bytes_to_read, L"weights");
     if (weights_mem_raw == NULL) {
-        Print(L"ERROR: Out of heap while allocating weights (%d MB needed)\r\n", (int)(bytes_to_read / (1024 * 1024)));
+        Print(L"ERROR: OOM while allocating weights (%d MB needed).\r\n", (int)(bytes_to_read / (1024 * 1024)));
+        Print(L"Hint: use a smaller model, or GGUF Q8_0 blob (gguf_q8_blob=1), or reduce ctx_len in repl.cfg.\r\n");
         return EFI_OUT_OF_RESOURCES;
     }
 
@@ -6946,41 +7735,72 @@ gguf_fallback_done:
     if (g_boot_verbose) {
         Print(L"OK: Weights mapped\r\n\r\n");
     }
+
+    llmk_boot_mark(L"weights_mapped");
     
     // ========================================================================
     // [5/7] State Buffers
     // ========================================================================
 
-    InterfaceFx_Stage(5, 7);
+    llmk_overlay_stage(5, 7);
     
     if (g_boot_verbose) {
         Print(L"[5/7] Allocating state buffers...\r\n");
     }
     
     RunState state;
-    
-    state.x = (float*)simple_alloc(config.dim * sizeof(float));
-    state.xb = (float*)simple_alloc(config.dim * sizeof(float));
-    state.xb2 = (float*)simple_alloc(config.dim * sizeof(float));
-    state.hb = (float*)simple_alloc(config.hidden_dim * sizeof(float));
-    state.hb2 = (float*)simple_alloc(config.hidden_dim * sizeof(float));
-    state.q = (float*)simple_alloc(config.dim * sizeof(float));
-    state.k = (float*)simple_alloc(kv_dim * sizeof(float));
-    state.v = (float*)simple_alloc(kv_dim * sizeof(float));
-    state.att = (float*)simple_alloc(config.n_heads * config.seq_len * sizeof(float));
-    state.logits = (float*)simple_alloc(config.vocab_size * sizeof(float));
-    state.key_cache = (float*)llmk_alloc_kv((UINT64)config.n_layers * (UINT64)config.seq_len * (UINT64)kv_dim * sizeof(float), L"key cache");
-    state.value_cache = (float*)llmk_alloc_kv((UINT64)config.n_layers * (UINT64)config.seq_len * (UINT64)kv_dim * sizeof(float), L"value cache");
+
+    int ctx_min = 64;
+    int ctx_try = config.seq_len;
+    int alloc_ok = 0;
+    while (!alloc_ok) {
+        state.x = (float*)simple_alloc(config.dim * sizeof(float));
+        state.xb = (float*)simple_alloc(config.dim * sizeof(float));
+        state.xb2 = (float*)simple_alloc(config.dim * sizeof(float));
+        state.hb = (float*)simple_alloc(config.hidden_dim * sizeof(float));
+        state.hb2 = (float*)simple_alloc(config.hidden_dim * sizeof(float));
+        state.q = (float*)simple_alloc(config.dim * sizeof(float));
+        state.k = (float*)simple_alloc(kv_dim * sizeof(float));
+        state.v = (float*)simple_alloc(kv_dim * sizeof(float));
+        state.att = (float*)simple_alloc(config.n_heads * config.seq_len * sizeof(float));
+        state.logits = (float*)simple_alloc(config.vocab_size * sizeof(float));
+        state.key_cache = (float*)llmk_alloc_kv((UINT64)config.n_layers * (UINT64)config.seq_len * (UINT64)kv_dim * sizeof(float), L"key cache");
+        state.value_cache = (float*)llmk_alloc_kv((UINT64)config.n_layers * (UINT64)config.seq_len * (UINT64)kv_dim * sizeof(float), L"value cache");
+
+        alloc_ok = (state.x && state.xb && state.xb2 && state.hb && state.hb2 && state.q && state.k && state.v &&
+                    state.att && state.logits && state.key_cache && state.value_cache);
+        if (alloc_ok) break;
+
+        Print(L"\r\nERROR: OOM while allocating state/KV (seq_len=%d).\r\n", config.seq_len);
+        llmk_print_ram_budget();
+
+        if (g_llmk_ready) {
+            llmk_arena_wipe_and_reset(&g_zones, LLMK_ARENA_ACTIVATIONS, 0);
+            llmk_arena_wipe_and_reset(&g_zones, LLMK_ARENA_KV_CACHE, 0);
+        }
+
+        if (ctx_try <= ctx_min) {
+            Print(L"Hint: use a smaller model or lower ctx_len in repl.cfg.\r\n");
+            return EFI_OUT_OF_RESOURCES;
+        }
+
+        ctx_try = ctx_try / 2;
+        if (ctx_try < ctx_min) ctx_try = ctx_min;
+        config.seq_len = ctx_try;
+        Print(L"Retrying with smaller ctx_len=%d...\r\n\r\n", config.seq_len);
+    }
     
     if (g_boot_verbose) {
         Print(L"OK: State buffers allocated\r\n\r\n");
     }
+
+    llmk_boot_mark(L"state_alloc");
     
     // ========================================================================
     // [6/7] Tokenizer
     // ========================================================================
 
-    InterfaceFx_Stage(6, 7);
+    llmk_overlay_stage(6, 7);
     
     if (g_boot_verbose) {
         Print(L"[6/7] Loading tokenizer...\r\n");
@@ -7002,6 +7822,11 @@ gguf_fallback_done:
     tokenizer.vocab_scores = (float*)simple_alloc(config.vocab_size * sizeof(float));
     
     for (int i = 0; i < config.vocab_size; i++) {
+        // Keep the GOP loading overlay alive while parsing tokenizer.
+        // Rate-limited to stay cheap in UEFI.
+        if (((UINT32)i & 0xFFu) == 0u) {
+            InterfaceFx_ProgressBytes((UINTN)(i + 1), (UINTN)config.vocab_size);
+        }
         bytes_to_read = sizeof(float);
         uefi_call_wrapper(TokFile->Read, 3, TokFile, &bytes_to_read, &tokenizer.vocab_scores[i]);
         
@@ -7019,9 +7844,13 @@ gguf_fallback_done:
 
     // Loading finished: stop the animated overlay now.
     InterfaceFx_End();
+
+    llmk_boot_mark(L"tokenizer_loaded");
     
     if (g_boot_verbose) {
         Print(L"OK: Tokenizer loaded (%d tokens)\r\n\r\n", tokenizer.vocab_size);
+
+        llmk_boot_print_timing_summary();
 
         // ========================================================================
         // [7/7] Interactive REPL Loop
@@ -7037,6 +7866,8 @@ gguf_fallback_done:
     } else {
         Print(L"OK: REPL ready (/help)\r\n\r\n");
     }
+
+    llmk_boot_mark(L"repl_ready");
     
     // Sampling parameters
     // Default sampling tuned for TinyStories (less looping, still creative).
@@ -7048,8 +7879,10 @@ gguf_fallback_done:
     int no_repeat_ngram = 4;
     int max_gen_tokens = 160;
     int stats_enabled = 1;
-    int stop_on_you = 0;
-    int stop_on_double_nl = 1;
+    // Turn-based chat defaults: stop when the model starts the next user prompt.
+    // Double-newline stopping is useful for TinyStories prose, but is too aggressive for chat.
+    int stop_on_you = 1;
+    int stop_on_double_nl = 0;
 
     // Optional config: repl.cfg (key=value). Best-effort; ignored if missing.
     llmk_load_repl_cfg_best_effort(
@@ -7779,7 +8612,7 @@ snap_autoload_done:
                     i++;
                 }
                 set_seed(val);
-                Print(L"  Seed set to: %d\r\n", (int)g_seed);
+                Print(L"  Seed set to: %d\r\n", (int)g_sample_seed);
                 continue;
             } else if (my_strncmp(prompt, "/stats ", 7) == 0) {
                 int val = 0;
@@ -8306,7 +9139,7 @@ snap_autoload_done:
                 continue;
             } else if (my_strncmp(prompt, "/model", 6) == 0 && (prompt[6] == 0 || prompt[6] == ' ')) {
                 Print(L"\r\nModel:\r\n");
-                Print(L"  stories110M.bin\r\n");
+                Print(L"  %s\r\n", model_filename ? model_filename : L"(none)");
                 Print(L"Config:\r\n");
                 Print(L"  dim=%d layers=%d heads=%d kv=%d vocab=%d seq=%d\r\n\r\n",
                       config.dim, config.n_layers, config.n_heads, config.n_kv_heads, config.vocab_size, config.seq_len);
@@ -8454,6 +9287,9 @@ snap_autoload_done:
                 } else {
                     Print(L"  (llmk not ready)\r\n\r\n");
                 }
+                continue;
+            } else if (my_strncmp(prompt, "/ram", 4) == 0) {
+                llmk_print_ram_budget();
                 continue;
             } else if (my_strncmp(prompt, "/budget", 7) == 0) {
                 if (!g_llmk_ready) {
@@ -10941,8 +11777,11 @@ snap_autoload_done:
                 continue;
             } else if (my_strncmp(prompt, "/version", 8) == 0) {
                 Print(L"\r\nllm-baremetal REPL v3\r\n");
-                Print(L"  build=2026-01-08\r\n");
-                Print(L"  model=%s seq_len=%d kv_pos=%d\r\n", model_filename ? model_filename : L"(unknown)", config.seq_len, kv_pos);
+                Print(L"  build=%s\r\n", LLMB_BUILD_ID);
+                const CHAR16 *shown_model = NULL;
+                if (g_loaded_model_path16[0]) shown_model = g_loaded_model_path16;
+                else shown_model = model_filename;
+                Print(L"  model=%s seq_len=%d kv_pos=%d\r\n", shown_model ? shown_model : L"(unknown)", config.seq_len, kv_pos);
                 Print(L"  features=zones+sentinel+log djibmark utf8 multiline persist\r\n");
                 Print(L"  hint: /cpu for SIMD, /ctx for config\r\n\r\n");
                 continue;
@@ -11281,6 +12120,9 @@ snap_autoload_done:
                 continue;
             } else if (my_strncmp(prompt, "/cls", 4) == 0) {
                 uefi_call_wrapper(ST->ConOut->ClearScreen, 1, ST->ConOut);
+                continue;
+            } else if (my_strncmp(prompt, "/logo", 5) == 0) {
+                llmk_print_logo();
                 continue;
             } else if (my_strncmp(prompt, "/blas_bench", 11) == 0) {
                 Print(L"\r\nRunning DjibLAS Benchmark (256x256)...\r\n");
@@ -11632,17 +12474,10 @@ snap_autoload_done:
         // For normal chat turns, wrap input so the model sees explicit roles.
         // Keep /commands and capture-mode prompts untouched.
         const char *encode_text = prompt;
-        char model_prompt[768];
+        char model_prompt[1024];
         model_prompt[0] = 0;
         if (!g_capture_mode && !draw_mode && prompt[0] != '/' && prompt[0] != 0) {
-            int mp = 0;
-            const char *pre = (kv_pos == 0) ? "You: " : "\nYou: ";
-            for (int i = 0; pre[i] && mp + 1 < (int)sizeof(model_prompt); i++) model_prompt[mp++] = pre[i];
-            for (int i = 0; prompt[i] && mp + 1 < (int)sizeof(model_prompt); i++) model_prompt[mp++] = prompt[i];
-            const char *suf = "\nAI: ";
-            for (int i = 0; suf[i] && mp + 1 < (int)sizeof(model_prompt); i++) model_prompt[mp++] = suf[i];
-            model_prompt[mp] = 0;
-            encode_text = model_prompt;
+            encode_text = llmk_build_chat_prompt(model_prompt, (int)sizeof(model_prompt), prompt, kv_pos);
         }
 
         int prompt_tokens[384];
@@ -11746,7 +12581,14 @@ snap_autoload_done:
         int repeat_count = 0;
         int last_token = -1;
         int immediate_repeat_count = 0;
-        int loop_escape_used = 0;
+        int loop_escape_used = 0; // count (budgeted) rather than boolean
+        int repeat_escape_used = 0; // count (budgeted)
+
+        // Record why generation stopped early (useful for GGUF vs BIN debugging).
+        const CHAR16 *stop_reason = NULL;
+        int stop_token = -1;
+        int stop_step = -1;
+        int stop_pos = -1;
         
         // Track context for repetition penalty and loop detection.
         int context_tokens[384 + MAX_TOKENS];
@@ -11793,17 +12635,28 @@ snap_autoload_done:
             if (n_recent > 64) n_recent = 64;
             int* recent = (n_recent > 0) ? &context_tokens[n_context_tokens - n_recent] : (int*)0;
 
-            // One-time loop escape: if we detect a short repeating suffix, ban the sampled token once and resample.
-            for (int attempt = 0; attempt < 2; attempt++) {
+            // Loop escapes:
+            // - if we detect a short repeating suffix, ban the sampled token and resample (budgeted).
+            // - if we are stuck repeating the same token too many times, ban it once and resample.
+            for (int attempt = 0; attempt < 3; attempt++) {
                 next = sample_advanced(state.logits, config.vocab_size, temperature, min_p, top_p, top_k, recent, n_recent, repeat_penalty);
                 if (next == TOKEN_EOS || next == TOKEN_BOS) break;
-                if (!loop_escape_used && n_context_tokens + 1 < (int)(sizeof(context_tokens) / sizeof(context_tokens[0]))) {
+
+                // Prevent premature termination on small models that briefly get stuck repeating one token.
+                // If we've already repeated the last token 5 times and would do it again, ban it once and resample.
+                if (repeat_escape_used < 8 && next == last_token && repeat_count >= 5) {
+                    repeat_escape_used++;
+                    state.logits[next] = -1.0e9f;
+                    continue;
+                }
+
+                if (loop_escape_used < 8 && n_context_tokens + 1 < (int)(sizeof(context_tokens) / sizeof(context_tokens[0]))) {
                     context_tokens[n_context_tokens] = next;
                     int would_repeat = has_suffix_repeat(context_tokens, n_context_tokens + 1, 8) ||
                                       has_suffix_repeat(context_tokens, n_context_tokens + 1, 12) ||
                                       has_suffix_repeat(context_tokens, n_context_tokens + 1, 16);
                     if (would_repeat) {
-                        loop_escape_used = 1;
+                        loop_escape_used++;
                         state.logits[next] = -1.0e9f;
                         continue;
                     }
@@ -11812,7 +12665,15 @@ snap_autoload_done:
             }
             
             // Check for EOS (some exports may still emit BOS; treat both as stop)
-            if (next == TOKEN_EOS || next == TOKEN_BOS) break;
+            if (next == TOKEN_EOS || next == TOKEN_BOS) {
+                if (!stop_reason) {
+                    stop_reason = L"eos/bos";
+                    stop_token = next;
+                    stop_step = step;
+                    stop_pos = pos;
+                }
+                break;
+            }
 
             // Track immediate repeats (useful as a cheap repetition signal).
             if (next == token) immediate_repeat_count++;
@@ -11820,7 +12681,6 @@ snap_autoload_done:
             // Check if stuck on same token (per conversation)
             if (next == last_token) {
                 repeat_count++;
-                if (repeat_count > 5) break;
             } else {
                 repeat_count = 0;
                 last_token = next;
@@ -11837,6 +12697,13 @@ snap_autoload_done:
                         uefi_print_utf8_bytes(piece, len);
                     }
                     generated_count++;
+                    
+                    // Update Desktop UI (Animates while thinking)
+                    if ((step % 2) == 0) { // Update every 2 tokens to save perf
+                         // Estimate fake load
+                         Desk_UpdateStats(50 + (generated_count % 50), 20); // 20 t/s visual
+                         InterfaceFx_Tick(); 
+                    }
 
                     if (!draw_mode) {
                         g_tui_gen_tokens = generated_count;
@@ -11867,6 +12734,12 @@ snap_autoload_done:
                         // Look for "\n\n" in tail.
                         for (int i = 0; i + 1 < out_tail_len; i++) {
                             if (out_tail[i] == '\n' && out_tail[i + 1] == '\n') {
+                                if (!stop_reason) {
+                                    stop_reason = L"stop_double_nl";
+                                    stop_token = next;
+                                    stop_step = step;
+                                    stop_pos = pos;
+                                }
                                 step = max_gen_tokens; // force exit
                                 break;
                             }
@@ -11876,6 +12749,12 @@ snap_autoload_done:
                         // Look for "\nYou:" in tail.
                         for (int i = 0; i + 4 < out_tail_len; i++) {
                             if (out_tail[i] == '\n' && out_tail[i + 1] == 'Y' && out_tail[i + 2] == 'o' && out_tail[i + 3] == 'u' && out_tail[i + 4] == ':') {
+                                if (!stop_reason) {
+                                    stop_reason = L"stop_you";
+                                    stop_token = next;
+                                    stop_step = step;
+                                    stop_pos = pos;
+                                }
                                 step = max_gen_tokens; // force exit
                                 break;
                             }
@@ -11888,18 +12767,24 @@ snap_autoload_done:
             if (n_context_tokens < (int)(sizeof(context_tokens) / sizeof(context_tokens[0]))) {
                 context_tokens[n_context_tokens++] = next;
             }
-            // Stop if the tail repeats (common failure mode: short loops).
-            // spans chosen to be cheap and effective in practice.
-            if (has_suffix_repeat(context_tokens, n_context_tokens, 8) ||
-                has_suffix_repeat(context_tokens, n_context_tokens, 12) ||
-                has_suffix_repeat(context_tokens, n_context_tokens, 16)) {
-                break;
-            }
+            // Loop heuristic (suffix repeat): do not hard-stop.
+            // Under small GGUF models this can trigger very early and mask real generation.
+            // The decode budget is already bounded by max_gen_tokens, and we also have
+            // loop-escape resampling + repetition penalty.
+            // (no-op)
             
             // Advance position and compute next logits
             token = next;
             pos++;
-            if (pos >= config.seq_len) break;
+            if (pos >= config.seq_len) {
+                if (!stop_reason) {
+                    stop_reason = L"seq_len";
+                    stop_token = next;
+                    stop_step = step;
+                    stop_pos = pos;
+                }
+                break;
+            }
 
             if (g_llmk_ready) {
                 if (g_budget_decode_cycles == 0) {
@@ -11911,6 +12796,12 @@ snap_autoload_done:
                 BOOLEAN ok = llmk_sentinel_phase_end(&g_sentinel);
                 if (g_sentinel.tripped) {
                     Print(L"\r\n[llmk] decode stopped (fail-safe) at step=%d pos=%d\r\n", step, pos);
+                    if (!stop_reason) {
+                        stop_reason = L"sentinel_decode";
+                        stop_token = token;
+                        stop_step = step;
+                        stop_pos = pos;
+                    }
                     llmk_print_ctx(&config, model_filename, kv_pos, temperature, min_p, top_p, top_k, no_repeat_ngram, repeat_penalty, max_gen_tokens);
                     llmk_zones_print(&g_zones);
                     llmk_sentinel_print_status(&g_sentinel);
@@ -11952,6 +12843,15 @@ snap_autoload_done:
             }
         }
 
+        // Emit early-stop reason to serial for automated diagnosis.
+        // Only when we stopped before using the full token budget.
+        if (!g_capture_mode && stop_reason && generated_count < max_gen_tokens) {
+            CHAR16 smsg[160];
+            SPrint(smsg, sizeof(smsg), L"[stop] reason=%s tok=%d step=%d pos=%d\r\n",
+                   (CHAR16 *)stop_reason, stop_token, stop_step, stop_pos);
+            llmk_serial_write_char16(smsg);
+        }
+
         // Flush any pending bytes held for mojibake repair across token boundaries.
         if (!g_capture_mode) {
             uefi_print_utf8_flush();
@@ -11979,6 +12879,14 @@ snap_autoload_done:
                   g_budget_decode_cycles,
                   (int)g_budget_overruns_prefill,
                   (int)g_budget_overruns_decode);
+        }
+
+        // Emit a serial-visible marker so automated QEMU tests can prove generation happened,
+        // even when token text is not routed to the serial console.
+        if (!g_capture_mode) {
+            CHAR16 msg[96];
+            SPrint(msg, sizeof(msg), L"[gen] tokens=%d\r\n", generated_count);
+            llmk_serial_write_char16(msg);
         }
 
         if (stats_enabled && !g_capture_mode) {

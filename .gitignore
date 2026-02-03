@@ -13,7 +13,11 @@
 
 # Images (on GitHub Releases only)
 *.img
+*.img.xz
 llmk-autorun.txt
+
+# Local release outputs
+release-artifacts/
 
 # Models (on GitHub Releases only)
 *.bin

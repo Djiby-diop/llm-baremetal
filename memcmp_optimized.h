@@ -1,13 +1,12 @@
 /*
  * memcmp_optimized.h
- * 
- * SIMD-optimized memcmp adapted from Cosmopolitan libc
- * Source: https://github.com/jart/cosmopolitan/blob/master/libc/intrin/memcmp.c
- * 
+ *
+ * SIMD-optimized memcmp adapted from Cosmopolitan libc (memcmp.c)
+ *
  * Compares memory byte-by-byte with SSE2/AVX2 acceleration
  * - x86_64: Uses _mm_cmpeq_epi8 + _mm_movemask_epi8 (16 bytes at once)
  * - Fallback: Scalar byte-by-byte comparison
- * 
+ *
  * Performance gain: 2-5x faster than naive loop for large buffers
  * Used for: Token comparison, weight verification, cache validation
  */

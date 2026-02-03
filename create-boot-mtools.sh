@@ -20,7 +20,7 @@ echo ""
 #   MODEL=stories110M          ./create-boot-mtools.sh   # tries stories110M.bin then stories110M.gguf
 #   MODEL=models/my-instruct   ./create-boot-mtools.sh   # tries models/my-instruct.bin then .gguf
 #   MODEL=models/my-instruct.gguf ./create-boot-mtools.sh # will also copy sibling .bin if present
-MODEL_BIN="${MODEL_BIN:-stories15M.bin}"
+MODEL_BIN="${MODEL_BIN:-stories110M.bin}"
 MODEL="${MODEL:-}"
 
 # Build an image without embedding any model weights.
@@ -263,6 +263,18 @@ if [ "$NO_MODEL" -ne 1 ]; then
         echo "  ✅ Copied $name (${mib} MB)"
     done
 
+    # Convenience: if a small GGUF is available (e.g. stories15M.q8_0.gguf),
+    # bundle it into /models so automated tests can boot it without per-run injection.
+    {
+        small_gguf_src="$(find_src 'stories15M.q8_0.gguf' 2>/dev/null || true)"
+        if [ -n "$small_gguf_src" ]; then
+            mmd z:/models 2>/dev/null || true
+            mcopy "$small_gguf_src" z:/models/stories15M.q8_0.gguf
+            mib=$(( ( $(stat -c %s "$small_gguf_src") + 1024*1024 - 1) / (1024*1024) ))
+            echo "  ✅ Copied models/stories15M.q8_0.gguf (${mib} MB)"
+        fi
+    }
+
     if [ ${#EXTRA_SRCS[@]} -gt 0 ]; then
         mmd z:/models
         echo "  ✅ Created /models"
@@ -281,10 +293,28 @@ fi
 mcopy tokenizer.bin z:/
 echo "  ✅ Copied tokenizer.bin"
 
-# Optional REPL config (key=value). If present, copy to root.
-if [ -f repl.cfg ]; then
-    mcopy repl.cfg z:/
-    echo "  ✅ Copied repl.cfg"
+# REPL config (key=value).
+# If we're bundling a primary model, write a repl.cfg that points at it so the image boots correctly.
+# This avoids stale repl.cfg files referencing a different default model.
+AUTO_SET_REPL_MODEL="${AUTO_SET_REPL_MODEL:-1}"
+if [ "$NO_MODEL" -ne 1 ] && [ "$AUTO_SET_REPL_MODEL" -eq 1 ]; then
+    tmp_cfg="$(mktemp)"
+    {
+        echo "model=${MODEL_OUT_NAME}"
+        if [ -f repl.cfg ]; then
+            # Keep existing settings, but override any previous model= line.
+            grep -vi '^model=' repl.cfg || true
+        fi
+    } > "$tmp_cfg"
+    mcopy "$tmp_cfg" z:/repl.cfg
+    rm -f "$tmp_cfg"
+    echo "  ✅ Wrote repl.cfg (model=${MODEL_OUT_NAME})"
+else
+    # Optional REPL config (key=value). If present, copy to root.
+    if [ -f repl.cfg ]; then
+        mcopy repl.cfg z:/
+        echo "  ✅ Copied repl.cfg"
+    fi
 fi
 
 # Optional splash screen (Cyberpunk Interface)
