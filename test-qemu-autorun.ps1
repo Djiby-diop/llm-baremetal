@@ -39,7 +39,7 @@ param(
 
     [switch]$ForceAvx2,
 
-    [ValidateSet('smoke','q8bench','ram','gen','custom')]
+    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke')]
     [string]$Mode = 'smoke',
 
     # Optional repl.cfg overrides injected into the boot image for the duration of the test.
@@ -367,6 +367,10 @@ $IMAGE = $null
 $fatOffset = $null
 $didModifyImage = $false
 $imageBackups = @()
+$isTempImage = $false
+
+# When -ExtraModel is injected, mtools copy uses a randomized temp name; the final file on the FAT volume is that temp basename.
+$extraInjectedName = $null
 
 # If invoked via `powershell -File`, passing a string[] can be finicky.
 # Allow a single string containing newline-separated commands.
@@ -470,6 +474,20 @@ switch ($Mode) {
             $GenPrompt
         )
     }
+    'gguf_smoke' {
+        $autorunLinesEffective = @(
+            '# llmk autorun gguf smoke test (injected model)',
+            '/version',
+            '/cfg',
+            ("/max_tokens {0}" -f $GenMaxTokens),
+            '/stats 1',
+            '/stop_you 0',
+            '/stop_nl 0',
+            '/seed 123',
+            ("/temp {0}" -f $GenTemp),
+            'Hello! Give me one short sentence.'
+        )
+    }
     'custom' {
         if (-not $AutorunLines -or $AutorunLines.Count -eq 0) {
             throw '-Mode custom requires -AutorunLines or -AutorunScript'
@@ -491,8 +509,31 @@ $tmpCfg = @(
 )
 
 # Apply optional boot-time model override for repl.cfg.
-if ($BootModel) {
-    $tmpCfg[1] = "model=$BootModel"
+# If an ExtraModel is injected into ::models/, allow the caller to refer to it as models\<basename>
+# and rewrite to the actual injected filename.
+$bootModelEffective = $BootModel
+if ($ExtraModel -and $extraInjectedName) {
+    $extraBase = $extraBaseName
+    if (-not $bootModelEffective -and $Mode -eq 'gguf_smoke') {
+        $bootModelEffective = ("models\\{0}" -f $extraInjectedName)
+    } elseif ($bootModelEffective) {
+        $bmNorm = $bootModelEffective -replace '/','\\'
+        if ($bmNorm -match '^(models\\)(.+)$') {
+            $tail = $Matches[2]
+            if ($tail -ieq $extraBase) {
+                $bootModelEffective = ("models\\{0}" -f $extraInjectedName)
+            }
+        }
+    }
+
+    # If expected model was not specified, infer it for injected runs.
+    if (-not $ExpectedModel -and ($Mode -eq 'gguf_smoke' -or $bootModelEffective -match '^models\\')) {
+        $ExpectedModel = ("models\\{0}" -f $extraInjectedName)
+    }
+}
+
+if ($bootModelEffective) {
+    $tmpCfg[1] = "model=$bootModelEffective"
 }
 
 if ($CtxLen -gt 0) {
@@ -517,11 +558,21 @@ try {
     $OVMF = Resolve-OvmfPath $OvmfPath
     $IMAGE = Resolve-ImagePath $ImagePath
 
+    # If we're injecting an ExtraModel, always operate on a temp copy.
+    # This avoids leaving the primary image modified and sidesteps file-lock edge cases.
+    if ($ExtraModel) {
+        Write-Host "[Test] ExtraModel injection requested; copying image to temp for this run..." -ForegroundColor Yellow
+        $IMAGE = Get-TempImageCopy $IMAGE
+        $isTempImage = $true
+        Write-Host "[Test] Using temp image: $IMAGE" -ForegroundColor Yellow
+    }
+
     # If a QEMU GUI/manual run still has the image open, WSL+mtools can hang.
     # Detect that and operate on a temp copy instead.
     if (-not (Test-FileUnlockedForWrite $IMAGE)) {
         Write-Host "[Test] Image appears locked/in-use; copying to temp for this run..." -ForegroundColor Yellow
         $IMAGE = Get-TempImageCopy $IMAGE
+        $isTempImage = $true
         Write-Host "[Test] Using temp image: $IMAGE" -ForegroundColor Yellow
     }
 
@@ -555,13 +606,17 @@ try {
     }
 
     # Backup files we are going to modify so manual runs aren't left in autorun mode.
-    $imageBackups = @(
-        (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile 'repl.cfg' -Label 'replcfg'),
-        (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile 'llmk-autorun.txt' -Label 'autorun'),
-        (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile 'NvVars' -Label 'nvvars'),
-        (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile 'oo-test.bin' -Label 'ootest'),
-        (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile 'oo-test.bin.bak' -Label 'ootestbak')
-    )
+    if (-not $isTempImage) {
+        $imageBackups = @(
+            (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile 'repl.cfg' -Label 'replcfg'),
+            (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile 'llmk-autorun.txt' -Label 'autorun'),
+            (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile 'NvVars' -Label 'nvvars'),
+            (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile 'oo-test.bin' -Label 'ootest'),
+            (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile 'oo-test.bin.bak' -Label 'ootestbak')
+        )
+    } else {
+        $imageBackups = @()
+    }
 
     # If requested, copy an extra model into the image under ::models/.
     $extraLocalPath = $null
@@ -578,41 +633,79 @@ try {
         $extraLocalPath = (Resolve-Path $cand).Path
         $extraBaseName = [System.IO.Path]::GetFileName($extraLocalPath)
         $extraImagePath = ("models/{0}" -f $extraBaseName)
-        $imageBackups += (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile $extraImagePath -Label 'extramodel')
+        if (-not $isTempImage) {
+            $imageBackups += (Backup-ImageFile -ImagePath $IMAGE -FatOffsetBytes $fatOffset -ImageFile $extraImagePath -Label 'extramodel')
+        }
     }
 
     Write-Host '[Test] Injecting repl.cfg + llmk-autorun.txt into image (WSL+mtools)...' -ForegroundColor Cyan
     $wslImg = ConvertTo-WslPath $IMAGE
+    $wslImgOriginal = $wslImg
     $wslCfg = ConvertTo-WslPath $tmpCfgPath
     $wslAr = ConvertTo-WslPath $autorunPath
-
-    $extraCopyCmd = ''
-    if ($extraLocalPath) {
-        $wslExtra = ConvertTo-WslPath $extraLocalPath
-        $tmpName = ("/tmp/llmk-extra-{0}-{1}" -f ([Guid]::NewGuid().ToString('n')), $extraBaseName)
-        $extraCopyCmd = (
-            "mmd -i '$wslImg@@$fatOffset' ::models 2>/dev/null || true; " +
-            "echo '[mtools] copying extra model into ::models/'; " +
-            "cp -f '$wslExtra' '$tmpName'; " +
-            "mcopy -v -o -i '$wslImg@@$fatOffset' '$tmpName' ::models/; " +
-            "rm -f '$tmpName'"
-        )
-    }
-
-    $didModifyImage = $true
 
     function Invoke-WslStep([string]$label, [string]$cmd, [int]$timeoutSec = 60) {
         Write-Host ("[Test] WSL: {0} (timeout={1}s)" -f $label, $timeoutSec) -ForegroundColor DarkCyan
 
-        # Run the provided command string inside a nested bash -lc so callers can use
-        # compound commands, parentheses, semicolons, etc.
-        $escaped = ($cmd -replace "'", "'\\''")
-        $full = ("set -e; timeout {0}s bash -lc '{1}'" -f $timeoutSec, $escaped)
-        wsl bash -lc $full
-        if ($LASTEXITCODE -ne 0) {
-            throw "WSL step failed ($label), exit=$LASTEXITCODE"
+        # Avoid brittle nested quoting by writing the command to a temporary bash script.
+        $tmpSh = Join-Path $env:TEMP ("llmk-wsl-step-{0}.sh" -f ([Guid]::NewGuid().ToString('n')))
+        $script = @(
+            '#!/usr/bin/env bash',
+            'set -e',
+            'export MTOOLS_SKIP_CHECK=1',
+            $cmd
+        ) -join "`n"
+        [System.IO.File]::WriteAllText(
+            $tmpSh,
+            $script + "`n",
+            (New-Object System.Text.UTF8Encoding -ArgumentList @($false))
+        )
+
+        $wslSh = ConvertTo-WslPath $tmpSh
+        $full = ("set -e; timeout --foreground {0}s bash '{1}'" -f $timeoutSec, $wslSh)
+        try {
+            # Tee-Object streams output while keeping it available for error reporting.
+            $out = & wsl bash -lc $full 2>&1 | Tee-Object -Variable out
+            if ($LASTEXITCODE -ne 0) {
+                if ($out) {
+                    Write-Host "[WSL] Output:" -ForegroundColor Yellow
+                    $out | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
+                }
+                throw "WSL step failed ($label), exit=$LASTEXITCODE"
+            }
+        } finally {
+            try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpSh } catch {}
         }
     }
+
+    # mtools writes against /mnt/c can occasionally hang. Stage a WSL-local copy for all write steps.
+    $wslImgWork = ("/tmp/llmk-imgwork-{0}.img" -f ([Guid]::NewGuid().ToString('n')))
+    Invoke-WslStep 'stage image into WSL temp' ("cp -f '{0}' '{1}'" -f $wslImgOriginal, $wslImgWork) 120
+    $wslImg = $wslImgWork
+
+    $extraCopyCmd = ''
+    if ($extraLocalPath) {
+        $wslExtra = ConvertTo-WslPath $extraLocalPath
+        $extraInjectedName = $extraBaseName
+        $extraCopyCmd = (
+            "echo '[mtools] preflight root'; " +
+            "mdir -i '$wslImg@@$fatOffset' ::/ >/dev/null; " +
+            "if mdir -i '$wslImg@@$fatOffset' ::models >/dev/null 2>&1; then " +
+                "echo '[mtools] ::models exists'; " +
+            "else " +
+                "echo '[mtools] creating ::models (timeout 20s)'; " +
+                "timeout --foreground 20s mmd -i '$wslImg@@$fatOffset' ::models || true; " +
+            "fi; " +
+            "echo '[mtools] copying extra model into ::models/'; " +
+            "ls -lh '$wslExtra' || true; " +
+            "date; " +
+            "timeout --foreground 240s mcopy -o -i '$wslImg@@$fatOffset' '$wslExtra' ::models/; " +
+            "date; " +
+            "echo '[mtools] extra model copy done'"
+        )
+    }
+
+    $didModifyImage = $true
 
     # 1) Clear volatile files that can interfere with tests.
     Invoke-WslStep 'clear volatile files' (
@@ -636,6 +729,10 @@ try {
         Invoke-WslStep 'print repl.cfg' ("echo '--- repl.cfg ---'; mtype -i '$wslImg@@$fatOffset' ::repl.cfg") 30
         Invoke-WslStep 'print llmk-autorun.txt' ("echo '--- llmk-autorun.txt ---'; mtype -i '$wslImg@@$fatOffset' ::llmk-autorun.txt") 30
     }
+
+    # Sync staged WSL-local image back to the Windows image path used by QEMU.
+    Invoke-WslStep 'sync image back to Windows' ("cp -f '{0}' '{1}'" -f $wslImgWork, $wslImgOriginal) 120
+    Invoke-WslStep 'remove WSL temp image' ("rm -f '{0}'" -f $wslImgWork) 30
 
     $serialLog = Join-Path $env:TEMP ("llm-baremetal-serial-autorun-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
     $tmpOut = Join-Path $env:TEMP ("llm-baremetal-qemu-out-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
@@ -813,12 +910,22 @@ try {
         }
     }
 
+    # RAM mode is primarily a memory-layout/allocator test.
+    # Unless the caller explicitly requests strict model assertions, don't fail RAM runs
+    # just because the image bundles a different default model.
+    $skipModelAssertionsEffective = $SkipModelAssertions
+    if (-not $PSBoundParameters.ContainsKey('SkipModelAssertions')) {
+        if ($Mode -eq 'ram' -and -not $ExpectedModel) {
+            $skipModelAssertionsEffective = $true
+        }
+    }
+
     try {
         Assert-Contains $serial '[autorun] loaded' 'autorun loaded'
 
         # Validate model name is correct both at boot and in /version.
         # When iterating on GGUF fallback/injection behavior, these checks can be skipped.
-        if (-not $SkipModelAssertions) {
+        if (-not $skipModelAssertionsEffective) {
             Assert-Contains $serial ("OK: Model loaded: $expectedLoaded") 'model loaded line'
             Assert-Contains $serial ("model=$expectedLoaded") 'version shows model'
         }
@@ -852,6 +959,13 @@ try {
             Assert-Contains $serial 'RAM budget (Zone B):' 'ram budget header printed'
             Assert-Contains $serial 'model_picker=' 'cfg shows model_picker'
             Assert-Contains $serial 'ctx_len_cfg=' 'cfg shows ctx_len_cfg'
+
+            # Strict RAM formatting assertions (catch regressions in zone reporting).
+            Assert-Match $serial '(?m)^\s*WEIGHTS:\s*used=\d+\s*MB\s*free=\d+\s*MB\s*total=\d+\s*MB\s*$' 'ram weights line'
+            Assert-Match $serial '(?m)^\s*KV:\s*used=\d+\s*MB\s*free=\d+\s*MB\s*total=\d+\s*MB\s*$' 'ram kv line'
+            Assert-Match $serial '(?m)^\s*SCRATCH:\s*used=\d+\s*MB\s*free=\d+\s*MB\s*total=\d+\s*MB\s*$' 'ram scratch line'
+            Assert-Match $serial '(?m)^\s*ACTS:\s*used=\d+\s*MB\s*free=\d+\s*MB\s*total=\d+\s*MB\s*$' 'ram acts line'
+            Assert-Match $serial '(?m)^\s*ZONEC:\s*used=\d+\s*MB\s*free=\d+\s*MB\s*total=\d+\s*MB\s*$' 'ram zonec line'
         } elseif ($Mode -eq 'gen') {
             Assert-Match $serial 'You \(autorun\): /max_tokens \d+' 'autorun set max_tokens'
             Assert-Contains $serial 'You (autorun): /stats 1' 'autorun enabled stats'
@@ -904,7 +1018,7 @@ try {
     try { if (Test-Path $tmpCfgPath) { Remove-Item -Force $tmpCfgPath -ErrorAction SilentlyContinue } } catch {}
     try { if (Test-Path $autorunPath) { Remove-Item -Force $autorunPath -ErrorAction SilentlyContinue } } catch {}
 
-    if ($didModifyImage -and $IMAGE -and $fatOffset -and $imageBackups -and $imageBackups.Count -gt 0) {
+    if ((-not $isTempImage) -and $didModifyImage -and $IMAGE -and $fatOffset -and $imageBackups -and $imageBackups.Count -gt 0) {
         try {
             Write-Host '[Test] Restoring image files modified during autorun injection...' -ForegroundColor Cyan
             foreach ($e in $imageBackups) {
@@ -913,6 +1027,12 @@ try {
         } catch {
             Write-Host '[Warn] Failed to fully restore injected image files. Re-run .\build.ps1 to regenerate a clean image.' -ForegroundColor Yellow
         }
+    }
+
+    if ($isTempImage -and $IMAGE -and (Test-Path $IMAGE)) {
+        try {
+            Remove-Item -Force -ErrorAction SilentlyContinue $IMAGE
+        } catch {}
     }
 
     foreach ($e in $imageBackups) {
