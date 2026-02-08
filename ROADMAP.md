@@ -1,4 +1,4 @@
-# Suite des améliorations (roadmap post-Justine feedback)
+# Suite des améliorations (roadmap)
 
 **Contexte actuel**
 - UI simplifiée : interface.h avec overlay **off** par défaut (clean boot)
@@ -59,7 +59,7 @@
 
 ### 3.3 Support Q4_K / Q5_K (GGUF)
 - Actuellement supporté : Q4_0/Q4_1/Q5_0/Q5_1/Q8_0
-- K-variants nécessitent dequant + lookup complexe (peut attendre selon feedback Justine)
+- K-variants nécessitent dequant + lookup complexe (peut attendre)
 
 ---
 
@@ -74,7 +74,7 @@
 - Support pour tokenizers alternatifs (e.g. Llama3 tokenizer)
 
 ### 4.3 Format .safetensors (futur)
-- Si Justine mentionne sa stack Rust/safetensors
+- Support Rust/safetensors si besoin
 - Mais probablement overkill pour baremetal
 
 ---
@@ -90,7 +90,7 @@
 - Fail si crash ou mauvais tok/s (threshold)
 
 ### 5.3 USB réel (optionnel)
-- Si Justine teste sur hardware physique, documenter ses résultats
+- Si test sur hardware physique, documenter les résultats
 
 ---
 
@@ -109,7 +109,7 @@
 
 ---
 
-## Priorités (post-feedback Justine)
+## Priorités
 
 **High** :
 - Mode diag
@@ -130,4 +130,4 @@
 
 **Date** : 2026-02-08  
 **Build** : `f3d53a2` (ui: revert to simple interface.h)  
-**Next** : attendre feedback Justine sur Release `boot-tinyllama-2026-02-08`
+**Next** : tests hardware sur Release `boot-tinyllama-2026-02-08`

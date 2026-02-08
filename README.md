@@ -44,7 +44,7 @@ Linux/WSL:
 ./tools/cosmocc.sh --help
 ```
 
-### Optional: Justine tools (pinned, not committed)
+### Optional: Cosmopolitan tools (pinned, not committed)
 
 Pinned bootstrappers (downloaded into `tools/_toolchains/`, ignored by git):
 
