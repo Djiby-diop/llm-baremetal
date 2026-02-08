@@ -3344,6 +3344,7 @@ int my_strncmp(const char* s1, const char* s2, int n);
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries);
 static void llmk_fs_cat_best_effort(const CHAR16 *path, UINTN max_bytes);
+static void llmk_print_diag(void);
 
 static void llmk_repl_no_model_loop(void) {
     Print(L"OK: REPL ready (no model). Type /help\r\n\r\n");
@@ -3358,6 +3359,10 @@ static void llmk_repl_no_model_loop(void) {
 
         if (my_strncmp(prompt, "/help", 5) == 0 || my_strncmp(prompt, "/commands", 9) == 0) {
             llmk_print_no_model_help();
+            continue;
+        }
+        if (my_strncmp(prompt, "/diag", 5) == 0) {
+            llmk_print_diag();
             continue;
         }
         if (my_strncmp(prompt, "/models", 7) == 0) {
@@ -3505,6 +3510,65 @@ static void llmk_repl_no_model_loop(void) {
 
         Print(L"\r\nNo model loaded. Use /models then set repl.cfg: model=<file> and reboot.\r\n\r\n");
     }
+}
+
+// Diagnostic:displayGOP resolution, memory, build-id, detected models, CPU features
+static void llmk_print_diag(void) {
+    Print(L"\r\n========== DIAGNOSTIC MODE ==========\r\n\r\n");
+    
+    // 1. Build ID
+    Print(L"Build ID: %s\r\n\r\n", LLMB_BUILD_ID);
+    
+    // 2. GOP (Graphics Output Protocol) Info
+    if (g_gop && g_gop_fb32) {
+        Print(L"[GOP] Graphics:\r\n");
+        Print(L"  Resolution:    %dx%d\r\n", (int)g_gop_w, (int)g_gop_h);
+        Print(L"  Scan Line:     %d pixels\r\n", (int)g_gop_ppsl);
+        Print(L"  Framebuffer:   0x%lx\r\n", (UINT64)(UINTN)g_gop_fb32);
+        if (g_gop->Mode) {
+            Print(L"  FB Size:       %lu bytes\r\n", (UINT64)g_gop->Mode->FrameBufferSize);
+        }
+        Print(L"  Pixel Format:  %d\r\n", (int)g_gop_pf);
+    } else {
+        Print(L"[GOP] Graphics:  Not available\r\n");
+    }
+    Print(L"\r\n");
+    
+    // 3. Memory Info
+    UINT64 total_mem = llmk_get_conventional_ram_bytes_best_effort();
+    if (total_mem > 0) {
+        UINT64 mb = total_mem / (1024ULL * 1024ULL);
+        Print(L"[Memory] Conventional RAM: %lu MiB\r\n\r\n", mb);
+    } else {
+        Print(L"[Memory] Unable to query\r\n\r\n");
+    }
+    
+    // 4. CPU Features
+    Print(L"[CPU] Features:\r\n");
+    CPUFeatures cpu_features;
+    djiblas_detect_cpu(&cpu_features);
+    sgemm_kernel_t k = djiblas_get_best_kernel(&cpu_features);
+    const CHAR16 *kernel_name = L"SCALAR";
+    if (k == djiblas_sgemm_avx512) kernel_name = L"AVX512";
+    else if (k == djiblas_sgemm_avx2) kernel_name = (cpu_features.has_fma ? L"AVX2+FMA" : L"AVX2");
+    else if (k == djiblas_sgemm_sse2) kernel_name = L"SSE2";
+    
+    Print(L"  SSE2:          %s\r\n", cpu_features.has_sse2 ? L"Yes" : L"No");
+    Print(L"  AVX:           %s\r\n", cpu_features.has_avx ? L"Yes" : L"No");
+    Print(L"  AVX2:          %s\r\n", cpu_features.has_avx2 ? L"Yes" : L"No");
+    Print(L"  FMA:           %s\r\n", cpu_features.has_fma ? L"Yes" : L"No");
+    Print(L"  SGEMM Kernel:  %s\r\n", kernel_name);
+    Print(L"  Attn SIMD:     %s\r\n", g_attn_use_avx2 ? L"AVX2" : L"SSE2");
+    Print(L"\r\n");
+    
+    // 5. Detected Models
+    Print(L"[Models] Detected paths:\r\n");
+    Print(L"  Root:\r\n");
+    llmk_models_ls_best_effort(NULL, 200);
+    Print(L"  models\\:\r\n");
+    llmk_models_ls_best_effort(L"models", 200);
+    
+    Print(L"\r\n========== END DIAGNOSTIC ==========\r\n\r\n");
 }
 
 static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries) {
@@ -3938,6 +4002,8 @@ static CHAR16 g_cfg_autorun_file[96] = L"llmk-autorun.txt";
 static int g_boot_verbose = 0;
 // Boot logo. 1=show ASCII logo after repl.cfg is loaded, 0=skip.
 static int g_boot_logo = 1;
+// Boot diagnostic. 0=off (default), 1=show system info at boot.
+static int g_boot_diag = 0;
 static int g_cfg_loaded = 0;
 
 // GGUF Q8_0 blob mode (keeps matrices quantized in RAM). 1=enabled (default), 0=force float32 load.
@@ -4224,6 +4290,7 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
     //   boot_verbose=0/1/2   (2 enables extra debug)
     //   boot_quiet=0/1  (inverse of boot_verbose)
     //   boot_logo=0/1
+    //   boot_diag=0/1  (show system diagnostics: GOP/RAM/CPU/models)
     //   gguf_q8_blob=0/1  (enable/disable Q8_0 blob mode)
     //   q8_act_quant=0/1/2  (Q8 activation quantization mode)
     //   fat83_force=0/1 (test/diag: prefer FAT 8.3 alias opens)
@@ -4297,6 +4364,11 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
             int b;
             if (llmk_cfg_parse_bool(val, &b)) {
                 g_boot_logo = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "boot_diag") || llmk_cfg_streq_ci(key, "diag")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_boot_diag = (b != 0);
             }
         } else if (llmk_cfg_streq_ci(key, "gguf_q8_blob") || llmk_cfg_streq_ci(key, "q8_blob") || llmk_cfg_streq_ci(key, "gguf_blob")) {
             int b;
@@ -6908,6 +6980,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/diag_status", L"Show diagnostics status + counters" },
     { "/diag_report", L"Write llmk-diag.txt report (or /diag_report <file>)" },
     { "/version", L"Show build version + features" },
+    { "/diag", L"Display system diagnostics (GOP/RAM/CPU/models)" },
     { "/commands", L"List commands (optionally filtered)" },
     { "/help", L"Show help (optionally filtered)" },
 };
@@ -7101,6 +7174,7 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/reset",
         "/clear",
         "/version",
+        "/diag",
         "/djibmarks",
         "/djibperf",
         "/djibion_on",
@@ -8159,6 +8233,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
 
     llmk_boot_mark(L"gop_init");
+
+    // Show diagnostic info if requested via repl.cfg: boot_diag=1
+    if (g_boot_diag) {
+        llmk_print_diag();
+    }
 
     // LLM-OO runtime: init early, then optionally hook to GOP for heartbeat.
     llmk_oo_init();
@@ -13298,6 +13377,9 @@ snap_autoload_done:
                 Print(L"  model=%s seq_len=%d kv_pos=%d\r\n", shown_model ? shown_model : L"(unknown)", config.seq_len, kv_pos);
                 Print(L"  features=zones+sentinel+log djibmark utf8 multiline persist\r\n");
                 Print(L"  hint: /cpu for SIMD, /ctx for config\r\n\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/diag", 5) == 0) {
+                llmk_print_diag();
                 continue;
             } else if (my_strncmp(prompt, "/djibmarks", 10) == 0) {
                 DJIBMARK_REPL();
