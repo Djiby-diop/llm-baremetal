@@ -20,13 +20,15 @@ param(
 
     [switch]$SkipBuild,
 
+    # Optional: bootstrap pinned toolchains (downloaded into tools/_toolchains/, ignored by git)
+    # before running any build steps.
+    [switch]$BootstrapToolchains,
+
     # If set, runs only the quick modes (ram/gen/gguf_smoke) to keep iteration fast.
     [switch]$Quick,
 
     # If set, prints the tail of each serial log path used.
-    [switch]$VerboseLogs
-
-    ,
+    [switch]$VerboseLogs,
     # By default, matrix runs focus on functional markers + perf.
     # Enable this to enforce strict "OK: Model loaded:" and "model=..." assertions.
     [switch]$StrictModelAssertions
@@ -74,6 +76,7 @@ function Run-Mode([string]$mode, [hashtable]$extraArgs) {
         SkipInspect = $true
         TimeoutSec = $TimeoutSec
     }
+    if ($BootstrapToolchains) { $args.BootstrapToolchains = $true }
     if ($SkipBuild) { $args.SkipBuild = $true }
     if ($ModelBin) { $args.ModelBin = $ModelBin }
 
@@ -142,16 +145,27 @@ if (-not $GgufPath) {
     if (Test-Path $cand) { $GgufPath = $cand }
 }
 
+$hasGguf = ($GgufPath -and (Test-Path $GgufPath))
+$ggufLeaf = if ($hasGguf) { Split-Path -Leaf $GgufPath } else { $null }
+
 $modeList = @()
 if ($Quick) {
-    $modeList = @('ram','gen','gguf_smoke')
+    $modeList = @('ram','gen')
 } else {
-    $modeList = @('smoke','q8bench','ram','gen','gguf_smoke')
+    $modeList = @('smoke','q8bench','ram','gen')
+}
+
+if ($hasGguf) {
+    $modeList += 'gguf_smoke'
+} else {
+    Write-Host "[Matrix] Note: skipping gguf_smoke (GGUF not found; pass -GgufPath <path>)" -ForegroundColor DarkGray
 }
 
 if (-not $SkipBuild) {
     Write-Host "[Matrix] Build once upfront..." -ForegroundColor Cyan
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'build.ps1')
+    $bp = @()
+    if ($BootstrapToolchains) { $bp += '-BootstrapToolchains' }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'build.ps1') @bp
     if ($LASTEXITCODE -ne 0) { throw "build.ps1 failed with exit=$LASTEXITCODE" }
 }
 
@@ -166,12 +180,12 @@ for ($i = 1; $i -le $Repeat; $i++) {
             $extra.GenTemp = 0.2
         }
         if ($m -eq 'gguf_smoke') {
-            if (-not $GgufPath -or -not (Test-Path $GgufPath)) {
-                throw "GGUF file not found for gguf_smoke. Pass -GgufPath <path>"
+            if (-not $hasGguf -or -not $ggufLeaf) {
+                throw "Internal error: gguf_smoke selected but GGUF path is missing"
             }
-            $extra.BootModel = 'models\\stories15M.q8_0.gguf'
+            $extra.BootModel = ("models\\{0}" -f $ggufLeaf)
             $extra.ExtraModel = $GgufPath
-            $extra.ExpectedModel = 'models\\stories15M.q8_0.gguf'
+            $extra.ExpectedModel = ("models\\{0}" -f $ggufLeaf)
             $extra.GenMaxTokens = 16
             $extra.GenTemp = 0.8
         }

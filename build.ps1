@@ -3,6 +3,10 @@ param(
 	[ValidateSet('repl')]
 	[string]$Target = 'repl',
 
+	# Optional: bootstrap pinned toolchains (downloaded to tools/_toolchains/, ignored by git).
+	# Does not change the build output; it just makes the tool wrappers available for workflows/CI.
+	[switch]$BootstrapToolchains,
+
 	# Build an image without embedding any model weights.
 	# Useful for release artifacts and for users who want to copy their own model later.
 	[switch]$NoModel,
@@ -17,13 +21,25 @@ param(
 	# Optional additional models to bundle into the image (copied to /models on the FAT partition).
 	# Example:
 	#   .\build.ps1 -ModelBin stories110M.bin -ExtraModelBins @('my-instruct.bin','another.bin')
-	[string[]]$ExtraModelBins = @()
+	[string[]]$ExtraModelBins = @(),
+
+	# Optional: force a specific image size (MiB). Defaults to auto-sizing.
+	# Example: create a >1GB image for testing
+	#   .\build.ps1 -NoModel -ImageSizeMB 1200
+	[ValidateRange(0, 65536)]
+	[int]$ImageSizeMB = 0
 )
 
 $ErrorActionPreference = 'Stop'
 
+# Be cwd-independent: always run relative operations from the script folder.
+Set-Location -LiteralPath $PSScriptRoot
+
 Write-Host "`n[Build] Build + Image (WSL)" -ForegroundColor Cyan
 Write-Host "  Target: $Target" -ForegroundColor Gray
+if ($BootstrapToolchains) {
+	Write-Host "  Tools:  bootstrap pinned toolchains" -ForegroundColor Gray
+}
 if ($NoModel) {
 	Write-Host "  Model:  (no-model image)" -ForegroundColor Gray
 } else {
@@ -32,6 +48,10 @@ if ($NoModel) {
 
 if ($ExtraModelBins.Count -gt 0) {
 	Write-Host "  Extra:  $($ExtraModelBins -join ', ')" -ForegroundColor Gray
+}
+
+if ($ImageSizeMB -gt 0) {
+	Write-Host "  Image:  ${ImageSizeMB}MB (forced)" -ForegroundColor Gray
 }
 
 # Fail fast with a helpful message when weights are not present.
@@ -117,6 +137,15 @@ function Update-SplashBmpFromPng-BestEffort {
 
 Update-SplashBmpFromPng-BestEffort
 
+if ($BootstrapToolchains) {
+	Write-Host "[Build] Bootstrapping toolchains (pinned)" -ForegroundColor Gray
+	& (Join-Path $PSScriptRoot 'tools\get-cosmos.ps1')
+	& (Join-Path $PSScriptRoot 'tools\get-redbean.ps1')
+	& (Join-Path $PSScriptRoot 'tools\get-ape.ps1')
+	& (Join-Path $PSScriptRoot 'tools\get-cosmocc.ps1')
+	& (Join-Path $PSScriptRoot 'tools\get-apelink.ps1')
+}
+
 function ConvertTo-WslPath([string]$winPath) {
 	# Deterministic conversion (avoids occasional unreliable `wslpath` output).
 	$norm = ($winPath -replace '\\','/')
@@ -137,6 +166,7 @@ $buildStartUtc = (Get-Date).ToUniversalTime()
 # Build + image creation in WSL (single shot). Using -lc avoids temp-script pitfalls.
 $noModelFlag = if ($NoModel) { '1' } else { '0' }
 $modelSpec = if ($NoModel) { 'nomodel' } else { $ModelBin }
+$imgMbClause = if ($ImageSizeMB -gt 0) { ("IMG_MB='{0}'" -f $ImageSizeMB) } else { '' }
 $bash = @(
 	'set -e'
 	("cd '{0}'" -f $wslRepo)
@@ -145,7 +175,7 @@ $bash = @(
 	'make repl'
 	# Force the EFI payload used by the image builder to be the freshly built one.
 	# Force NO_MODEL explicitly to avoid inheriting from the user's environment.
-	("NO_MODEL='{0}' EFI_BIN='llama2.efi' MODEL='{1}' MODEL_BIN='{1}' EXTRA_MODELS='{2}' ./create-boot-mtools.sh" -f $noModelFlag, $modelSpec, $extra)
+	("{3} NO_MODEL='{0}' EFI_BIN='llama2.efi' MODEL='{1}' MODEL_BIN='{1}' EXTRA_MODELS='{2}' ./create-boot-mtools.sh" -f $noModelFlag, $modelSpec, $extra, $imgMbClause)
 ) -join '; '
 
 wsl bash -lc $bash
@@ -177,8 +207,8 @@ if ($img) {
 
 	# Prune older images to avoid accidentally running a stale image.
 	# Best-effort: if an older image is locked (e.g., by QEMU), deletion may fail.
-	$allImgs = Get-ChildItem -Path $PSScriptRoot -Filter 'llm-baremetal-boot*.img' -ErrorAction SilentlyContinue |
-		Sort-Object LastWriteTime -Descending
+	$allImgs = @(Get-ChildItem -Path $PSScriptRoot -Filter 'llm-baremetal-boot*.img' -ErrorAction SilentlyContinue |
+		Sort-Object LastWriteTime -Descending)
 	if ($allImgs -and $allImgs.Count -gt 1) {
 		foreach ($old in ($allImgs | Select-Object -Skip 1)) {
 			try {

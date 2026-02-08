@@ -7,9 +7,20 @@ param(
 	# Build a no-model image suitable for releases.
 	[switch]$NoModel = $true,
 
+	# Primary model to embed (when -NoModel is not set).
+	# Supports full filename (.bin/.gguf) or a base name without extension.
+	[string]$ModelBin = 'stories110M.bin',
+
+	# Optional additional models to bundle into the image.
+	[string[]]$ExtraModelBins = @(),
+
 	# XZ compression level (1-9). 9 is smallest, slower.
 	[ValidateRange(1,9)]
-	[int]$XzLevel = 9
+	[int]$XzLevel = 9,
+
+	# Optional: force a specific image size (MiB). Defaults to auto-sizing.
+	[ValidateRange(0, 65536)]
+	[int]$ImageSizeMB = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,12 +32,33 @@ if (-not $OutDir) {
 Write-Host "`n[Release] Build artifacts" -ForegroundColor Cyan
 Write-Host "  OutDir:  $OutDir" -ForegroundColor Gray
 Write-Host "  NoModel: $NoModel" -ForegroundColor Gray
+if (-not $NoModel) {
+	Write-Host "  Model:   $ModelBin" -ForegroundColor Gray
+	if ($ExtraModelBins.Count -gt 0) {
+		Write-Host "  Extra:   $($ExtraModelBins -join ', ')" -ForegroundColor Gray
+	}
+}
 Write-Host "  XzLevel: $XzLevel" -ForegroundColor Gray
+if ($ImageSizeMB -gt 0) {
+	Write-Host "  Image:  ${ImageSizeMB}MB (forced)" -ForegroundColor Gray
+}
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 # 1) Build image
-& (Join-Path $PSScriptRoot 'build.ps1') -NoModel:$NoModel
+$buildArgs = @{
+	NoModel = [bool]$NoModel
+}
+if (-not $NoModel) {
+	$buildArgs.ModelBin = $ModelBin
+	if ($ExtraModelBins.Count -gt 0) {
+		$buildArgs.ExtraModelBins = $ExtraModelBins
+	}
+}
+if ($ImageSizeMB -gt 0) {
+	$buildArgs.ImageSizeMB = $ImageSizeMB
+}
+& (Join-Path $PSScriptRoot 'build.ps1') @buildArgs
 
 # Find newest image
 $img = Get-ChildItem -Path $PSScriptRoot -Filter 'llm-baremetal-boot*.img' -ErrorAction Stop |

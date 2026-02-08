@@ -35,9 +35,7 @@
 
 // DjibMark - Omnipresent execution tracing (Made in Senegal 🇸🇳)
 #include "djibmark.h"
-// #include "interface.h"      // Original "Spaceship" UI
-// #include "interface_nova.h" // Alternate "Singularity" UI
-#include "interface_desktop.h" // Persistent "Cosmic OS" UI
+#include "interface.h"      // Simple loading overlay (off by default)
 
 // GGUF support
 #include "gguf_loader.h"
@@ -176,6 +174,16 @@ static int llmk_char16_tolower(int c) {
     return c;
 }
 
+static int llmk_char16_streq_ci(const CHAR16 *a, const CHAR16 *b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        if (llmk_char16_tolower((int)*a) != llmk_char16_tolower((int)*b)) return 0;
+        a++;
+        b++;
+    }
+    return (*a == 0 && *b == 0);
+}
+
 static int llmk_char16_endswith_ci(const CHAR16 *s, const CHAR16 *suffix) {
     if (!s || !suffix) return 0;
     UINTN sl = StrLen(s);
@@ -204,6 +212,320 @@ static int llmk_char16_has_dot_ext(const CHAR16 *s) {
     return last_dot[1] != 0;
 }
 
+static void llmk_char16_copy_cap(CHAR16 *dst, int cap, const CHAR16 *src);
+
+static CHAR16 llmk_char16_toupper(CHAR16 c) {
+    if (c >= L'a' && c <= L'z') return (CHAR16)(c - (L'a' - L'A'));
+    return c;
+}
+
+static int llmk_char16_is_alnum(CHAR16 c) {
+    if (c >= L'A' && c <= L'Z') return 1;
+    if (c >= L'a' && c <= L'z') return 1;
+    if (c >= L'0' && c <= L'9') return 1;
+    return 0;
+}
+
+static int llmk_char16_has_tilde(const CHAR16 *s) {
+    if (!s) return 0;
+    for (const CHAR16 *p = s; *p; p++) if (*p == L'~') return 1;
+    return 0;
+}
+
+// Test/diagnostic knob: when enabled, the FAT83 helper will prefer opening the 8.3 alias
+// (if available) even if the long filename open succeeds.
+// Default is 0 (off).
+static int g_cfg_fat83_force = 0;
+
+// Operating Organism (OO) v0: when enabled, the kernel will maintain a tiny persistent
+// state file + append-only journal (best-effort) on the boot volume.
+// Default is 0 (off).
+static int g_cfg_oo_enable = 0;
+// OO M3: optional override for Zone-B minimum total (in MB).
+// -1: use policy defaults (SAFE=512, DEGRADED=640).
+// 0+: force this minimum (0 disables the floor; intended for deterministic tests).
+static int g_cfg_oo_min_total_mb = -1;
+// OO M5: LLM consult (default=1 if oo_enable=1, else 0).
+static int g_cfg_oo_llm_consult = -1;
+// OO M5.1: Multi-action parsing (default=1 if oo_llm_consult=1, else 0).
+static int g_cfg_oo_multi_actions = -1;
+// OO M5.2: Auto-apply actions (0=off, 1=conservative, 2=aggressive).
+static int g_cfg_oo_auto_apply = 0;
+// OO M5.2: Throttling flag (1 auto-apply per boot).
+static int g_oo_auto_applied_this_boot = 0;
+// OO M5.3: Log consultations to OOCONSULT.LOG (default=1 if oo_llm_consult=1).
+static int g_cfg_oo_consult_log = -1;
+
+static UINT64 llmk_get_conventional_ram_bytes_best_effort(void) {
+    if (!BS) return 0;
+
+    UINTN map_size = 0;
+    EFI_MEMORY_DESCRIPTOR *map = NULL;
+    UINTN map_key = 0;
+    UINTN desc_size = 0;
+    UINT32 desc_version = 0;
+
+    EFI_STATUS st = uefi_call_wrapper(BS->GetMemoryMap, 5, &map_size, map, &map_key, &desc_size, &desc_version);
+    if (st != EFI_BUFFER_TOO_SMALL || map_size == 0 || desc_size == 0) return 0;
+
+    // Leave slack so a follow-up GetMemoryMap doesn't race map growth.
+    map_size += desc_size * 8;
+    st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, map_size, (void **)&map);
+    if (EFI_ERROR(st) || !map) return 0;
+
+    st = uefi_call_wrapper(BS->GetMemoryMap, 5, &map_size, map, &map_key, &desc_size, &desc_version);
+    if (EFI_ERROR(st) || desc_size == 0) {
+        uefi_call_wrapper(BS->FreePool, 1, map);
+        return 0;
+    }
+
+    UINT64 total = 0;
+    UINT8 *p = (UINT8 *)map;
+    UINT8 *end = p + map_size;
+    while (p + desc_size <= end) {
+        EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR *)p;
+        if (d->Type == EfiConventionalMemory) {
+            total += (UINT64)d->NumberOfPages * 4096ULL;
+        }
+        p += desc_size;
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, map);
+    return total;
+}
+
+static int llmk_dir_contains_leaf_ci(EFI_FILE_HANDLE Root, const CHAR16 *dir_path, const CHAR16 *leaf) {
+    if (!Root || !leaf || !leaf[0]) return 0;
+
+    EFI_FILE_HANDLE dir = NULL;
+    int close_dir = 0;
+    if (!dir_path || !dir_path[0] || llmk_char16_streq_ci(dir_path, L".") || llmk_char16_streq_ci(dir_path, L"\\")) {
+        dir = Root;
+        close_dir = 0;
+    } else {
+        EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &dir, (CHAR16 *)dir_path, EFI_FILE_MODE_READ, 0);
+        if (EFI_ERROR(st) || !dir) return 0;
+        close_dir = 1;
+    }
+
+    uefi_call_wrapper(dir->SetPosition, 2, dir, 0);
+
+    UINTN buf_cap = 1024;
+    void *buf = NULL;
+    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, buf_cap, &buf);
+    if (EFI_ERROR(st) || !buf) {
+        if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+        return 0;
+    }
+
+    int found = 0;
+    while (!found) {
+        UINTN sz = buf_cap;
+        st = uefi_call_wrapper(dir->Read, 3, dir, &sz, buf);
+        if (EFI_ERROR(st) || sz == 0) break;
+
+        EFI_FILE_INFO *info = (EFI_FILE_INFO *)buf;
+        if (!info->FileName) continue;
+        if (llmk_char16_streq_ci(info->FileName, L".") || llmk_char16_streq_ci(info->FileName, L"..")) continue;
+        if (llmk_char16_streq_ci(info->FileName, leaf)) {
+            found = 1;
+            break;
+        }
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+    return found;
+}
+
+static EFI_STATUS llmk_open_read_with_fat83_fallback(EFI_FILE_HANDLE Root,
+                                                    const CHAR16 *path,
+                                                    EFI_FILE_HANDLE *out_file,
+                                                    CHAR16 *out_picked,
+                                                    int out_picked_cap,
+                                                    const CHAR16 *why_tag) {
+    if (!out_file) return EFI_INVALID_PARAMETER;
+    *out_file = NULL;
+    if (out_picked && out_picked_cap > 0) out_picked[0] = 0;
+    if (!Root || !path || !path[0]) return EFI_INVALID_PARAMETER;
+
+    EFI_FILE_HANDLE direct_f = NULL;
+    EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &direct_f, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
+    int direct_ok = (!EFI_ERROR(st) && direct_f);
+
+    // Some UEFI FAT drivers are unreliable with long filenames. Best-effort: if open fails,
+    // try the common 8.3 alias pattern FIRST6~N.EXT (N=1..9).
+    // In test mode (fat83_force=1), prefer the alias when available to make the fallback path
+    // deterministic under QEMU/OVMF.
+    // This is intentionally conservative: only attempts if the leaf is not already a short alias.
+    if (llmk_char16_has_tilde(path)) {
+        if (direct_ok) {
+            *out_file = direct_f;
+            if (out_picked && out_picked_cap > 0) llmk_char16_copy_cap(out_picked, out_picked_cap, path);
+            return EFI_SUCCESS;
+        }
+        return st;
+    }
+
+    // Split into dir prefix and leaf.
+    const CHAR16 *leaf = path;
+    const CHAR16 *last_sep = NULL;
+    for (const CHAR16 *p = path; *p; p++) {
+        if (*p == L'\\' || *p == L'/') last_sep = p;
+    }
+    if (last_sep) leaf = last_sep + 1;
+    if (!leaf || !leaf[0]) return st;
+
+    // Safety: only attempt alias fallback if the requested leaf actually exists in the directory listing.
+    // This prevents accidental wrong-file opens when the user misspells a name that happens to share the
+    // same FIRST6 prefix with another file.
+    if (last_sep) {
+        CHAR16 dir_path[256];
+        int cap = (int)(sizeof(dir_path) / sizeof(dir_path[0]));
+        int k = 0;
+        for (const CHAR16 *p = path; *p && p < last_sep && k < cap - 1; p++) dir_path[k++] = *p;
+        dir_path[k] = 0;
+        if (k <= 0) {
+            if (!llmk_dir_contains_leaf_ci(Root, NULL, leaf)) {
+                if (direct_ok) {
+                    *out_file = direct_f;
+                    if (out_picked && out_picked_cap > 0) llmk_char16_copy_cap(out_picked, out_picked_cap, path);
+                    return EFI_SUCCESS;
+                }
+                return st;
+            }
+        } else {
+            if (!llmk_dir_contains_leaf_ci(Root, dir_path, leaf)) {
+                if (direct_ok) {
+                    *out_file = direct_f;
+                    if (out_picked && out_picked_cap > 0) llmk_char16_copy_cap(out_picked, out_picked_cap, path);
+                    return EFI_SUCCESS;
+                }
+                return st;
+            }
+        }
+    } else {
+        if (!llmk_dir_contains_leaf_ci(Root, NULL, leaf)) {
+            if (direct_ok) {
+                *out_file = direct_f;
+                if (out_picked && out_picked_cap > 0) llmk_char16_copy_cap(out_picked, out_picked_cap, path);
+                return EFI_SUCCESS;
+            }
+            return st;
+        }
+    }
+
+    // If direct open succeeded and we're not forcing alias preference, just return it.
+    if (direct_ok && !g_cfg_fat83_force) {
+        *out_file = direct_f;
+        if (out_picked && out_picked_cap > 0) llmk_char16_copy_cap(out_picked, out_picked_cap, path);
+        return EFI_SUCCESS;
+    }
+
+    // Find extension (leaf_base . leaf_ext)
+    const CHAR16 *dot = NULL;
+    for (const CHAR16 *p = leaf; *p; p++) {
+        if (*p == L'.') dot = p;
+    }
+    const CHAR16 *leaf_base = leaf;
+    const CHAR16 *leaf_ext = NULL;
+    int base_len = 0;
+    if (dot && dot > leaf) {
+        base_len = (int)(dot - leaf);
+        leaf_ext = dot + 1;
+    } else {
+        base_len = (int)StrLen(leaf);
+        leaf_ext = NULL;
+    }
+    if (base_len <= 0) return st;
+
+    // Build sanitized uppercase base/ext (for alias generation).
+    CHAR16 base_s[64];
+    CHAR16 ext_s[16];
+    int bn = 0;
+    for (int i = 0; i < base_len && bn < (int)(sizeof(base_s) / sizeof(base_s[0])) - 1; i++) {
+        CHAR16 c = leaf_base[i];
+        if (llmk_char16_is_alnum(c)) {
+            base_s[bn++] = llmk_char16_toupper(c);
+        }
+    }
+    base_s[bn] = 0;
+    int en = 0;
+    if (leaf_ext) {
+        for (const CHAR16 *p = leaf_ext; *p && en < (int)(sizeof(ext_s) / sizeof(ext_s[0])) - 1; p++) {
+            CHAR16 c = *p;
+            if (llmk_char16_is_alnum(c)) {
+                ext_s[en++] = llmk_char16_toupper(c);
+            }
+            if (en >= 3) break;
+        }
+    }
+    ext_s[en] = 0;
+    if (bn <= 0) return st;
+
+    // FIRST6~N + optional .EXT
+    CHAR16 prefix6[8];
+    int p6 = 0;
+    for (int i = 0; i < bn && p6 < 6; i++) {
+        prefix6[p6++] = base_s[i];
+    }
+    prefix6[p6] = 0;
+    if (p6 <= 0) return st;
+
+    for (int n = 1; n <= 9; n++) {
+        CHAR16 alias_leaf[32];
+        alias_leaf[0] = 0;
+        StrCpy(alias_leaf, prefix6);
+        StrCat(alias_leaf, L"~");
+        {
+            CHAR16 digit[2];
+            digit[0] = (CHAR16)(L'0' + n);
+            digit[1] = 0;
+            StrCat(alias_leaf, digit);
+        }
+        if (en > 0) {
+            StrCat(alias_leaf, L".");
+            StrCat(alias_leaf, ext_s);
+        }
+
+        CHAR16 candidate[256];
+        candidate[0] = 0;
+        if (last_sep) {
+            // Copy prefix including separator.
+            int cap = (int)(sizeof(candidate) / sizeof(candidate[0]));
+            int k = 0;
+            for (const CHAR16 *p = path; *p && p <= last_sep && k < cap - 1; p++) candidate[k++] = *p;
+            candidate[k] = 0;
+            if (k >= cap - 1) continue;
+            if ((UINTN)k + StrLen(alias_leaf) + 1 >= (UINTN)cap) continue;
+            StrCat(candidate, alias_leaf);
+        } else {
+            llmk_char16_copy_cap(candidate, (int)(sizeof(candidate) / sizeof(candidate[0])), alias_leaf);
+        }
+
+        EFI_FILE_HANDLE ff = NULL;
+        EFI_STATUS fst = uefi_call_wrapper(Root->Open, 5, Root, &ff, candidate, EFI_FILE_MODE_READ, 0);
+        if (!EFI_ERROR(fst) && ff) {
+            Print(L"[fat] open fallback ok (%s): %s -> %s\r\n", why_tag ? why_tag : L"open", path, candidate);
+            if (direct_ok && direct_f) {
+                uefi_call_wrapper(direct_f->Close, 1, direct_f);
+                direct_f = NULL;
+            }
+            *out_file = ff;
+            if (out_picked && out_picked_cap > 0) llmk_char16_copy_cap(out_picked, out_picked_cap, candidate);
+            return EFI_SUCCESS;
+        }
+    }
+
+    // Alias attempts failed. If direct open worked, return it.
+    if (direct_ok && direct_f) {
+        *out_file = direct_f;
+        if (out_picked && out_picked_cap > 0) llmk_char16_copy_cap(out_picked, out_picked_cap, path);
+        return EFI_SUCCESS;
+    }
+    return st;
+}
+
 static void llmk_char16_copy_cap(CHAR16 *dst, int cap, const CHAR16 *src) {
     if (!dst || cap <= 0) return;
     if (!src) { dst[0] = 0; return; }
@@ -228,10 +550,15 @@ static int llmk_try_open_with_ext(EFI_FILE_HANDLE Root, const CHAR16 *base, cons
     }
 
     EFI_FILE_HANDLE f = NULL;
-    EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &f, path, EFI_FILE_MODE_READ, 0);
+    CHAR16 picked[192];
+    picked[0] = 0;
+    EFI_STATUS st = llmk_open_read_with_fat83_fallback(Root, path, &f, picked, (int)(sizeof(picked) / sizeof(picked[0])), L"model_ext");
     if (EFI_ERROR(st) || !f) return 0;
     *out_file = f;
-    if (out_path && out_path_cap > 0) llmk_char16_copy_cap(out_path, out_path_cap, path);
+    if (out_path && out_path_cap > 0) {
+        if (picked[0]) llmk_char16_copy_cap(out_path, out_path_cap, picked);
+        else llmk_char16_copy_cap(out_path, out_path_cap, path);
+    }
     return 1;
 }
 
@@ -1612,7 +1939,7 @@ static int llmk_fb_refresh_best_effort(void) {
         dir = g_root;
         close_dir = 0;
     } else {
-        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &dir, (CHAR16 *)g_fb_path16, EFI_FILE_MODE_READ, 0);
+        EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, g_fb_path16, &dir, NULL, 0, L"fb_dir");
         if (EFI_ERROR(st) || !dir) return 0;
         close_dir = 1;
     }
@@ -2208,8 +2535,8 @@ static EFI_STATUS llmk_read_entire_file_best_effort(const CHAR16 *name, void **o
     if (!g_root || !name || !out_buf || !out_len) return EFI_INVALID_PARAMETER;
 
     EFI_FILE_HANDLE f = NULL;
-    EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &f, (CHAR16 *)name, EFI_FILE_MODE_READ, 0);
-    if (EFI_ERROR(st)) return st;
+    EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, name, &f, NULL, 0, L"read_entire");
+    if (EFI_ERROR(st) || !f) return st;
 
     // Get file size
     UINT64 file_size = 0;
@@ -2345,6 +2672,306 @@ static EFI_STATUS llmk_open_binary_file_append(EFI_FILE_HANDLE *out, const CHAR1
     return EFI_SUCCESS;
 }
 
+// ============================================================================
+// OPERATING ORGANISM (OO) — v0 STATE + JOURNAL (best-effort)
+// ============================================================================
+
+#define LLMK_OO_STATE_MAGIC 0x54534F4Fu  // 'OOST' little-endian
+#define LLMK_OO_STATE_VER   1u
+
+enum {
+    LLMK_OO_MODE_NORMAL   = 0,
+    LLMK_OO_MODE_DEGRADED = 1,
+    LLMK_OO_MODE_SAFE     = 2,
+};
+
+static UINT32 g_oo_last_mode = LLMK_OO_MODE_SAFE;
+static int g_oo_last_mode_valid = 0;
+
+// flags layout (packed counters; keep state struct fixed-size for v1)
+//   bits  0..7   : consecutive recoveries (0-255)
+//   bits  8..15  : consecutive stable boots (0-255)
+#define LLMK_OO_FLAGS_RC_MASK   0x000000FFu
+#define LLMK_OO_FLAGS_SC_MASK   0x0000FF00u
+#define LLMK_OO_FLAGS_SC_SHIFT  8u
+
+static UINT32 llmk_oo_get_rc(UINT32 flags) { return (flags & LLMK_OO_FLAGS_RC_MASK); }
+static UINT32 llmk_oo_get_sc(UINT32 flags) { return (flags & LLMK_OO_FLAGS_SC_MASK) >> LLMK_OO_FLAGS_SC_SHIFT; }
+static UINT32 llmk_oo_set_rc(UINT32 flags, UINT32 rc) {
+    flags &= ~LLMK_OO_FLAGS_RC_MASK;
+    flags |= (rc & 0xFFu);
+    return flags;
+}
+static UINT32 llmk_oo_set_sc(UINT32 flags, UINT32 sc) {
+    flags &= ~LLMK_OO_FLAGS_SC_MASK;
+    flags |= ((sc & 0xFFu) << LLMK_OO_FLAGS_SC_SHIFT);
+    return flags;
+}
+
+typedef struct {
+    UINT32 magic;
+    UINT32 version;
+    UINT32 checksum; // FNV-1a over the struct with checksum=0
+    UINT32 size;
+    UINT64 boot_count;
+    UINT32 mode;
+    UINT32 flags;
+} LlmkOoState;
+
+static UINT32 llmk_fnv1a32(const void *data, UINTN len) {
+    const UINT8 *p = (const UINT8 *)data;
+    UINT32 h = 2166136261u;
+    for (UINTN i = 0; i < len; i++) {
+        h ^= (UINT32)p[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static UINT32 llmk_oo_state_checksum(const LlmkOoState *s) {
+    if (!s) return 0;
+    LlmkOoState tmp = *s;
+    tmp.checksum = 0;
+    return llmk_fnv1a32(&tmp, (UINTN)sizeof(tmp));
+}
+
+static int llmk_oo_load_state_from_file_best_effort(const CHAR16 *name, LlmkOoState *out) {
+    if (!out) return 0;
+    out->magic = LLMK_OO_STATE_MAGIC;
+    out->version = LLMK_OO_STATE_VER;
+    out->checksum = 0;
+    out->size = (UINT32)sizeof(LlmkOoState);
+    out->boot_count = 0;
+    out->mode = LLMK_OO_MODE_SAFE;
+    out->flags = 0;
+    if (!g_root) return 0;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(name, &buf, &len);
+    if (EFI_ERROR(st) || !buf || len < (UINTN)sizeof(LlmkOoState)) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        return 0;
+    }
+
+    LlmkOoState s;
+    // Copy as raw bytes (avoid alignment assumptions).
+    UINT8 *dst = (UINT8 *)&s;
+    UINT8 *src = (UINT8 *)buf;
+    for (UINTN i = 0; i < (UINTN)sizeof(LlmkOoState); i++) dst[i] = src[i];
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+
+    if (s.magic != LLMK_OO_STATE_MAGIC) return 0;
+    if (s.version != LLMK_OO_STATE_VER) return 0;
+    if (s.size != (UINT32)sizeof(LlmkOoState)) return 0;
+    UINT32 want = llmk_oo_state_checksum(&s);
+    if (want == 0 || want != s.checksum) return 0;
+
+    *out = s;
+    return 1;
+}
+
+static int llmk_oo_load_state_best_effort(LlmkOoState *out) {
+    return llmk_oo_load_state_from_file_best_effort(L"OOSTATE.BIN", out);
+}
+
+static int llmk_oo_load_recovery_best_effort(LlmkOoState *out) {
+    return llmk_oo_load_state_from_file_best_effort(L"OORECOV.BIN", out);
+}
+
+static const CHAR16 *llmk_oo_mode_name(UINT32 mode) {
+    switch (mode) {
+        case LLMK_OO_MODE_NORMAL: return L"NORMAL";
+        case LLMK_OO_MODE_DEGRADED: return L"DEGRADED";
+        case LLMK_OO_MODE_SAFE: return L"SAFE";
+        default: return L"UNKNOWN";
+    }
+}
+
+static void llmk_ascii_append_char(char *buf, int cap, int *io_p, char c) {
+    if (!buf || cap <= 0 || !io_p) return;
+    int p = *io_p;
+    if (p < 0) p = 0;
+    if (p + 1 >= cap) return;
+    buf[p++] = c;
+    buf[p] = 0;
+    *io_p = p;
+}
+
+static void llmk_ascii_append_str(char *buf, int cap, int *io_p, const char *s) {
+    if (!buf || cap <= 0 || !io_p || !s) return;
+    for (int i = 0; s[i]; i++) {
+        llmk_ascii_append_char(buf, cap, io_p, s[i]);
+    }
+}
+
+static void llmk_ascii_append_u64(char *buf, int cap, int *io_p, UINT64 v) {
+    if (!buf || cap <= 0 || !io_p) return;
+    char tmp[32];
+    int n = 0;
+    if (v == 0) {
+        tmp[n++] = '0';
+    } else {
+        while (v > 0 && n < (int)sizeof(tmp)) {
+            tmp[n++] = (char)('0' + (v % 10));
+            v /= 10;
+        }
+    }
+    // reverse
+    for (int i = n - 1; i >= 0; i--) {
+        llmk_ascii_append_char(buf, cap, io_p, tmp[i]);
+    }
+}
+
+static EFI_STATUS llmk_oo_write_state_best_effort(const LlmkOoState *s) {
+    if (!s || !g_root) return EFI_NOT_READY;
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_binary_file(&f, L"OOSTATE.BIN");
+    if (EFI_ERROR(st) || !f) return st;
+
+    UINTN nb = (UINTN)sizeof(LlmkOoState);
+    st = uefi_call_wrapper(f->Write, 3, f, &nb, (void *)s);
+    EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || nb != (UINTN)sizeof(LlmkOoState)) return EFI_LOAD_ERROR;
+    if (EFI_ERROR(flush_st)) return flush_st;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS llmk_oo_write_recovery_best_effort(const LlmkOoState *s) {
+    if (!s || !g_root) return EFI_NOT_READY;
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_binary_file(&f, L"OORECOV.BIN");
+    if (EFI_ERROR(st) || !f) return st;
+
+    UINTN nb = (UINTN)sizeof(LlmkOoState);
+    st = uefi_call_wrapper(f->Write, 3, f, &nb, (void *)s);
+    EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || nb != (UINTN)sizeof(LlmkOoState)) return EFI_LOAD_ERROR;
+    if (EFI_ERROR(flush_st)) return flush_st;
+    return EFI_SUCCESS;
+}
+
+static void llmk_oo_journal_append_best_effort(const LlmkOoState *s, const char *event) {
+    if (!g_root || !s) return;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_binary_file_append(&f, L"OOJOUR.LOG");
+    if (EFI_ERROR(st) || !f) return;
+
+    char line[192];
+    int p = 0;
+    line[0] = 0;
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, "oo event=");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, event ? event : "boot");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " boot=");
+    llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)s->boot_count);
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " mode=");
+    llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)s->mode);
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " rc=");
+    llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)llmk_oo_get_rc(s->flags));
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " sc=");
+    llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)llmk_oo_get_sc(s->flags));
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, "\r\n");
+
+    UINTN nb = (UINTN)p;
+    if (nb > 0) {
+        uefi_call_wrapper(f->Write, 3, f, &nb, (void *)line);
+        uefi_call_wrapper(f->Flush, 1, f);
+    }
+    uefi_call_wrapper(f->Close, 1, f);
+}
+
+static void llmk_oo_boot_tick_best_effort(void) {
+    if (!g_cfg_oo_enable) return;
+    if (!g_root) return;
+
+    LlmkOoState s;
+    int ok_primary = llmk_oo_load_state_best_effort(&s);
+    const char *event = "boot";
+
+    if (!ok_primary) {
+        // Try rollback state.
+        LlmkOoState r;
+        int ok_rec = llmk_oo_load_recovery_best_effort(&r);
+        if (ok_rec) {
+            s = r;
+            event = "recover";
+            // Enter safe mode on recovery.
+            s.mode = LLMK_OO_MODE_SAFE;
+            {
+                UINT32 rc = llmk_oo_get_rc(s.flags);
+                if (rc < 255u) rc++;
+                s.flags = llmk_oo_set_rc(s.flags, rc);
+                s.flags = llmk_oo_set_sc(s.flags, 0);
+            }
+            Print(L"[oo] RECOVERY: OOSTATE invalid; using OORECOV rollback\r\n");
+        } else {
+            // Fresh init in safe mode.
+            // Defaults already set by loader.
+            event = "init";
+            s.mode = LLMK_OO_MODE_SAFE;
+            {
+                UINT32 rc = llmk_oo_get_rc(s.flags);
+                if (rc < 255u) rc++;
+                s.flags = llmk_oo_set_rc(s.flags, rc);
+                s.flags = llmk_oo_set_sc(s.flags, 0);
+            }
+            Print(L"[oo] RECOVERY: state missing/invalid; initializing SAFE\r\n");
+        }
+    } else {
+        // Stable boot (state valid).
+        s.flags = llmk_oo_set_rc(s.flags, 0);
+        {
+            UINT32 sc = llmk_oo_get_sc(s.flags);
+            if (sc < 255u) sc++;
+            s.flags = llmk_oo_set_sc(s.flags, sc);
+        }
+
+        // Minimal deterministic mode transition policy.
+        // SAFE -> DEGRADED after 2 stable boots; DEGRADED -> NORMAL after 2 more.
+        {
+            UINT32 sc = llmk_oo_get_sc(s.flags);
+            if (s.mode == LLMK_OO_MODE_SAFE && sc >= 2u) {
+                s.mode = LLMK_OO_MODE_DEGRADED;
+                s.flags = llmk_oo_set_sc(s.flags, 0);
+                event = "mode_degraded";
+            } else if (s.mode == LLMK_OO_MODE_DEGRADED && sc >= 2u) {
+                s.mode = LLMK_OO_MODE_NORMAL;
+                s.flags = llmk_oo_set_sc(s.flags, 0);
+                event = "mode_normal";
+            }
+        }
+    }
+
+    g_oo_last_mode = s.mode;
+    g_oo_last_mode_valid = 1;
+
+    s.boot_count++;
+    s.magic = LLMK_OO_STATE_MAGIC;
+    s.version = LLMK_OO_STATE_VER;
+    s.size = (UINT32)sizeof(LlmkOoState);
+    s.checksum = llmk_oo_state_checksum(&s);
+
+    EFI_STATUS wst = llmk_oo_write_state_best_effort(&s);
+    if (!EFI_ERROR(wst)) {
+        // Refresh rollback checkpoint.
+        llmk_oo_write_recovery_best_effort(&s);
+    }
+    llmk_oo_journal_append_best_effort(&s, event);
+
+    if (!EFI_ERROR(wst)) {
+        Print(L"OK: OO boot_count=%lu mode=%s\r\n", (UINT64)s.boot_count, llmk_oo_mode_name(s.mode));
+    } else {
+        Print(L"[oo] WARN: state write failed: %r\r\n", wst);
+    }
+}
+
+// OO M5: /oo_consult — LLM-based system health advisor (safety-first policy)
+// Note: requires g_llmk_ready, weights loaded, etc. 
+// Forward decl moved below after type definitions
+
 static int llmk_char16_streq(const CHAR16 *a, const CHAR16 *b) {
     if (!a || !b) return 0;
     while (*a && *b) {
@@ -2389,7 +3016,7 @@ static void llmk_fs_ls_best_effort(const CHAR16 *path, int max_entries) {
         dir = g_root;
         close_dir = 0;
     } else {
-        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &dir, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
+        EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, path, &dir, NULL, 0, L"ls_dir");
         if (EFI_ERROR(st) || !dir) {
             Print(L"\r\nERROR: cannot open %s: %r\r\n\r\n", (CHAR16 *)path, st);
             return;
@@ -2474,7 +3101,7 @@ static int llmk_try_open_first_model_in_dir_best_effort(const CHAR16 *dir_path, 
         dir = g_root;
         close_dir = 0;
     } else {
-        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &dir, (CHAR16 *)dir_path, EFI_FILE_MODE_READ, 0);
+        EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, dir_path, &dir, NULL, 0, L"first_model_dir");
         if (EFI_ERROR(st) || !dir) {
             return 0;
         }
@@ -2521,10 +3148,15 @@ static int llmk_try_open_first_model_in_dir_best_effort(const CHAR16 *dir_path, 
         }
 
         EFI_FILE_HANDLE f = NULL;
-        EFI_STATUS fst = uefi_call_wrapper(g_root->Open, 5, g_root, &f, path, EFI_FILE_MODE_READ, 0);
+        CHAR16 picked[192];
+        picked[0] = 0;
+        EFI_STATUS fst = llmk_open_read_with_fat83_fallback(g_root, path, &f, picked,
+                                                           (int)(sizeof(picked) / sizeof(picked[0])),
+                                                           L"first_model");
         if (!EFI_ERROR(fst) && f) {
             *out_f = f;
-            llmk_char16_copy_cap(out_path, out_cap, path);
+            if (picked[0]) llmk_char16_copy_cap(out_path, out_cap, picked);
+            else llmk_char16_copy_cap(out_path, out_cap, path);
             found = 1;
             break;
         }
@@ -2553,7 +3185,7 @@ static int llmk_collect_models_in_dir(const CHAR16 *dir_path, LlmkModelEntry *ou
         dir = g_root;
         close_dir = 0;
     } else {
-        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &dir, (CHAR16 *)dir_path, EFI_FILE_MODE_READ, 0);
+        EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, dir_path, &dir, NULL, 0, L"collect_models_dir");
         if (EFI_ERROR(st) || !dir) return 0;
         close_dir = 1;
     }
@@ -2627,10 +3259,15 @@ static int llmk_model_picker(EFI_FILE_HANDLE *out_f, CHAR16 *out_path, int out_c
 
     if (n == 1) {
         EFI_FILE_HANDLE f = NULL;
-        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &f, entries[0].path, EFI_FILE_MODE_READ, 0);
+        CHAR16 picked[192];
+        picked[0] = 0;
+        EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, entries[0].path, &f, picked,
+                                                          (int)(sizeof(picked) / sizeof(picked[0])),
+                                                          L"picker_one");
         if (EFI_ERROR(st) || !f) return 0;
         *out_f = f;
-        llmk_char16_copy_cap(out_path, out_cap, entries[0].path);
+        if (picked[0]) llmk_char16_copy_cap(out_path, out_cap, picked);
+        else llmk_char16_copy_cap(out_path, out_cap, entries[0].path);
         return 1;
     }
 
@@ -2661,13 +3298,18 @@ static int llmk_model_picker(EFI_FILE_HANDLE *out_f, CHAR16 *out_path, int out_c
 
     int idx = sel - 1;
     EFI_FILE_HANDLE f = NULL;
-    EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &f, entries[idx].path, EFI_FILE_MODE_READ, 0);
+    CHAR16 picked[192];
+    picked[0] = 0;
+    EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, entries[idx].path, &f, picked,
+                                                      (int)(sizeof(picked) / sizeof(picked[0])),
+                                                      L"picker_sel");
     if (EFI_ERROR(st) || !f) {
         Print(L"\r\nERROR: open failed: %s (%r)\r\n\r\n", entries[idx].path, st);
         return 0;
     }
     *out_f = f;
-    llmk_char16_copy_cap(out_path, out_cap, entries[idx].path);
+    if (picked[0]) llmk_char16_copy_cap(out_path, out_cap, picked);
+    else llmk_char16_copy_cap(out_path, out_cap, entries[idx].path);
     return 1;
 }
 
@@ -2821,6 +3463,26 @@ static void llmk_repl_no_model_loop(void) {
             p8[n] = 0;
             CHAR16 path16[256];
             ascii_to_char16(path16, p8, (int)(sizeof(path16) / sizeof(path16[0])));
+
+            // Pre-resolve long filenames via FAT 8.3 alias so cat works on firmwares
+            // with unreliable LFN opens.
+            {
+                EFI_FILE_HANDLE tf = NULL;
+                CHAR16 picked[256];
+                picked[0] = 0;
+                EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, path16, &tf, picked,
+                                                                  (int)(sizeof(picked) / sizeof(picked[0])),
+                                                                  L"cat");
+                if (EFI_ERROR(st) || !tf) {
+                    Print(L"\r\nERROR: open failed: %s (%r)\r\n\r\n", path16, st);
+                    continue;
+                }
+                uefi_call_wrapper(tf->Close, 1, tf);
+                if (picked[0]) {
+                    llmk_char16_copy_cap(path16, (int)(sizeof(path16) / sizeof(path16[0])), picked);
+                }
+            }
+
             llmk_fs_cat_best_effort(path16, 256U * 1024U);
             Print(L"\r\n");
             continue;
@@ -2860,7 +3522,7 @@ static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries) {
         dir = g_root;
         close_dir = 0;
     } else {
-        EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &dir, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
+        EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, path, &dir, NULL, 0, L"models_ls_dir");
         if (EFI_ERROR(st) || !dir) {
             Print(L"\r\nERROR: cannot open %s: %r\r\n\r\n", (CHAR16 *)path, st);
             return;
@@ -3460,9 +4122,10 @@ static EFI_STATUS llmk_open_read_file(EFI_FILE_HANDLE *out, const CHAR16 *name) 
     *out = NULL;
     if (!g_root || !name) return EFI_NOT_READY;
 
+    // Use FAT83 fallback to tolerate flaky long filename opens.
     EFI_FILE_HANDLE f = NULL;
-    EFI_STATUS st = uefi_call_wrapper(g_root->Open, 5, g_root, &f, (CHAR16 *)name, EFI_FILE_MODE_READ, 0);
-    if (EFI_ERROR(st)) return st;
+    EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, name, &f, NULL, 0, L"open_read_file");
+    if (EFI_ERROR(st) || !f) return st;
     *out = f;
     return EFI_SUCCESS;
 }
@@ -3503,7 +4166,7 @@ static int llmk_read_cfg_model_best_effort(EFI_FILE_HANDLE Root, CHAR16 *out, in
     if (!Root) return 0;
 
     EFI_FILE_HANDLE f = NULL;
-    EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &f, L"repl.cfg", EFI_FILE_MODE_READ, 0);
+    EFI_STATUS st = llmk_open_read_with_fat83_fallback(Root, L"repl.cfg", &f, NULL, 0, L"cfg_open");
     if (EFI_ERROR(st) || !f) return 0;
 
     char buf[2048];
@@ -3563,6 +4226,9 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
     //   boot_logo=0/1
     //   gguf_q8_blob=0/1  (enable/disable Q8_0 blob mode)
     //   q8_act_quant=0/1/2  (Q8 activation quantization mode)
+    //   fat83_force=0/1 (test/diag: prefer FAT 8.3 alias opens)
+    //   oo_enable=0/1 (OO v0: write oostate.bin + append oojour.log)
+    //   oo_min_total_mb=<int> (OO M3: override Zone-B total minimum, in MB; 0 disables floor)
     EFI_FILE_HANDLE f = NULL;
     EFI_STATUS st = llmk_open_read_file(&f, L"repl.cfg");
     if (EFI_ERROR(st) || !f) return;
@@ -3659,6 +4325,44 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
             if (llmk_cfg_parse_i32(val, &v)) {
                 if (v < 0) v = -v;
                 g_cfg_ctx_len = v;
+            }
+        } else if (llmk_cfg_streq_ci(key, "fat83_force") || llmk_cfg_streq_ci(key, "force_fat83") || llmk_cfg_streq_ci(key, "fat83_prefer")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_fat83_force = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_enable") || llmk_cfg_streq_ci(key, "oo") || llmk_cfg_streq_ci(key, "organism")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_oo_enable = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_min_total_mb") || llmk_cfg_streq_ci(key, "oo_zones_min_total_mb") || llmk_cfg_streq_ci(key, "oo_min_total")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < -1) v = -1;
+                g_cfg_oo_min_total_mb = v;
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_llm_consult") || llmk_cfg_streq_ci(key, "oo_consult")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_oo_llm_consult = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_multi_actions") || llmk_cfg_streq_ci(key, "oo_multi")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_oo_multi_actions = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_auto_apply") || llmk_cfg_streq_ci(key, "oo_auto")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > 2) v = 2;
+                g_cfg_oo_auto_apply = v;
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_consult_log") || llmk_cfg_streq_ci(key, "oo_log")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_oo_consult_log = (b != 0);
             }
         }
     }
@@ -5089,6 +5793,25 @@ typedef struct {
     int seq_len;
 } Config;
 
+static UINT64 llmk_calc_kv_bytes_for_seq(const Config *cfg, int seq_len, int kv_dim) {
+    if (!cfg || seq_len <= 0 || kv_dim <= 0) return 0;
+    return (UINT64)cfg->n_layers * (UINT64)seq_len * (UINT64)kv_dim * (UINT64)sizeof(float) * 2ULL;
+}
+
+static UINT64 llmk_calc_state_bytes_for_seq(const Config *cfg, int seq_len, int kv_dim) {
+    if (!cfg || seq_len <= 0 || kv_dim <= 0) return 0;
+
+    UINT64 state_bytes = 0;
+    state_bytes += (UINT64)cfg->dim * (UINT64)sizeof(float) * 3ULL; // x, xb, xb2
+    state_bytes += (UINT64)cfg->hidden_dim * (UINT64)sizeof(float) * 2ULL; // hb, hb2
+    state_bytes += (UINT64)cfg->dim * (UINT64)sizeof(float); // q
+    state_bytes += (UINT64)kv_dim * (UINT64)sizeof(float) * 2ULL; // k, v
+    state_bytes += (UINT64)cfg->n_heads * (UINT64)seq_len * (UINT64)sizeof(float); // att
+    state_bytes += (UINT64)cfg->vocab_size * (UINT64)sizeof(float); // logits
+    state_bytes += (UINT64)cfg->n_layers * (UINT64)seq_len * (UINT64)kv_dim * (UINT64)sizeof(float) * 2ULL; // key/value cache
+    return state_bytes;
+}
+
 static UINT32 llmk_fnv1a32_update(UINT32 h, const void *data, UINTN len) {
     const UINT8 *p = (const UINT8 *)data;
     for (UINTN i = 0; i < len; i++) {
@@ -5334,6 +6057,11 @@ typedef struct {
     int vocab_size;
     int max_token_length;
 } Tokenizer;
+
+// Forward decl for M5 /oo_consult (needs Config, TransformerWeights, RunState, Tokenizer)
+static void llmk_oo_consult_execute(Config *config, TransformerWeights *weights, 
+                                    RunState *state, Tokenizer *tokenizer,
+                                    float temperature, float min_p, float top_p, int top_k);
 
 // ============================================================================
 // FORWARD PASS
@@ -5753,6 +6481,23 @@ static int my_strlen(const char* s) {
     int len = 0;
     while (s[len]) len++;
     return len;
+}
+
+static char *my_strstr(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return NULL;
+    if (!*needle) return (char*)haystack;
+    
+    while (*haystack) {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h && *n && (*h == *n)) {
+            h++;
+            n++;
+        }
+        if (!*n) return (char*)haystack;
+        haystack++;
+    }
+    return NULL;
 }
 
 int str_lookup(char* str, char** vocab, int vocab_size) {
@@ -6672,7 +7417,11 @@ static EFI_STATUS llmk_snap_load_into_state_best_effort(RunState *state, const C
     if (!g_llmk_ready) return EFI_NOT_READY;
 
     EFI_FILE_HANDLE f = NULL;
-    EFI_STATUS st = llmk_open_read_file(&f, in_name);
+    CHAR16 picked[192];
+    picked[0] = 0;
+    EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, in_name, &f, picked,
+                                                      (int)(sizeof(picked) / sizeof(picked[0])),
+                                                      L"snap_load");
     if (EFI_ERROR(st) || !f) return st;
 
     LlmkSnapHeader hdr;
@@ -6724,6 +7473,526 @@ static EFI_STATUS llmk_snap_load_into_state_best_effort(RunState *state, const C
     *io_kv_pos = (int)hdr.kv_pos;
     g_llmk_kv_pos = *io_kv_pos;
     return EFI_SUCCESS;
+}
+
+// ============================================================================
+// OO M5: LLM Consult Implementation
+// ============================================================================
+
+// M5.3: Log consultation to OOCONSULT.LOG (append-only)
+static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_mb, 
+                                     int ctx, int seq, const char *suggestion, 
+                                     const char *decision, int applied) {
+    // Check if logging enabled
+    int log_enabled = g_cfg_oo_consult_log;
+    if (log_enabled < 0) {
+        log_enabled = (g_cfg_oo_llm_consult > 0) ? 1 : 0;
+    }
+    if (!log_enabled || !g_root) return;
+
+    // Build log line: [boot=N] mode=MODE ram=MB ctx=val seq=val suggestion="..." decision=action applied=0|1
+    char logline[256];
+    int lp = 0;
+    
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "[boot=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, boot_count);
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "] mode=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, 
+                         (mode == LLMK_OO_MODE_NORMAL) ? "NORMAL" : 
+                         (mode == LLMK_OO_MODE_DEGRADED) ? "DEGRADED" : "SAFE");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " ram=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, ram_mb);
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " ctx=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)ctx);
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " seq=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)seq);
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " suggestion=\"");
+    
+    // Truncate suggestion to 60 chars max
+    int slen = 0;
+    while (suggestion[slen] && slen < 60 && lp + 1 < (int)sizeof(logline) - 40) {
+        logline[lp++] = suggestion[slen++];
+    }
+    if (suggestion[slen]) {
+        llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "...");
+    }
+    
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "\" decision=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, decision);
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " applied=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)applied);
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "\r\n");
+    logline[lp] = 0;
+
+    // Append to OOCONSULT.LOG
+    EFI_FILE_HANDLE logf = NULL;
+    if (!EFI_ERROR(llmk_open_binary_file_append(&logf, L"OOCONSULT.LOG"))) {
+        UINTN nb = (UINTN)lp;
+        uefi_call_wrapper(logf->Write, 3, logf, &nb, (void *)logline);
+        uefi_call_wrapper(logf->Flush, 1, logf);
+        uefi_call_wrapper(logf->Close, 1, logf);
+        Print(L"OK: OO consult logged to OOCONSULT.LOG\r\n");
+    }
+}
+
+static void llmk_oo_consult_execute(Config *config, TransformerWeights *weights, 
+                                    RunState *state, Tokenizer *tokenizer,
+                                    float temperature, float min_p, float top_p, int top_k) {
+    if (!config || !weights || !state || !tokenizer) return;
+
+    // 1. Collect system state
+    UINT64 ram_mb = llmk_get_conventional_ram_bytes_best_effort() / (1024ULL * 1024ULL);
+    UINT32 mode = g_oo_last_mode_valid ? g_oo_last_mode : LLMK_OO_MODE_SAFE;
+    int ctx = config->seq_len;
+    int seq = config->seq_len;
+    UINT64 boots = 0;
+
+    // Load current boot count from state (best-effort)
+    LlmkOoState s;
+    if (llmk_oo_load_state_best_effort(&s)) {
+        boots = s.boot_count;
+        mode = s.mode;
+    }
+
+    // Read tail of journal (last 3 lines, best-effort)
+    char journal_tail[256];
+    journal_tail[0] = 0;
+    if (g_root) {
+        EFI_FILE_HANDLE jf = NULL;
+        if (!EFI_ERROR(llmk_open_binary_file_append(&jf, L"OOJOUR.LOG"))) {
+            UINT64 pos = 0;
+            if (!EFI_ERROR(uefi_call_wrapper(jf->GetPosition, 2, jf, &pos)) && pos > 0) {
+                // Seek backwards up to 256 bytes
+                UINT64 seek_start = (pos > 256ULL) ? (pos - 256ULL) : 0ULL;
+                uefi_call_wrapper(jf->SetPosition, 2, jf, seek_start);
+                UINTN nr = 256;
+                char tmp[256];
+                if (!EFI_ERROR(uefi_call_wrapper(jf->Read, 3, jf, &nr, tmp)) && nr > 0) {
+                    // Extract last 3 lines (simplistic: look for last 3 \n)
+                    int nl_count = 0;
+                    int start_idx = (int)nr - 1;
+                    while (start_idx >= 0 && nl_count < 3) {
+                        if (tmp[start_idx] == '\n') nl_count++;
+                        start_idx--;
+                    }
+                    start_idx++;
+                    if (start_idx < 0) start_idx = 0;
+                    int jt_p = 0;
+                    for (int i = start_idx; i < (int)nr && jt_p + 1 < (int)sizeof(journal_tail); i++) {
+                        char c = tmp[i];
+                        if (c == '\r' || c == '\n') c = ' ';
+                        journal_tail[jt_p++] = c;
+                    }
+                    journal_tail[jt_p] = 0;
+                }
+            }
+            uefi_call_wrapper(jf->Close, 1, jf);
+        }
+    }
+
+    // 2. Compose prompt (compact, <256 chars)
+    // Check if multi-actions is enabled (for prompt adaptation)
+    int multi_enabled_for_prompt = g_cfg_oo_multi_actions;
+    if (multi_enabled_for_prompt < 0) {
+        multi_enabled_for_prompt = (g_cfg_oo_llm_consult > 0) ? 1 : 0;
+    }
+
+    char prompt_buf[256];
+    int pp = 0;
+    prompt_buf[0] = 0;
+    llmk_ascii_append_str(prompt_buf, (int)sizeof(prompt_buf), &pp, "System: mode=");
+    llmk_ascii_append_str(prompt_buf, (int)sizeof(prompt_buf), &pp, 
+                         (mode == LLMK_OO_MODE_NORMAL) ? "NORMAL" : 
+                         (mode == LLMK_OO_MODE_DEGRADED) ? "DEGRADED" : "SAFE");
+    llmk_ascii_append_str(prompt_buf, (int)sizeof(prompt_buf), &pp, " ram=");
+    llmk_ascii_append_u64(prompt_buf, (int)sizeof(prompt_buf), &pp, ram_mb);
+    llmk_ascii_append_str(prompt_buf, (int)sizeof(prompt_buf), &pp, "MB ctx=");
+    llmk_ascii_append_u64(prompt_buf, (int)sizeof(prompt_buf), &pp, (UINT64)ctx);
+    llmk_ascii_append_str(prompt_buf, (int)sizeof(prompt_buf), &pp, " boots=");
+    llmk_ascii_append_u64(prompt_buf, (int)sizeof(prompt_buf), &pp, boots);
+    if (journal_tail[0]) {
+        llmk_ascii_append_str(prompt_buf, (int)sizeof(prompt_buf), &pp, " log=[");
+        // Truncate if needed
+        int jl = 0;
+        while (journal_tail[jl] && pp + 1 < (int)sizeof(prompt_buf) - 32) {
+            prompt_buf[pp++] = journal_tail[jl++];
+        }
+        llmk_ascii_append_str(prompt_buf, (int)sizeof(prompt_buf), &pp, "]");
+    }
+    
+    // Adapt prompt for multi-action mode (M5.1)
+    if (multi_enabled_for_prompt) {
+        llmk_ascii_append_str(prompt_buf, (int)sizeof(prompt_buf), &pp, 
+                             ". Suggest 1-3 brief actions (max 20 words):");
+    } else {
+        llmk_ascii_append_str(prompt_buf, (int)sizeof(prompt_buf), &pp, 
+                             ". Suggest ONE brief action (max 10 words):");
+    }
+    prompt_buf[pp] = 0;
+
+    Print(L"[oo_consult] Prompt: ");
+    llmk_print_ascii(prompt_buf);
+    Print(L"\r\n\r\n");
+
+    // 3. Tokenize prompt
+    int prompt_tokens[128];
+    int n_prompt = 0;
+    {
+        int cap = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
+        encode(prompt_buf, prompt_tokens, &n_prompt, cap, tokenizer);
+        if (n_prompt <= 0) {
+            Print(L"[oo_consult] ERROR: tokenization failed\r\n");
+            return;
+        }
+    }
+
+    // 4. Generate LLM suggestion (low creativity: temp=0.3, max_tokens=32)
+    char llm_suggestion[128];
+    llm_suggestion[0] = 0;
+    int llm_len = 0;
+
+    {
+        // Prefill
+        int pos = 0;
+        for (int i = 0; i < n_prompt; i++) {
+            if (g_llmk_ready) {
+                llmk_sentinel_phase_start(&g_sentinel, LLMK_PHASE_PREFILL);
+                transformer_forward(state, weights, config, prompt_tokens[i], pos);
+                llmk_sentinel_phase_end(&g_sentinel);
+            } else {
+                transformer_forward(state, weights, config, prompt_tokens[i], pos);
+            }
+            pos++;
+        }
+
+        // Decode (max 32 tokens)
+        int token = prompt_tokens[n_prompt - 1];
+        float saved_temp = temperature;
+        int saved_topk = top_k;
+        temperature = 0.3f;
+        top_k = 20;
+
+        for (int step = 0; step < 32; step++) {
+            if (pos >= config->seq_len) break;
+
+            // Sample
+            int next = sample_advanced(state->logits, config->vocab_size, temperature, 
+                                      min_p, top_p, top_k, NULL, 0, 1.0f);
+            if (next == 2 || next == 1) break; // EOS/BOS
+
+            // Decode token
+            char *piece = tokenizer->vocab[next];
+            if (piece) {
+                int plen = my_strlen(piece);
+                if (llm_len + plen + 1 < (int)sizeof(llm_suggestion)) {
+                    for (int k = 0; k < plen; k++) llm_suggestion[llm_len++] = piece[k];
+                    llm_suggestion[llm_len] = 0;
+                }
+            }
+
+            // Forward
+            token = next;
+            if (g_llmk_ready) {
+                llmk_sentinel_phase_start(&g_sentinel, LLMK_PHASE_DECODE);
+                transformer_forward(state, weights, config, token, pos);
+                llmk_sentinel_phase_end(&g_sentinel);
+            } else {
+                transformer_forward(state, weights, config, token, pos);
+            }
+            pos++;
+        }
+
+        temperature = saved_temp;
+        top_k = saved_topk;
+    }
+
+    // Emit LLM suggestion marker (deterministic)
+    Print(L"OK: OO LLM suggested: ");
+    llmk_print_ascii(llm_suggestion);
+    Print(L"\r\n");
+
+    // 5. Parse suggestion for keywords (M5.1: detect ALL keywords)
+    int action_reduce_ctx = 0;
+    int action_reduce_seq = 0;
+    int action_increase = 0;
+    int action_reboot = 0;
+    int action_model = 0;
+    int action_stable = 0;
+
+    // Simple substring search (case-insensitive)
+    char lower[128];
+    for (int i = 0; i < llm_len && i + 1 < (int)sizeof(lower); i++) {
+        char c = llm_suggestion[i];
+        if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+        lower[i] = c;
+    }
+    lower[llm_len] = 0;
+
+    // Check for multi-actions feature flag (default: follows oo_llm_consult)
+    int multi_enabled = g_cfg_oo_multi_actions;
+    if (multi_enabled < 0) {
+        multi_enabled = (g_cfg_oo_llm_consult > 0) ? 1 : 0;
+    }
+
+    // Detect reduce actions (ctx and/or seq)
+    if (my_strstr(lower, "reduce") || my_strstr(lower, "lower") || my_strstr(lower, "decrease")) {
+        if (my_strstr(lower, "ctx") || my_strstr(lower, "context")) action_reduce_ctx = 1;
+        if (my_strstr(lower, "seq") || my_strstr(lower, "sequence")) action_reduce_seq = 1;
+        // Generic "reduce" without target: default to ctx
+        if (!action_reduce_ctx && !action_reduce_seq) action_reduce_ctx = 1;
+    }
+
+    // Detect increase (blocked in most cases)
+    if (my_strstr(lower, "increase") || my_strstr(lower, "raise") || my_strstr(lower, "more")) {
+        action_increase = 1;
+    }
+
+    // Detect system actions (reboot, model change)
+    if (my_strstr(lower, "reboot") || my_strstr(lower, "restart")) action_reboot = 1;
+    if (my_strstr(lower, "model") || my_strstr(lower, "switch")) action_model = 1;
+
+    // Detect "stable" / no-op signal
+    if (my_strstr(lower, "stable") || my_strstr(lower, "ok") || my_strstr(lower, "wait") || my_strstr(lower, "good")) {
+        action_stable = 1;
+    }
+
+    // 6. Policy decision (M5.1: apply ALL valid actions when multi_enabled)
+    int actions_applied = 0;
+    int actions_blocked = 0;
+    char batch_summary[256];
+    int batch_summary_pos = 0;
+    batch_summary[0] = 0;
+
+    // Priority filtering: stable cancels all, reboot primes others
+    if (action_stable) {
+        // Stable signal: no action needed
+        Print(L"OK: OO policy decided: system_stable (reason=llm_reports_ok)\r\n");
+        actions_applied = 0;
+        actions_blocked = (action_reduce_ctx + action_reduce_seq + action_increase + action_reboot + action_model - 1);
+        llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "stable");
+    } else if (action_reboot) {
+        // Reboot primes others: log but don't auto-apply (v0)
+        Print(L"OK: OO policy decided: logged_only (reason=reboot_not_auto)\r\n");
+        actions_applied = 0;
+        actions_blocked = (action_reduce_ctx + action_reduce_seq + action_increase + action_model);
+        llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reboot_logged");
+    } else {
+        // Apply reductions first (safe), then increases (blocked), then model
+
+        // 6.1: Apply reduce_ctx (if detected and safe)
+        if (action_reduce_ctx) {
+            if (mode == LLMK_OO_MODE_SAFE || mode == LLMK_OO_MODE_DEGRADED) {
+                int new_ctx = ctx / 2;
+                if (new_ctx < 128) new_ctx = 128;
+                if (new_ctx != ctx) {
+                    // M5.2: Check auto-apply config and throttling
+                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
+                    int is_reduction = 1; // reduce_ctx is always a reduction
+                    
+                    if (!can_auto_apply) {
+                        // Auto-apply disabled or throttled
+                        if (g_cfg_oo_auto_apply == 0) {
+                            Print(L"OK: OO policy simulation: reduce_ctx (would_apply_if_enabled, new=%d)\r\n", new_ctx);
+                        } else {
+                            Print(L"OK: OO policy throttled: reduce_ctx (limit=1_per_boot, new=%d)\r\n", new_ctx);
+                        }
+                        actions_blocked++;
+                    } else if (g_cfg_oo_auto_apply == 1 && !is_reduction) {
+                        // Conservative mode: only reductions (this branch won't hit for reduce_ctx)
+                        Print(L"OK: OO policy blocked: reduce_ctx (reason=conservative_mode)\r\n");
+                        actions_blocked++;
+                    } else {
+                        // Auto-apply enabled: write to repl.cfg
+                        char val[32];
+                        int vp = 0;
+                        llmk_ascii_append_u64(val, (int)sizeof(val), &vp, (UINT64)new_ctx);
+                        val[vp] = 0;
+                        EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort("ctx_len", val);
+                        if (!EFI_ERROR(st)) {
+                            Print(L"OK: OO auto-apply: reduce_ctx (old=%d new=%d check=pass)\r\n", ctx, new_ctx);
+                            actions_applied++;
+                            g_oo_auto_applied_this_boot = 1; // Throttle further applications
+                            if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
+                            llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reduce_ctx");
+                        } else {
+                            Print(L"ERROR: OO auto-apply failed: reduce_ctx (reason=cfg_write_error)\r\n");
+                            actions_blocked++;
+                        }
+                    }
+                } else {
+                    Print(L"OK: OO policy blocked: reduce_ctx (reason=already_at_min)\r\n");
+                    actions_blocked++;
+                }
+            } else {
+                Print(L"OK: OO policy blocked: reduce_ctx (reason=normal_mode_no_auto_reduce)\r\n");
+                actions_blocked++;
+            }
+        }
+        // 6.2: Apply reduce_seq (if detected, multi_enabled, and safe)
+        if (action_reduce_seq && multi_enabled) {
+            if (mode == LLMK_OO_MODE_SAFE && ram_mb < 1024ULL) {
+                int new_seq = seq / 2;
+                if (new_seq < 128) new_seq = 128;
+                if (new_seq != seq) {
+                    // M5.2: Check auto-apply config and throttling
+                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
+                    int is_reduction = 1; // reduce_seq is always a reduction
+                    
+                    if (!can_auto_apply) {
+                        if (g_cfg_oo_auto_apply == 0) {
+                            Print(L"OK: OO policy simulation: reduce_seq (would_apply_if_enabled, new=%d)\r\n", new_seq);
+                        } else {
+                            Print(L"OK: OO policy throttled: reduce_seq (limit=1_per_boot, new=%d)\r\n", new_seq);
+                        }
+                        actions_blocked++;
+                    } else {
+                        char val[32];
+                        int vp = 0;
+                        llmk_ascii_append_u64(val, (int)sizeof(val), &vp, (UINT64)new_seq);
+                        val[vp] = 0;
+                        EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort("seq_len", val);
+                        if (!EFI_ERROR(st)) {
+                            Print(L"OK: OO auto-apply: reduce_seq (old=%d new=%d check=pass)\r\n", seq, new_seq);
+                            actions_applied++;
+                            g_oo_auto_applied_this_boot = 1; // Throttle further applications
+                            if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
+                            llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reduce_seq");
+                        } else {
+                            Print(L"ERROR: OO auto-apply failed: reduce_seq (reason=cfg_write_error)\r\n");
+                            actions_blocked++;
+                        }
+                    }
+                } else {
+                    Print(L"OK: OO policy blocked: reduce_seq (reason=already_at_min)\r\n");
+                    actions_blocked++;
+                }
+            } else {
+                Print(L"OK: OO policy blocked: reduce_seq (reason=not_safe_low_ram)\r\n");
+                actions_blocked++;
+            }
+        } else if (action_reduce_seq && !multi_enabled) {
+            Print(L"OK: OO policy blocked: reduce_seq (reason=multi_actions_disabled)\r\n");
+            actions_blocked++;
+        }
+
+        // 6.3: Handle increases (M5.2: allow in aggressive mode if conditions met)
+        if (action_increase) {
+            // M5.2: Aggressive mode can apply increases if RAM>=1GB and mode=NORMAL
+            int can_increase = (g_cfg_oo_auto_apply == 2) && (mode == LLMK_OO_MODE_NORMAL) && (ram_mb >= 1024ULL);
+            int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
+            
+            if (can_increase && can_auto_apply) {
+                // Apply increase: double ctx (capped at 2048)
+                int new_ctx = ctx * 2;
+                if (new_ctx > 2048) new_ctx = 2048;
+                if (new_ctx != ctx) {
+                    char val[32];
+                    int vp = 0;
+                    llmk_ascii_append_u64(val, (int)sizeof(val), &vp, (UINT64)new_ctx);
+                    val[vp] = 0;
+                    EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort("ctx_len", val);
+                    if (!EFI_ERROR(st)) {
+                        Print(L"OK: OO auto-apply: increase_ctx (old=%d new=%d check=pass mode=aggressive)\r\n", ctx, new_ctx);
+                        actions_applied++;
+                        g_oo_auto_applied_this_boot = 1;
+                        if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
+                        llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "increase_ctx");
+                    } else {
+                        Print(L"ERROR: OO auto-apply failed: increase_ctx (reason=cfg_write_error)\r\n");
+                        actions_blocked++;
+                    }
+                } else {
+                    Print(L"OK: OO policy blocked: increase_ctx (reason=already_at_max)\r\n");
+                    actions_blocked++;
+                }
+            } else {
+                const char *block_reason = (!can_auto_apply && g_cfg_oo_auto_apply == 0) ? "auto_apply_disabled" :
+                                           (!can_auto_apply) ? "throttled_1_per_boot" :
+                                           (mode == LLMK_OO_MODE_SAFE) ? "safe_mode_no_increase" :
+                                           (ram_mb < 1024ULL) ? "low_ram_no_increase" :
+                                           (g_cfg_oo_auto_apply < 2) ? "conservative_mode_no_increase" :
+                                           "increase_blocked";
+                Print(L"OK: OO policy blocked: increase (reason=%a)\r\n", block_reason);
+                actions_blocked++;
+            }
+        }
+
+        // 6.4: Log model change (not auto-applied in v0)
+        if (action_model) {
+            Print(L"OK: OO policy decided: logged_only (reason=model_change_not_auto)\r\n");
+            actions_blocked++;
+        }
+
+        // If no actions applied/blocked, mark as no actionable keywords
+        if (actions_applied == 0 && actions_blocked == 0) {
+            Print(L"OK: OO policy decided: ignored (reason=no_actionable_keyword)\r\n");
+        }
+    }
+
+    // Emit batch summary (M5.1)
+    if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
+        Print(L"OK: OO policy batch: %d actions applied, %d blocked\r\n", actions_applied, actions_blocked);
+    }
+
+    // M5.3: Log consultation to OOCONSULT.LOG
+    {
+        // Determine decision string for log
+        const char *decision_str = "unknown";
+        if (action_stable) {
+            decision_str = "stable";
+        } else if (action_reboot) {
+            decision_str = "reboot_logged";
+        } else if (actions_applied == 0 && actions_blocked == 0) {
+            decision_str = "ignored";
+        } else if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
+            // Multi-action: use batch_summary as decision
+            decision_str = batch_summary[0] ? batch_summary : "multi";
+        } else if (action_reduce_ctx) {
+            decision_str = "reduce_ctx";
+        } else if (action_reduce_seq) {
+            decision_str = "reduce_seq";
+        } else if (action_increase) {
+            decision_str = "increase_blocked";
+        } else if (action_model) {
+            decision_str = "model_logged";
+        }
+        
+        // Call M5.3 logging function
+        llmk_oo_log_consultation(boots, mode, ram_mb, ctx, seq, llm_suggestion, 
+                                decision_str, (actions_applied > 0) ? 1 : 0);
+    }
+
+    // 7. Log to journal (best-effort)
+    if (g_root) {
+        char jlog[256];
+        int jp = 0;
+        if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
+            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "oo event=consult_multi actions=[");
+            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, batch_summary);
+            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "] applied=");
+            llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)actions_applied);
+            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " blocked=");
+            llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)actions_blocked);
+        } else {
+            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "oo event=consult decision=");
+            if (action_stable) {
+                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "stable");
+            } else if (actions_applied > 0) {
+                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, batch_summary);
+            } else {
+                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "ignored");
+            }
+        }
+        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "\r\n");
+
+        EFI_FILE_HANDLE jf = NULL;
+        if (!EFI_ERROR(llmk_open_binary_file_append(&jf, L"OOJOUR.LOG"))) {
+            UINTN nb = (UINTN)jp;
+            uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)jlog);
+            uefi_call_wrapper(jf->Flush, 1, jf);
+            uefi_call_wrapper(jf->Close, 1, jf);
+        }
+    }
 }
 
 // ============================================================================
@@ -6839,6 +8108,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     llmk_boot_mark(L"fs_ready");
 
+    // OO M1: best-effort persistent boot tick (writes OOSTATE.BIN + appends OOJOUR.LOG)
+    // Opt-in via repl.cfg: oo_enable=1
+    llmk_oo_boot_tick_best_effort();
+
     // Best-effort enable AVX/AVX2 state before feature detection.
     enable_avx_best_effort();
 
@@ -6904,6 +8177,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     EFI_FILE_HANDLE ModelFile;
     CHAR16 *model_filename = NULL;
     {
+        int cfg_model_override_requested = 0;
+        int cfg_model_override_failed = 0;
+        CHAR16 cfg_model_requested[128];
+        cfg_model_requested[0] = 0;
+
         // Optional: allow repl.cfg to override which model file to open.
         // Example in repl.cfg:
         //   model=models\\my-instruct.bin
@@ -6913,6 +8191,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         CHAR16 cfg_model[128];
         cfg_model[0] = 0;
         if (llmk_read_cfg_model_best_effort(Root, cfg_model, (int)(sizeof(cfg_model) / sizeof(cfg_model[0])))) {
+            cfg_model_override_requested = 1;
+            llmk_char16_copy_cap(cfg_model_requested, (int)(sizeof(cfg_model_requested) / sizeof(cfg_model_requested[0])), cfg_model);
             EFI_FILE_HANDLE f = 0;
             EFI_STATUS st = EFI_NOT_FOUND;
 
@@ -6928,7 +8208,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                     st = EFI_SUCCESS;
                 }
             } else {
-                st = uefi_call_wrapper(Root->Open, 5, Root, &f, cfg_model, EFI_FILE_MODE_READ, 0);
+                CHAR16 picked[192];
+                picked[0] = 0;
+                st = llmk_open_read_with_fat83_fallback(Root, cfg_model, &f, picked, (int)(sizeof(picked) / sizeof(picked[0])), L"model_cfg");
+                if (!EFI_ERROR(st) && picked[0]) {
+                    llmk_char16_copy_cap(cfg_model, (int)(sizeof(cfg_model) / sizeof(cfg_model[0])), picked);
+                }
             }
 
             if (!EFI_ERROR(st) && f) {
@@ -6942,6 +8227,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 status = st;
             } else {
                 Print(L"[cfg] WARNING: model override not found: %s\r\n", cfg_model);
+                cfg_model_override_failed = 1;
             }
         }
 
@@ -6992,10 +8278,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         EFI_STATUS last = EFI_NOT_FOUND;
         for (int i = 0; i < n_candidates; i++) {
             EFI_FILE_HANDLE f = 0;
-            EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &f, candidates[i], EFI_FILE_MODE_READ, 0);
-            if (!EFI_ERROR(st)) {
+            CHAR16 picked0[192];
+            picked0[0] = 0;
+            EFI_STATUS st = llmk_open_read_with_fat83_fallback(Root, candidates[i], &f, picked0,
+                                                              (int)(sizeof(picked0) / sizeof(picked0[0])),
+                                                              L"model_candidate");
+            if (!EFI_ERROR(st) && f) {
                 ModelFile = f;
-                llmk_model_set_loaded_path(candidates[i]);
+                llmk_model_set_loaded_path(picked0[0] ? picked0 : candidates[i]);
                 model_filename = g_loaded_model_path16;
                 status = st;
                 break;
@@ -7005,10 +8295,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 CHAR16 path[96];
                 StrCpy(path, L"models\\");
                 StrCat(path, candidates[i]);
-                st = uefi_call_wrapper(Root->Open, 5, Root, &f, path, EFI_FILE_MODE_READ, 0);
+                CHAR16 picked1[192];
+                picked1[0] = 0;
+                st = llmk_open_read_with_fat83_fallback(Root, path, &f, picked1,
+                                                       (int)(sizeof(picked1) / sizeof(picked1[0])),
+                                                       L"model_candidate_models");
                 if (!EFI_ERROR(st) && f) {
                     ModelFile = f;
-                    llmk_model_set_loaded_path(path);
+                    llmk_model_set_loaded_path(picked1[0] ? picked1 : path);
                     model_filename = g_loaded_model_path16;
                     status = st;
                     break;
@@ -7051,6 +8345,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
 model_selected:
         ;
+
+        if (g_cfg_oo_enable && cfg_model_override_requested && cfg_model_override_failed && model_filename != NULL) {
+            Print(L"OK: OO model fallback: %s -> %s\r\n", cfg_model_requested, model_filename);
+        }
     }
     
     // Record the selected model path for /model_info.
@@ -7132,13 +8430,18 @@ model_selected:
                 if (StrLen(alt) + 4 < (sizeof(alt) / sizeof(alt[0]))) {
                     StrCat(alt, L".bin");
                     EFI_FILE_HANDLE fb = NULL;
-                    EFI_STATUS fst = uefi_call_wrapper(Root->Open, 5, Root, &fb, alt, EFI_FILE_MODE_READ, 0);
+                    CHAR16 picked[192];
+                    picked[0] = 0;
+                    EFI_STATUS fst = llmk_open_read_with_fat83_fallback(Root, alt, &fb, picked,
+                                                                       (int)(sizeof(picked) / sizeof(picked[0])),
+                                                                       L"gguf_sibling_bin");
                     if (!EFI_ERROR(fst) && fb) {
                         ModelFile = fb;
-                        UINTN n = StrLen(alt) + 1;
+                        const CHAR16 *chosen = picked[0] ? picked : alt;
+                        UINTN n = StrLen(chosen) + 1;
                         CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
                         model_filename = stable ? stable : model_filename;
-                        if (stable) StrCpy(stable, alt);
+                        if (stable) StrCpy(stable, chosen);
                         llmk_model_set_loaded_path(model_filename);
                         g_loaded_model_format = LLMK_MODEL_FMT_BIN;
                         Print(L"OK: using sibling .bin fallback: %s\r\n\r\n", model_filename);
@@ -7161,19 +8464,39 @@ model_selected:
             CHAR16 *fb_name = NULL;
             for (int fi = 0; fi < n_fallbacks; fi++) {
                 EFI_FILE_HANDLE t = NULL;
-                EFI_STATUS fst = uefi_call_wrapper(Root->Open, 5, Root, &t, fallbacks[fi], EFI_FILE_MODE_READ, 0);
-                if (!EFI_ERROR(fst) && t) { fb = t; fb_name = fallbacks[fi]; break; }
+                CHAR16 picked0[192];
+                picked0[0] = 0;
+                EFI_STATUS fst = llmk_open_read_with_fat83_fallback(Root, fallbacks[fi], &t, picked0,
+                                                                   (int)(sizeof(picked0) / sizeof(picked0[0])),
+                                                                   L"gguf_fallback_root");
+                if (!EFI_ERROR(fst) && t) {
+                    fb = t;
+                    if (picked0[0]) {
+                        UINTN n = StrLen(picked0) + 1;
+                        CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
+                        fb_name = stable ? stable : fallbacks[fi];
+                        if (stable) StrCpy(stable, picked0);
+                    } else {
+                        fb_name = fallbacks[fi];
+                    }
+                    break;
+                }
                 {
                     CHAR16 pth[96];
                     StrCpy(pth, L"models\\");
                     StrCat(pth, fallbacks[fi]);
-                    fst = uefi_call_wrapper(Root->Open, 5, Root, &t, pth, EFI_FILE_MODE_READ, 0);
+                    CHAR16 picked1[192];
+                    picked1[0] = 0;
+                    fst = llmk_open_read_with_fat83_fallback(Root, pth, &t, picked1,
+                                                            (int)(sizeof(picked1) / sizeof(picked1[0])),
+                                                            L"gguf_fallback_models");
                     if (!EFI_ERROR(fst) && t) {
                         fb = t;
-                        UINTN n = StrLen(pth) + 1;
+                        const CHAR16 *chosen = picked1[0] ? picked1 : pth;
+                        UINTN n = StrLen(chosen) + 1;
                         CHAR16 *stable = (CHAR16 *)simple_alloc((unsigned long)(n * sizeof(CHAR16)));
                         fb_name = stable ? stable : fallbacks[fi];
-                        if (stable) StrCpy(stable, pth);
+                        if (stable) StrCpy(stable, chosen);
                         break;
                     }
                 }
@@ -7266,6 +8589,17 @@ gguf_fallback_done:
               config.dim, config.n_layers, config.n_heads, config.n_kv_heads, config.vocab_size, config.seq_len);
     }
 
+    // Always print minimal boot markers for CI/smoke tests (serial-friendly).
+    {
+        char model8[192];
+        llmk_char16_to_ascii_cap(model8, (int)sizeof(model8), g_loaded_model_path16);
+        Print(L"OK: Djibion boot\r\n");
+        Print(L"OK: Model loaded: ");
+        llmk_print_ascii(model8[0] ? model8 : "(unknown)");
+        Print(L"\r\n");
+        Print(L"OK: Version: %s\r\n\r\n", LLMB_BUILD_ID);
+    }
+
     llmk_boot_mark(L"model_header_loaded");
 
     // ========================================================================
@@ -7274,21 +8608,135 @@ gguf_fallback_done:
 
     llmk_overlay_stage(3, 7);
 
-    if (g_cfg_ctx_len > 0) {
+    {
         int min_ctx = 64;
-        int target = g_cfg_ctx_len;
-        if (target < min_ctx) target = min_ctx;
-        if (target < config.seq_len) {
-            if (g_boot_verbose) {
-                Print(L"[cfg] ctx_len=%d -> effective seq_len=%d (model=%d)\r\n",
-                      g_cfg_ctx_len, target, config.seq_len);
+        int before_model = config.seq_len;
+        int effective = config.seq_len;
+
+        // Apply user-requested context length (can only reduce vs model).
+        if (g_cfg_ctx_len > 0) {
+            int target = g_cfg_ctx_len;
+            if (target < 0) target = -target;
+            if (target < min_ctx) target = min_ctx;
+            if (target < effective) {
+                if (g_boot_verbose) {
+                    Print(L"[cfg] ctx_len=%d -> effective seq_len=%d (model=%d)\r\n",
+                          g_cfg_ctx_len, target, before_model);
+                }
+                effective = target;
             }
-            config.seq_len = target;
+        }
+
+        // OO M3 (homeostasis): clamp effective context length in SAFE/DEGRADED.
+        // Keep this deterministic and serial-visible when it triggers.
+        if (g_cfg_oo_enable && g_oo_last_mode_valid) {
+            int cap = 0;
+            if (g_oo_last_mode == LLMK_OO_MODE_SAFE) cap = 256;
+            else if (g_oo_last_mode == LLMK_OO_MODE_DEGRADED) cap = 512;
+            if (cap > 0 && effective > cap) {
+                int from = effective;
+                effective = cap;
+                Print(L"OK: OO ctx_len clamp: %d -> %d (mode=%s)\r\n",
+                      from, effective, llmk_oo_mode_name(g_oo_last_mode));
+            }
+        }
+
+        if (effective < min_ctx) effective = min_ctx;
+        if (effective < config.seq_len) {
+            config.seq_len = effective;
         }
     }
 
     int kv_dim = (config.dim * config.n_kv_heads) / config.n_heads;
     int head_size = config.dim / config.n_heads;
+
+    // OO M3 (homeostasis): RAM budget preflight.
+    // Goal: avoid hard failures on low-memory guests by (1) allowing a smaller Zone-B minimum in SAFE/DEGRADED,
+    // and (2) optionally reducing seq_len further if the estimated Zone-B total would exceed available RAM.
+    if (g_cfg_oo_enable && g_oo_last_mode_valid && (g_oo_last_mode == LLMK_OO_MODE_SAFE || g_oo_last_mode == LLMK_OO_MODE_DEGRADED)) {
+        UINT64 sys_ram = llmk_get_conventional_ram_bytes_best_effort();
+        if (sys_ram > 0) {
+            const UINT64 reserve = 128ULL * 1024ULL * 1024ULL;
+            UINT64 usable = (sys_ram > reserve) ? (sys_ram - reserve) : (sys_ram * 3ULL) / 4ULL;
+
+            UINT64 min_total_policy = 0;
+            if (g_oo_last_mode == LLMK_OO_MODE_SAFE) min_total_policy = 512ULL * 1024ULL * 1024ULL;
+            else if (g_oo_last_mode == LLMK_OO_MODE_DEGRADED) min_total_policy = 640ULL * 1024ULL * 1024ULL;
+
+            if (g_cfg_oo_min_total_mb >= 0) {
+                min_total_policy = (UINT64)g_cfg_oo_min_total_mb * 1024ULL * 1024ULL;
+            }
+
+            int seq_from = config.seq_len;
+            int seq = config.seq_len;
+            for (int iter = 0; iter < 8; iter++) {
+                if (seq < 64) seq = 64;
+
+                // Compute weights size (floats), with seq_len substituted for the freq_cis arrays.
+                UINTN n_floats_base_pf = 0;
+                n_floats_base_pf += (UINTN)config.vocab_size * (UINTN)config.dim;                   // token_embedding_table
+                n_floats_base_pf += (UINTN)config.n_layers * (UINTN)config.dim;                     // rms_att_weight
+                n_floats_base_pf += (UINTN)config.n_layers * (UINTN)config.dim * (UINTN)config.dim; // wq
+                n_floats_base_pf += (UINTN)config.n_layers * (UINTN)config.dim * (UINTN)kv_dim;     // wk
+                n_floats_base_pf += (UINTN)config.n_layers * (UINTN)config.dim * (UINTN)kv_dim;     // wv
+                n_floats_base_pf += (UINTN)config.n_layers * (UINTN)config.dim * (UINTN)config.dim; // wo
+                n_floats_base_pf += (UINTN)config.n_layers * (UINTN)config.dim;                     // rms_ffn_weight
+                n_floats_base_pf += (UINTN)config.n_layers * (UINTN)config.dim * (UINTN)config.hidden_dim; // w1
+                n_floats_base_pf += (UINTN)config.n_layers * (UINTN)config.hidden_dim * (UINTN)config.dim; // w2
+                n_floats_base_pf += (UINTN)config.n_layers * (UINTN)config.dim * (UINTN)config.hidden_dim; // w3
+                n_floats_base_pf += (UINTN)config.dim;                                              // rms_final_weight
+                n_floats_base_pf += (UINTN)seq * (UINTN)head_size / 2;                               // freq_cis_real
+                n_floats_base_pf += (UINTN)seq * (UINTN)head_size / 2;                               // freq_cis_imag
+
+                UINTN n_floats_with_cls_pf = n_floats_base_pf + (UINTN)config.vocab_size * (UINTN)config.dim;
+
+                int shared_pf = shared_classifier;
+                if (!use_q8_blob && model_file_size > 0) {
+                    UINT64 available = model_file_size;
+                    UINT64 header_bytes = (UINT64)(7 * sizeof(int));
+                    if (available > header_bytes) available -= header_bytes;
+                    UINT64 bytes_base = (UINT64)n_floats_base_pf * sizeof(float);
+                    UINT64 bytes_with = (UINT64)n_floats_with_cls_pf * sizeof(float);
+
+                    if (available < bytes_with && available >= bytes_base) shared_pf = 1;
+                    else if (available >= bytes_with) shared_pf = 0;
+                }
+
+                UINT64 weights_u64 = use_q8_blob ? (UINT64)q8_blob_bytes
+                                                : (UINT64)(shared_pf ? n_floats_base_pf : n_floats_with_cls_pf) * (UINT64)sizeof(float);
+
+                UINT64 kv_bytes = llmk_calc_kv_bytes_for_seq(&config, seq, kv_dim);
+                UINT64 state_u64 = llmk_calc_state_bytes_for_seq(&config, seq, kv_dim);
+
+                UINT64 tokenizer_u64 = (UINT64)config.vocab_size * ((UINT64)sizeof(char*) + (UINT64)sizeof(float));
+                tokenizer_u64 += 4ULL * 1024ULL * 1024ULL;
+
+                UINT64 slack_u64 = 16ULL * 1024ULL * 1024ULL;
+                UINT64 scratch_u64 = 32ULL * 1024ULL * 1024ULL;
+                UINT64 zonec_u64 = 8ULL * 1024ULL * 1024ULL;
+
+                UINT64 acts_u64 = (state_u64 >= kv_bytes ? (state_u64 - kv_bytes) : 0ULL) + tokenizer_u64 + slack_u64;
+                UINT64 total = weights_u64 + kv_bytes + scratch_u64 + acts_u64 + zonec_u64;
+
+                UINT64 min_total = min_total_policy;
+                if (min_total > 0 && total < min_total) total = min_total;
+
+                if (total <= usable) break;
+
+                int next = seq / 2;
+                if (next < 64) {
+                    seq = 64;
+                    break;
+                }
+                seq = next;
+            }
+
+            if (seq != seq_from) {
+                Print(L"OK: OO ram preflight: seq_len %d -> %d (mode=%s)\r\n", seq_from, seq, llmk_oo_mode_name(g_oo_last_mode));
+                config.seq_len = seq;
+            }
+        }
+    }
 
     // Compute total weights size (floats)
     UINTN n_floats_base = 0;
@@ -7356,8 +8804,27 @@ gguf_fallback_done:
 
         // Total Zone B includes all arenas.
         UINT64 total = weights_u64 + kv_bytes + scratch_bytes + acts_u64 + zonec_bytes;
-        // Min 1GB for larger models; fallback to 768MB if allocation fails.
-        UINT64 min_total = (total > 768ULL * 1024ULL * 1024ULL) ? (1024ULL * 1024ULL * 1024ULL) : (768ULL * 1024ULL * 1024ULL);
+
+        // Legacy min: 768MB (or 1GB for larger totals). In OO SAFE/DEGRADED, allow a smaller floor.
+        UINT64 default_min_total = (total > 768ULL * 1024ULL * 1024ULL) ? (1024ULL * 1024ULL * 1024ULL) : (768ULL * 1024ULL * 1024ULL);
+        UINT64 min_total = default_min_total;
+        if (g_cfg_oo_enable && g_oo_last_mode_valid) {
+            if (g_oo_last_mode == LLMK_OO_MODE_SAFE) {
+                min_total = 512ULL * 1024ULL * 1024ULL;
+            } else if (g_oo_last_mode == LLMK_OO_MODE_DEGRADED) {
+                min_total = 640ULL * 1024ULL * 1024ULL;
+            }
+        }
+        if (g_cfg_oo_enable && g_oo_last_mode_valid && (g_oo_last_mode == LLMK_OO_MODE_SAFE || g_oo_last_mode == LLMK_OO_MODE_DEGRADED)) {
+            if (g_cfg_oo_min_total_mb >= 0) {
+                min_total = (UINT64)g_cfg_oo_min_total_mb * 1024ULL * 1024ULL;
+            }
+        }
+        if (g_cfg_oo_enable && g_oo_last_mode_valid && (g_oo_last_mode == LLMK_OO_MODE_SAFE || g_oo_last_mode == LLMK_OO_MODE_DEGRADED)) {
+            if (min_total != default_min_total) {
+                Print(L"OK: OO zones min_total=%luMB (mode=%s)\r\n", (UINT64)(min_total / (1024ULL * 1024ULL)), llmk_oo_mode_name(g_oo_last_mode));
+            }
+        }
         if (total < min_total) total = min_total;
 
         LlmkZonesConfig zcfg;
@@ -7372,7 +8839,7 @@ gguf_fallback_done:
             Print(L"[3/7] Init kernel zones (%d MB)...\r\n", (int)(total / (1024 * 1024)));
         }
         status = llmk_zones_init(BS, &zcfg, &g_zones);
-        if (EFI_ERROR(status) && total > min_total) {
+        if (EFI_ERROR(status) && min_total > 0 && total > min_total) {
             // If the computed size can't be allocated (e.g. low guest RAM / fragmentation),
             // fall back to a smaller default so the REPL can still boot with smaller models.
             if (g_boot_verbose) {
@@ -7807,9 +9274,10 @@ gguf_fallback_done:
     }
     
     EFI_FILE_HANDLE TokFile;
-    status = uefi_call_wrapper(Root->Open, 5, Root, &TokFile, L"tokenizer.bin", EFI_FILE_MODE_READ, 0);
-    if (EFI_ERROR(status)) {
-        Print(L"ERROR: Tokenizer file not found\r\n");
+    TokFile = NULL;
+    status = llmk_open_read_with_fat83_fallback(Root, L"tokenizer.bin", &TokFile, NULL, 0, L"tokenizer");
+    if (EFI_ERROR(status) || !TokFile) {
+        Print(L"ERROR: Tokenizer file not found (%r)\r\n", status);
         return status;
     }
     
@@ -9174,10 +10642,19 @@ snap_autoload_done:
                 }
 
                 EFI_FILE_HANDLE f = NULL;
-                EFI_STATUS st = llmk_open_read_file(&f, path16);
+                CHAR16 picked[192];
+                picked[0] = 0;
+                EFI_STATUS st = llmk_open_read_with_fat83_fallback(Root, path16, &f, picked,
+                                                                  (int)(sizeof(picked) / sizeof(picked[0])),
+                                                                  L"model_info");
                 if (EFI_ERROR(st) || !f) {
                     Print(L"\r\nERROR: open failed: %s (%r)\r\n\r\n", path16, st);
                     continue;
+                }
+
+                // If we opened via an 8.3 alias, reflect it in the printed file path.
+                if (picked[0]) {
+                    llmk_char16_copy_cap(path16, (int)(sizeof(path16) / sizeof(path16[0])), picked);
                 }
 
                 LlmkModelFormat fmt = llmk_detect_model_format(f);
@@ -9736,10 +11213,18 @@ snap_autoload_done:
                 ascii_to_char16(snap16, snap8, (int)(sizeof(snap16) / sizeof(snap16[0])));
 
                 EFI_FILE_HANDLE f = NULL;
-                EFI_STATUS st = llmk_open_read_file(&f, snap16);
+                CHAR16 picked[96];
+                picked[0] = 0;
+                EFI_STATUS st = llmk_open_read_with_fat83_fallback(g_root, snap16, &f, picked,
+                                                                  (int)(sizeof(picked) / sizeof(picked[0])),
+                                                                  is_check ? L"mem_snap_check" : L"mem_snap_info");
                 if (EFI_ERROR(st) || !f) {
                     Print(L"\r\nERROR: open failed: %r\r\n\r\n", st);
                     continue;
+                }
+
+                if (picked[0]) {
+                    llmk_char16_copy_cap(snap16, (int)(sizeof(snap16) / sizeof(snap16[0])), picked);
                 }
 
                 LlmkSnapHeader hdr;
@@ -11670,6 +13155,35 @@ snap_autoload_done:
                 g_oo_auto_total = 0;
                 g_oo_auto_user[0] = 0;
                 continue;
+            } else if (my_strncmp(prompt, "/oo_consult", 11) == 0) {
+                // OO M5: LLM consult (suggest system adaptation action).
+                // Check prerequisites.
+                int consult_enabled = g_cfg_oo_llm_consult;
+                if (consult_enabled < 0) {
+                    consult_enabled = g_cfg_oo_enable; // default: follow oo_enable
+                }
+                if (!consult_enabled) {
+                    Print(L"\r\nERROR: OO LLM consult is disabled (oo_llm_consult=0)\r\n\r\n");
+                    continue;
+                }
+                if (!g_cfg_oo_enable) {
+                    Print(L"\r\nERROR: OO is not enabled (oo_enable=0)\r\n\r\n");
+                    continue;
+                }
+                if (!g_llmk_ready) {
+                    Print(L"\r\nERROR: llmk not ready (no model loaded)\r\n\r\n");
+                    continue;
+                }
+                if (g_loaded_model_format == LLMK_MODEL_FMT_UNKNOWN) {
+                    Print(L"\r\nERROR: no model loaded\r\n\r\n");
+                    continue;
+                }
+
+                Print(L"\r\n[oo_consult] Consulting LLM for system status adaptation...\r\n\r\n");
+                llmk_oo_consult_execute(&config, &weights, &state, &tokenizer,
+                                       temperature, min_p, top_p, top_k);
+                Print(L"\r\n");
+                continue;
             } else if (my_strncmp(prompt, "/autorun_stop", 13) == 0) {
                 if (g_autorun_active) {
                     Print(L"\r\n[autorun] stopping\r\n\r\n");
@@ -12698,10 +14212,8 @@ snap_autoload_done:
                     }
                     generated_count++;
                     
-                    // Update Desktop UI (Animates while thinking)
-                    if ((step % 2) == 0) { // Update every 2 tokens to save perf
-                         // Estimate fake load
-                         Desk_UpdateStats(50 + (generated_count % 50), 20); // 20 t/s visual
+                    // Update UI (simple overlay if enabled)
+                    if ((step % 2) == 0) {
                          InterfaceFx_Tick(); 
                     }
 

@@ -103,10 +103,6 @@ static void Desk_DrawBottomBar(void) {
     UINT32 y = g_desktop.Height - 30;
     Desk_FillRect(0, y, g_desktop.Width, 30, ColOsDim);
     Desk_FillRect(0, y, g_desktop.Width, 1, ColOsAccent);
-    
-    // Activity Pulse
-    UINT32 pulse = (g_desktop.FrameCount / 10) % 20; // 0..19
-    Desk_FillRect(20 + (pulse * 10), y + 10, 8, 10, ColOsAccent);
 }
 
 static void Desk_DrawSideWidgets(void) {
@@ -132,10 +128,14 @@ static void Desk_DrawSideWidgets(void) {
     UINT32 my = 100;
     UINT32 tps = g_desktop.TokPerSec;
     if (tps == 0) tps = 10; // Idle speed
+
+    // Avoid modulo by zero when tps is high.
+    UINT32 period = (tps >= 200) ? 1 : (200 / tps);
+    if (period == 0) period = 1;
     
     for(int i=0; i<10; i++) {
         // Higher speed = faster flashing
-        EFI_GRAPHICS_OUTPUT_BLT_PIXEL c = ((g_desktop.FrameCount + i) % (200/tps) == 0) ? ColOsAccent : ColOsBg;
+        EFI_GRAPHICS_OUTPUT_BLT_PIXEL c = (((g_desktop.FrameCount + (UINT32)i) % period) == 0) ? ColOsAccent : ColOsBg;
         Desk_FillRect(mx, my + (i*22), 30, 20, c);
         Desk_DrawRect(mx, my + (i*22), 30, 20, ColOsDim);
     }
@@ -157,8 +157,8 @@ static void Desk_DrawHolographicOverlay(void) {
     // Draw Corner Brackets (HUD style)
     UINT32 w = g_desktop.Width;
     UINT32 h = g_desktop.Height;
-    UINT32 len = 50;
-    UINT32 thick = 3;
+    UINT32 len = 18;
+    UINT32 thick = 2;
     
     // TL
     Desk_FillRect(0, 0, len, thick, ColOsAccent);
@@ -189,10 +189,10 @@ static void Desktop_Tick(void) {
     // Ideally we would set text window margins, but EFI doesn't support that easily.
     // We just redraw the UI *on top* of text margins.
     
+    // Keep the overlay minimal so it doesn't fight with ConOut text.
     Desk_DrawTopBar();
     Desk_DrawBottomBar();
-    Desk_DrawSideWidgets();
-    Desk_DrawHolographicOverlay(); // Be careful not to cover text
+    Desk_DrawHolographicOverlay();
 }
 
 static EFI_STATUS Desktop_Init(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {

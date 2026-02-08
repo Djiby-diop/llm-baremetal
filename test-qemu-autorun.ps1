@@ -30,6 +30,10 @@ param(
     [switch]$SkipModelAssertions,
 
     [switch]$SkipBuild,
+
+    # Optional: bootstrap pinned toolchains (downloaded into tools/_toolchains/, ignored by git)
+    # before running any build steps.
+    [switch]$BootstrapToolchains,
     [switch]$SkipExtract,
     [switch]$SkipInspect,
 
@@ -39,7 +43,7 @@ param(
 
     [switch]$ForceAvx2,
 
-    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke')]
+    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log')]
     [string]$Mode = 'smoke',
 
     # Optional repl.cfg overrides injected into the boot image for the duration of the test.
@@ -85,7 +89,12 @@ param(
     [string]$GenPrompt = 'Repeat the word apple 200 times separated by spaces. No punctuation.'
 )
 
+. (Join-Path $PSScriptRoot 'tools\fat83.ps1')
+
 $ErrorActionPreference = 'Stop'
+
+# Be cwd-independent: ensure relative operations happen from this script folder.
+Set-Location -LiteralPath $PSScriptRoot
 
 function Resolve-DefaultModelSpec {
     $preferred = @(
@@ -178,9 +187,11 @@ function Resolve-ImagePath([string]$override) {
     }
 
     # Prefer the most recently written image (supports timestamped images when an older one is locked by QEMU).
-    $candidates = Get-ChildItem -Path $PSScriptRoot -Filter 'llm-baremetal-boot*.img' -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending
-    if ($candidates -and $candidates.Count -gt 0) {
+    $candidates = @(
+        Get-ChildItem -Path $PSScriptRoot -Filter 'llm-baremetal-boot*.img' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending
+    )
+    if ($candidates.Length -gt 0) {
         return $candidates[0].FullName
     }
 
@@ -290,6 +301,20 @@ function Assert-Match([string]$haystack, [string]$pattern, [string]$label) {
     }
 }
 
+function Assert-ContainsAny([string]$haystack, [string[]]$needles, [string]$label) {
+    if ([string]::IsNullOrEmpty($haystack)) {
+        throw "Missing expected output ($label): <empty output>"
+    }
+    $ok = $false
+    foreach ($n in ($needles | Where-Object { $_ -and $_.Length -gt 0 })) {
+        if ($haystack.Contains($n)) { $ok = $true; break }
+    }
+    if (-not $ok) {
+        $joined = ($needles | Where-Object { $_ } | ForEach-Object { "'$_'" }) -join ' OR '
+        throw "Missing expected output ($label): $joined"
+    }
+}
+
 function Show-Tails([string]$serialLog, [string]$tmpErr, [string]$tmpOut) {
     Write-Host "`n[Debug] Serial log tail:" -ForegroundColor Yellow
     if ($serialLog -and (Test-Path $serialLog)) {
@@ -321,7 +346,10 @@ if ($OverlayTimeMatrix) {
     # Build once (if requested), then re-run self twice with -SkipBuild.
     if (-not $SkipBuild) {
         Write-Host '[Test] Building + creating image (WSL)...' -ForegroundColor Cyan
-        & (Join-Path $PSScriptRoot 'build.ps1') -ModelBin $ModelBin
+        $bp = @{}
+        if ($ModelBin) { $bp.ModelBin = $ModelBin }
+        if ($BootstrapToolchains) { $bp.BootstrapToolchains = $true }
+        & (Join-Path $PSScriptRoot 'build.ps1') @bp
         if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
     }
 
@@ -337,6 +365,7 @@ if ($OverlayTimeMatrix) {
             Mode = $Mode
             OverlayTimeMode = $m
         }
+        if ($BootstrapToolchains) { $p.BootstrapToolchains = $true }
         if ($SkipExtract) { $p.SkipExtract = $true }
         if ($SkipInspect) { $p.SkipInspect = $true }
         if ($ForceAvx2) { $p.ForceAvx2 = $true }
@@ -369,9 +398,6 @@ $didModifyImage = $false
 $imageBackups = @()
 $isTempImage = $false
 
-# When -ExtraModel is injected, mtools copy uses a randomized temp name; the final file on the FAT volume is that temp basename.
-$extraInjectedName = $null
-
 # If invoked via `powershell -File`, passing a string[] can be finicky.
 # Allow a single string containing newline-separated commands.
 if ($Mode -eq 'custom' -and $AutorunScript) {
@@ -397,7 +423,7 @@ function Backup-ImageFile {
     $wslTmp = ConvertTo-WslPath $tmp
 
     # mcopy returns non-zero if the file doesn't exist; that's fine.
-    wsl bash -lc ("mcopy -o -i '{0}@@{1}' '::{2}' '{3}'" -f $wslImg, $FatOffsetBytes, $ImageFile, $wslTmp)
+    wsl bash -lc ("mcopy -o -i '{0}@@{1}' '::{2}' '{3}' 2>/dev/null" -f $wslImg, $FatOffsetBytes, $ImageFile, $wslTmp)
     $exists = ($LASTEXITCODE -eq 0) -and (Test-Path $tmp)
 
     if (-not $exists) {
@@ -418,7 +444,7 @@ function Restore-ImageFile {
     $wslImg = ConvertTo-WslPath $ImagePath
     if ($Entry.Existed -and $Entry.BackupPath -and (Test-Path $Entry.BackupPath)) {
         $wslTmp = ConvertTo-WslPath $Entry.BackupPath
-        wsl bash -lc ("set -e && mcopy -o -i '{0}@@{1}' '{2}' '::{3}'" -f $wslImg, $FatOffsetBytes, $wslTmp, $Entry.ImageFile)
+        wsl bash -lc ("set -e && mcopy -o -i '{0}@@{1}' '{2}' '::{3}' 2>/dev/null" -f $wslImg, $FatOffsetBytes, $wslTmp, $Entry.ImageFile)
     } else {
         wsl bash -lc ("(mdel -i '{0}@@{1}' '::{2}' 2>/dev/null || true)" -f $wslImg, $FatOffsetBytes, $Entry.ImageFile)
     }
@@ -461,6 +487,178 @@ switch ($Mode) {
             '/ram'
         )
     }
+    'fat83_fallback' {
+        $autorunLinesEffective = @(
+            '# llmk autorun FAT83 fallback proof (forced)',
+            '/version'
+        )
+    }
+    'oo_smoke' {
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M1 smoke test (persistent state + journal)',
+            '/version'
+        )
+    }
+    'oo_recovery' {
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M2 recovery test (corrupt state -> SAFE rollback)',
+            '/version'
+        )
+    }
+    'oo_ctx_clamp' {
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M3 homeostasis proof (ctx_len clamp in SAFE/DEGRADED)',
+            '/version'
+        )
+    }
+    'oo_ctx_clamp_degraded' {
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M3 proof (reach DEGRADED then assert ctx_len clamp uses DEGRADED cap)',
+            '/version'
+        )
+    }
+    'oo_model_fallback' {
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M3 proof (invalid repl.cfg model -> fallback + log marker)',
+            '/version'
+        )
+
+        # Force an invalid model override if caller didn't provide one.
+        if (-not $PSBoundParameters.ContainsKey('BootModel') -or -not $BootModel) {
+            $BootModel = 'models\__no_such_model__.bin'
+        }
+
+        # This mode intentionally makes the repl.cfg model invalid. If the model picker is enabled
+        # and multiple models exist in the image, the kernel will prompt interactively and autorun
+        # won't start. Force it off for deterministic CI.
+        if (-not $PSBoundParameters.ContainsKey('ModelPicker')) {
+            $ModelPicker = 0
+        }
+
+        # Expect the real bundled model to load (not the invalid override).
+        if (-not $PSBoundParameters.ContainsKey('ExpectedModel') -or -not $ExpectedModel) {
+            $ExpectedModel = $ModelBin
+        }
+    }
+    'oo_ram_preflight' {
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M3 proof (RAM budget preflight + smaller SAFE/DEGRADED zone minimum)',
+            '/version'
+        )
+
+        # Deterministic low-memory target: the legacy code path hard-floors Zone B at 768MB.
+        # With OO enabled in SAFE mode, we allow a smaller minimum so this still boots.
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 640
+        }
+    }
+    'oo_ram_preflight_seq' {
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M3 proof (RAM preflight must reduce seq_len under tight RAM)',
+            '/version'
+        )
+
+        # Tight RAM target intended to force seq_len reduction while still booting.
+        # This mode disables the OO zone minimum floor so the reduction is observable.
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 620
+        }
+    }
+    'oo_llm_consult' {
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M5 proof (LLM consult suggests system adaptation)',
+            '/version',
+            '/oo_consult',
+            '/quit'
+        )
+
+        # Lower RAM to trigger SAFE mode with visible budget pressure.
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 640
+        }
+
+        # Extend timeout to allow LLM generation.
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 600
+        }
+    }
+    'oo_llm_multi' {
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M5.1 proof (LLM multi-action parsing)',
+            '/version',
+            '/oo_consult',
+            '/quit'
+        )
+
+        # DEGRADED mode: some RAM pressure but not full SAFE (allow multi-actions)
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 768
+        }
+
+        # Extend timeout to allow LLM generation.
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 600
+        }
+    }
+    'oo_llm_multi_mock' {
+        # Mock test: simulate LLM suggesting "reduce ctx and seq"
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M5.1 mock (deterministic multi-action test)',
+            '/version',
+            '/oo_consult_mock reduce ctx and seq',
+            '/quit'
+        )
+
+        # DEGRADED mode: some RAM pressure but not full SAFE (allow multi-actions)
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 768
+        }
+
+        # Fast mock test (no LLM generation)
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 30
+        }
+    }
+    'oo_auto_apply' {
+        # M5.2: Auto-apply test (LLM suggests, system applies automatically)
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M5.2 (auto-apply validation)',
+            '/version',
+            '/ctx',
+            '/oo_consult',
+            '/quit'
+        )
+
+        # SAFE mode: 640MB RAM to trigger reductions
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 640
+        }
+
+        # Extend timeout to allow LLM generation
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 600
+        }
+    }
+    'oo_consult_log' {
+        # M5.3: Consultation logging test (2x consultations, verify OOCONSULT.LOG)
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M5.3 (consultation logging validation)',
+            '/version',
+            '/oo_consult',
+            '/oo_consult',
+            '/quit'
+        )
+
+        # SAFE mode: 640MB RAM to trigger reductions
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 640
+        }
+
+        # Extend timeout for 2x LLM generations
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 900
+        }
+    }
     'gen' {
         $autorunLinesEffective = @(
             '# llmk autorun gen smoke test',
@@ -475,11 +673,12 @@ switch ($Mode) {
         )
     }
     'gguf_smoke' {
+        $ggufMaxTokens = if ($PSBoundParameters.ContainsKey('GenMaxTokens')) { $GenMaxTokens } else { 16 }
         $autorunLinesEffective = @(
             '# llmk autorun gguf smoke test (injected model)',
             '/version',
             '/cfg',
-            ("/max_tokens {0}" -f $GenMaxTokens),
+            ("/max_tokens {0}" -f $ggufMaxTokens),
             '/stats 1',
             '/stop_you 0',
             '/stop_nl 0',
@@ -496,7 +695,7 @@ switch ($Mode) {
     }
 }
 
-[System.IO.File]::WriteAllText($autorunPath, ($autorunLinesEffective -join "`n") + "`n", [System.Text.Encoding]::ASCII)
+[System.IO.File]::WriteAllText($autorunPath, ($autorunLinesEffective -join "`r`n") + "`r`n", [System.Text.Encoding]::ASCII)
 
 # q8bench requires a Q8_0 GGUF in blob mode. Default to the bundled Q8_0 model
 # if the caller didn't explicitly specify -BootModel.
@@ -504,66 +703,19 @@ if (-not $PSBoundParameters.ContainsKey('BootModel')) {
     if ($Mode -eq 'q8bench') {
         $BootModel = 'models\stories15M.q8_0.gguf'
     }
-}
-
-$tmpCfg = @(
-    '# test-qemu-autorun.ps1 temporary config',
-    "model=$ModelBin",
-    'boot_verbose=1',
-    "overlay_time_mode=$OverlayTimeMode",
-    'autorun_autostart=1',
-    'autorun_shutdown_when_done=1',
-    'autorun_file=llmk-autorun.txt'
-)
-
-if ($Mode -eq 'q8bench') {
-    $tmpCfg += 'gguf_q8_blob=1'
-}
-
-# Apply optional boot-time model override for repl.cfg.
-# If an ExtraModel is injected into ::models/, allow the caller to refer to it as models\<basename>
-# and rewrite to the actual injected filename.
-$bootModelEffective = $BootModel
-if ($ExtraModel -and $extraInjectedName) {
-    $extraBase = $extraBaseName
-    if (-not $bootModelEffective -and $Mode -eq 'gguf_smoke') {
-        $bootModelEffective = ("models\\{0}" -f $extraInjectedName)
-    } elseif ($bootModelEffective) {
-        $bmNorm = $bootModelEffective -replace '/','\\'
-        if ($bmNorm -match '^(models\\)(.+)$') {
-            $tail = $Matches[2]
-            if ($tail -ieq $extraBase) {
-                $bootModelEffective = ("models\\{0}" -f $extraInjectedName)
-            }
-        }
-    }
-
-    # If expected model was not specified, infer it for injected runs.
-    if (-not $ExpectedModel -and ($Mode -eq 'gguf_smoke' -or $bootModelEffective -match '^models\\')) {
-        $ExpectedModel = ("models\\{0}" -f $extraInjectedName)
+    if ($Mode -eq 'gguf_smoke') {
+        # Prefer the small bundled GGUF if present in the image.
+        $BootModel = 'models\stories15M.q8_0.gguf'
     }
 }
-
-if ($bootModelEffective) {
-    $tmpCfg[1] = "model=$bootModelEffective"
-}
-
-if ($CtxLen -gt 0) {
-    $tmpCfg += "ctx_len=$CtxLen"
-}
-
-if ($ModelPicker -ge 0) {
-    $tmpCfg += "model_picker=$ModelPicker"
-}
-
-$tmpCfg = $tmpCfg -join "`n"
-
-[System.IO.File]::WriteAllText($tmpCfgPath, $tmpCfg + "`n", [System.Text.Encoding]::ASCII)
 
 try {
     if (-not $SkipBuild) {
         Write-Host '[Test] Building + creating image (WSL)...' -ForegroundColor Cyan
-        & (Join-Path $PSScriptRoot 'build.ps1') -ModelBin $ModelBin
+        $bp = @{}
+        if ($ModelBin) { $bp.ModelBin = $ModelBin }
+        if ($BootstrapToolchains) { $bp.BootstrapToolchains = $true }
+        & (Join-Path $PSScriptRoot 'build.ps1') @bp
     }
 
     $QEMU = Resolve-QemuPath $QemuPath
@@ -574,6 +726,15 @@ try {
     # This avoids leaving the primary image modified and sidesteps file-lock edge cases.
     if ($ExtraModel) {
         Write-Host "[Test] ExtraModel injection requested; copying image to temp for this run..." -ForegroundColor Yellow
+        $IMAGE = Get-TempImageCopy $IMAGE
+        $isTempImage = $true
+        Write-Host "[Test] Using temp image: $IMAGE" -ForegroundColor Yellow
+    }
+
+    # OO persistence tests must persist disk writes across two boots. Always operate on a temp image copy
+    # so we can run without -snapshot and still keep the working tree clean.
+    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery') -and -not $isTempImage) {
+        Write-Host "[Test] ${Mode}: using temp image (no -snapshot, 2 boots)" -ForegroundColor Yellow
         $IMAGE = Get-TempImageCopy $IMAGE
         $isTempImage = $true
         Write-Host "[Test] Using temp image: $IMAGE" -ForegroundColor Yellow
@@ -685,6 +846,7 @@ try {
                 }
                 throw "WSL step failed ($label), exit=$LASTEXITCODE"
             }
+            return $out
         } finally {
             try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpSh } catch {}
         }
@@ -695,10 +857,30 @@ try {
     Invoke-WslStep 'stage image into WSL temp' ("cp -f '{0}' '{1}'" -f $wslImgOriginal, $wslImgWork) 120
     $wslImg = $wslImgWork
 
+    function Resolve-FatShortNameForModelSpec([string]$modelSpec) {
+        if (-not $modelSpec) { return $modelSpec }
+
+        $norm = $modelSpec -replace '/','\\'
+        $dir = '::/'
+        if ($norm -match '^(models\\)(.+)$') {
+            $dir = '::/models'
+        }
+
+        # Query the directory listing and try to map the long name to its 8.3 alias.
+        # Many UEFI FAT drivers accept the 8.3 short name reliably even when long name opens fail.
+        $lines = Invoke-WslStep 'probe model short name (mdir)' ("mdir -i '$wslImg@@$fatOffset' $dir") 30
+        $lines = @($lines) | Where-Object { $_ -and ($_.ToString().Trim().Length -gt 0) }
+        if ($lines.Length -eq 0) { return $modelSpec }
+
+        $resolved = Resolve-Fat83ModelSpecFromMdirLines -ModelSpec $modelSpec -MdirLines $lines
+        if ($resolved) { return $resolved }
+
+        return $modelSpec
+    }
+
     $extraCopyCmd = ''
     if ($extraLocalPath) {
         $wslExtra = ConvertTo-WslPath $extraLocalPath
-        $extraInjectedName = $extraBaseName
         $extraCopyCmd = (
             "echo '[mtools] preflight root'; " +
             "mdir -i '$wslImg@@$fatOffset' ::/ >/dev/null; " +
@@ -726,10 +908,113 @@ try {
         "(mdel -i '$wslImg@@$fatOffset' ::oo-test.bin.bak 2>/dev/null || true)"
     ) 30
 
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery') {
+        Invoke-WslStep 'clear OO persistent files' (
+            "(mdel -i '$wslImg@@$fatOffset' ::OOSTATE.BIN 2>/dev/null || true); " +
+            "(mdel -i '$wslImg@@$fatOffset' ::OORECOV.BIN 2>/dev/null || true); " +
+            "(mdel -i '$wslImg@@$fatOffset' ::OOJOUR.LOG 2>/dev/null || true)"
+        ) 30
+    }
+
     # 2) Optional: copy an extra model under ::models/.
     if ($extraCopyCmd) {
         Invoke-WslStep 'copy ExtraModel into ::models/' $extraCopyCmd 300
     }
+
+    # Build repl.cfg now that we know whether we're injecting an ExtraModel and
+    # can map long filenames to FAT 8.3 aliases when needed.
+    $bootModelEffective = $BootModel
+    if ($ExtraModel -and $extraBaseName) {
+        if (-not $bootModelEffective -and $Mode -eq 'gguf_smoke') {
+            $bootModelEffective = ("models\\{0}" -f $extraBaseName)
+        } elseif ($bootModelEffective) {
+            $bmNorm = $bootModelEffective -replace '/','\\'
+            if ($bmNorm -match '^(models\\)(.+)$') {
+                $tail = $Matches[2]
+                if ($tail -ieq $extraBaseName) {
+                    $bootModelEffective = ("models\\{0}" -f $extraBaseName)
+                }
+            }
+        }
+
+        if (-not $ExpectedModel -and ($Mode -eq 'gguf_smoke' -or $bootModelEffective -match '^models\\')) {
+            $ExpectedModel = ("models\\{0}" -f $extraBaseName)
+        }
+    }
+
+    $modelForCfgOriginal = if ($bootModelEffective) { $bootModelEffective } else { $ModelBin }
+    $modelForCfg = $null
+    if ($Mode -eq 'fat83_fallback') {
+        # Intentionally keep the long name in repl.cfg. The kernel is expected to prefer the 8.3 alias
+        # when fat83_force=1 is set (deterministic under QEMU/OVMF).
+        $modelForCfg = $modelForCfgOriginal
+    } else {
+        $modelForCfg = Resolve-FatShortNameForModelSpec $modelForCfgOriginal
+        if ($modelForCfg -and $modelForCfgOriginal -and ($modelForCfg -ne $modelForCfgOriginal)) {
+            Write-Host ("[Test] repl.cfg: model='{0}' -> '{1}' (FAT 8.3 alias)" -f $modelForCfgOriginal, $modelForCfg) -ForegroundColor DarkGray
+        }
+    }
+
+    # Keep for post-run assertions (the guest will report the actual loaded path, which may be the 8.3 alias).
+    if ($Mode -eq 'fat83_fallback') {
+        $expectedLoadedFromCfg = Resolve-FatShortNameForModelSpec $modelForCfgOriginal
+        $expectedLoadedOriginal = $modelForCfgOriginal
+    } else {
+        $expectedLoadedFromCfg = $modelForCfg
+        $expectedLoadedOriginal = $modelForCfgOriginal
+    }
+
+    $tmpCfgLines = @(
+        '# test-qemu-autorun.ps1 temporary config',
+        ("model={0}" -f $modelForCfg),
+        'boot_verbose=1',
+        'stats=1',
+        ("overlay_time_mode={0}" -f $OverlayTimeMode),
+        'autorun_autostart=1',
+        'autorun_shutdown_when_done=1',
+        'autorun_file=llmk-autorun.txt'
+    )
+
+    if ($Mode -eq 'fat83_fallback') {
+        $tmpCfgLines += 'fat83_force=1'
+    }
+
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log') {
+        $tmpCfgLines += 'oo_enable=1'
+    }
+    if ($Mode -eq 'oo_ram_preflight_seq') {
+        $tmpCfgLines += 'oo_min_total_mb=0'
+    }
+    if ($Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log') {
+        $tmpCfgLines += 'oo_llm_consult=1'
+    }
+    if ($Mode -eq 'oo_llm_multi') {
+        $tmpCfgLines += 'oo_multi_actions=1'
+    }
+    if ($Mode -eq 'oo_auto_apply') {
+        $tmpCfgLines += 'oo_auto_apply=1'
+    }
+    if ($Mode -eq 'oo_consult_log') {
+        $tmpCfgLines += 'oo_consult_log=1'
+    }
+
+    if ($Mode -eq 'q8bench') {
+        $tmpCfgLines += 'gguf_q8_blob=1'
+    }
+    $ctxLenEffective = $CtxLen
+    if (($Mode -eq 'oo_ctx_clamp') -and ($ctxLenEffective -le 0)) {
+        # Force an intentionally large ctx_len in repl.cfg to exercise the clamp.
+        # Note: the model seq_len will still bound the effective context.
+        $ctxLenEffective = 4096
+    }
+    if ($ctxLenEffective -gt 0) {
+        $tmpCfgLines += ("ctx_len={0}" -f $ctxLenEffective)
+    }
+    if ($ModelPicker -ge 0) {
+        $tmpCfgLines += ("model_picker={0}" -f $ModelPicker)
+    }
+
+    [System.IO.File]::WriteAllText($tmpCfgPath, ($tmpCfgLines -join "`r`n") + "`r`n", [System.Text.Encoding]::ASCII)
 
     # 3) Inject repl.cfg + autorun file.
     Invoke-WslStep 'write repl.cfg' ("mcopy -o -i '$wslImg@@$fatOffset' '$wslCfg' ::repl.cfg") 30
@@ -768,90 +1053,218 @@ try {
         return '"' + ($p -replace '"','""') + '"'
     }
 
-    $qemuArgs = @(
-        '-m', "$MemMB",
-        '-machine', 'q35',
-        '-cpu', $cpu,
-        '-snapshot',
-        '-drive', ("if=ide,format=raw,file=" + (ConvertTo-DriveFileArg $IMAGE)),
-        '-drive', ("if=pflash,format=raw,readonly=on,file=" + (ConvertTo-DriveFileArg $OVMF)),
-        '-display', 'none',
-        '-serial', "file:$serialLog"
-    ) + $accelArgs
+    function Invoke-QemuAutorunOnce([string]$runLabel) {
+        $id = [Guid]::NewGuid().ToString('n')
+        $serialLogLocal = Join-Path $env:TEMP ("llm-baremetal-serial-autorun-{0}-{1}.txt" -f $id, $runLabel)
+        $tmpOutLocal = Join-Path $env:TEMP ("llm-baremetal-qemu-out-{0}-{1}.txt" -f $id, $runLabel)
+        $tmpErrLocal = Join-Path $env:TEMP ("llm-baremetal-qemu-err-{0}-{1}.txt" -f $id, $runLabel)
 
-    Write-Host "[Test] Starting QEMU (accel=$Accel, mem=${MemMB}MB)..." -ForegroundColor Cyan
+        # Ensure output files exist so we can always surface QEMU errors even if it exits immediately.
+        try { Set-Content -LiteralPath $tmpOutLocal -Value '' -NoNewline -Encoding Ascii -ErrorAction SilentlyContinue } catch {}
+        try { Set-Content -LiteralPath $tmpErrLocal -Value '' -NoNewline -Encoding Ascii -ErrorAction SilentlyContinue } catch {}
 
-    $proc = Start-Process -FilePath $QEMU -ArgumentList $qemuArgs -NoNewWindow -PassThru -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+        $qemuArgsLocal = @(
+            '-m', "$MemMB",
+            '-machine', 'q35',
+            '-cpu', $cpu
+        )
+        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded') {
+            $qemuArgsLocal += '-snapshot'
+        }
+        $qemuArgsLocal += @(
+            '-drive', ("if=ide,format=raw,file=" + (ConvertTo-DriveFileArg $IMAGE)),
+            '-drive', ("if=pflash,format=raw,readonly=on,file=" + (ConvertTo-DriveFileArg $OVMF)),
+            '-display', 'none',
+            '-serial', "file:$serialLogLocal"
+        )
+        $qemuArgsLocal += $accelArgs
 
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    $sawShutdown = $false
-    $sawReplExit = $false
-    $sawBootFailure = $false
-    $bootFailureReason = ''
+        Write-Host "[Test] Starting QEMU ($runLabel) (accel=$Accel, mem=${MemMB}MB)..." -ForegroundColor Cyan
 
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 500
-        if (Test-Path $serialLog) {
-            $serial = Get-Content -Path $serialLog -Raw -ErrorAction SilentlyContinue
-            if ($serial -and $serial.Contains('[autorun] shutting down')) {
-                $sawShutdown = $true
-                break
-            }
+        try {
+            $procLocal = Start-Process -FilePath $QEMU -ArgumentList $qemuArgsLocal -NoNewWindow -PassThru -RedirectStandardOutput $tmpOutLocal -RedirectStandardError $tmpErrLocal
+        } catch {
+            $msg = $_.Exception.Message
+            throw "Failed to start QEMU: $msg"
+        }
 
-            # In custom mode, the script may intentionally exit the REPL ("exit"/"quit")
-            # which returns to the UEFI shell and blocks on a keypress. Treat that as completion.
-            if ($Mode -eq 'custom' -and $serial) {
-                if ($serial -match '(?m)^\s*\[7/7\]\s+Entering chat loop\.{3}\s*$' -and ($serial -match '(?i)\bGoodbye!\b' -or $serial -match '(?i)Press any key to exit')) {
-                    $sawReplExit = $true
+        $deadline = (Get-Date).AddSeconds($TimeoutSec)
+        $sawShutdownLocal = $false
+        $sawReplExitLocal = $false
+        $sawBootFailureLocal = $false
+        $bootFailureReasonLocal = ''
+        $serialLocal = ''
+
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            if (Test-Path $serialLogLocal) {
+                $serialLocal = Get-Content -Path $serialLogLocal -Raw -ErrorAction SilentlyContinue
+                if ($serialLocal -and $serialLocal.Contains('[autorun] shutting down')) {
+                    $sawShutdownLocal = $true
                     break
+                }
+
+                # In custom mode, the script may intentionally exit the REPL ("exit"/"quit")
+                # which returns to the UEFI shell and blocks on a keypress. Treat that as completion.
+                if ($Mode -eq 'custom' -and $serialLocal) {
+                    if ($serialLocal -match '(?m)^\s*\[7/7\]\s+Entering chat loop\.{3}\s*$' -and ($serialLocal -match '(?i)\bGoodbye!\b' -or $serialLocal -match '(?i)Press any key to exit')) {
+                        $sawReplExitLocal = $true
+                        break
+                    }
+                }
+
+                # If the payload returns to the UEFI shell, we won't see the shutdown marker.
+                # Detect common fatal boot failures early to avoid long timeouts.
+                if ($serialLocal) {
+                    if ($serialLocal -match 'BOOTX64\.EFI returned\. You are in the UEFI shell') {
+                        $sawBootFailureLocal = $true
+                        $bootFailureReasonLocal = 'Returned to UEFI shell'
+                        break
+                    }
+                    if ($serialLocal -match 'ERROR: llmk_zones_init failed') {
+                        $sawBootFailureLocal = $true
+                        $bootFailureReasonLocal = 'llmk_zones_init failed'
+                        break
+                    }
+                    if ($serialLocal -match 'Out of Resources') {
+                        $sawBootFailureLocal = $true
+                        if (-not $bootFailureReasonLocal) { $bootFailureReasonLocal = 'Out of Resources' }
+                        break
+                    }
                 }
             }
+            if ($procLocal.HasExited) { break }
+        }
 
-            # If the payload returns to the UEFI shell, we won't see the shutdown marker.
-            # Detect common fatal boot failures early to avoid long timeouts.
-            if ($serial) {
-                if ($serial -match 'BOOTX64\.EFI returned\. You are in the UEFI shell') {
-                    $sawBootFailure = $true
-                    $bootFailureReason = 'Returned to UEFI shell'
-                    break
-                }
-                if ($serial -match 'ERROR: llmk_zones_init failed') {
-                    $sawBootFailure = $true
-                    $bootFailureReason = 'llmk_zones_init failed'
-                    break
-                }
-                if ($serial -match 'Out of Resources') {
-                    $sawBootFailure = $true
-                    if (-not $bootFailureReason) { $bootFailureReason = 'Out of Resources' }
-                    break
-                }
+        if (-not $procLocal.HasExited) {
+            if ($sawBootFailureLocal) {
+                Write-Host "[Fail] Boot failure detected: $bootFailureReasonLocal" -ForegroundColor Red
+                try { Stop-Process -Id $procLocal.Id -Force -ErrorAction SilentlyContinue } catch {}
+                throw "Boot failure detected: $bootFailureReasonLocal"
+            }
+            if ($sawShutdownLocal -or $sawReplExitLocal) {
+                Write-Host '[Warn] Shutdown marker observed but QEMU did not exit; stopping QEMU process.' -ForegroundColor Yellow
+                try { Stop-Process -Id $procLocal.Id -Force -ErrorAction SilentlyContinue } catch {}
+            } else {
+                try { Stop-Process -Id $procLocal.Id -Force -ErrorAction SilentlyContinue } catch {}
+                throw "Timeout: QEMU did not exit within ${TimeoutSec}s"
             }
         }
-        if ($proc.HasExited) { break }
-    }
 
-    if (-not $proc.HasExited) {
-        if ($sawBootFailure) {
-            Write-Host "[Fail] Boot failure detected: $bootFailureReason" -ForegroundColor Red
-            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
-            throw "Boot failure detected: $bootFailureReason"
+        $exitCodeLocal = $null
+        try { if ($procLocal.HasExited) { $exitCodeLocal = $procLocal.ExitCode } } catch {}
+        $stderrLocal = ''
+        try { if (Test-Path $tmpErrLocal) { $stderrLocal = (Get-Content -Path $tmpErrLocal -Raw -ErrorAction SilentlyContinue) } } catch {}
+
+        if (-not (Test-Path $serialLogLocal)) {
+            if ($stderrLocal) {
+                $stderrLocal = $stderrLocal.Trim()
+                if ($stderrLocal.Length -gt 2000) { $stderrLocal = $stderrLocal.Substring($stderrLocal.Length - 2000) }
+            }
+            throw "Missing serial log: $serialLogLocal (qemu_exit=$exitCodeLocal)`n--- qemu stderr tail ---`n$stderrLocal"
         }
-        if ($sawShutdown -or $sawReplExit) {
-            Write-Host '[Warn] Shutdown marker observed but QEMU did not exit; stopping QEMU process.' -ForegroundColor Yellow
-            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
-        } else {
-            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
-            throw "Timeout: QEMU did not exit within ${TimeoutSec}s"
+
+        $serialLocal = Get-Content -Path $serialLogLocal -Raw -ErrorAction SilentlyContinue
+        if (-not $serialLocal) {
+            if ($stderrLocal) {
+                $stderrLocal = $stderrLocal.Trim()
+                if ($stderrLocal.Length -gt 2000) { $stderrLocal = $stderrLocal.Substring($stderrLocal.Length - 2000) }
+            }
+            throw "Failed to obtain serial log output from QEMU. (qemu_exit=$exitCodeLocal)`n--- qemu stderr tail ---`n$stderrLocal"
+        }
+
+        return [pscustomobject]@{
+            SerialLog = $serialLogLocal
+            StdOut = $tmpOutLocal
+            StdErr = $tmpErrLocal
+            Serial = $serialLocal
+            SawShutdown = $sawShutdownLocal
         }
     }
 
-    if (-not (Test-Path $serialLog)) {
-        throw "Missing serial log: $serialLog"
+    $runCount = 1
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery') { $runCount = 2 }
+    if ($Mode -eq 'oo_ctx_clamp_degraded') { $runCount = 3 }
+
+    $runs = @()
+    for ($ri = 1; $ri -le $runCount; $ri++) {
+        $runs += (Invoke-QemuAutorunOnce ("run$ri"))
+        if ($Mode -eq 'oo_smoke') {
+            Assert-Contains $runs[$runs.Count - 1].Serial ("OK: OO boot_count={0}" -f $ri) ("OO boot_count == $ri")
+        }
+
+        if ($Mode -eq 'oo_ctx_clamp_degraded') {
+            Assert-Contains $runs[$runs.Count - 1].Serial ("OK: OO boot_count={0}" -f $ri) ("OO boot_count == $ri")
+        }
+
+        if ($Mode -eq 'oo_recovery' -and $ri -eq 1) {
+            Write-Host '[Test] oo_recovery: corrupting OOSTATE.BIN before run2...' -ForegroundColor Yellow
+            $tmpCorrupt = Join-Path $env:TEMP ("llm-baremetal-oostate-corrupt-{0}.bin" -f ([Guid]::NewGuid().ToString('n')))
+            # 32 bytes of 0xAA (size must match state struct so loader reaches checksum check)
+            [byte[]]$b = @(0xAA) * 32
+            [System.IO.File]::WriteAllBytes($tmpCorrupt, $b)
+
+            $wslImgPost = ConvertTo-WslPath $IMAGE
+            $wslTmpCorrupt = ConvertTo-WslPath $tmpCorrupt
+
+            # Stage in WSL temp to avoid /mnt/c mtools hangs.
+            $wslImgWork2 = ("/tmp/llmk-imgwork-recov-{0}.img" -f ([Guid]::NewGuid().ToString('n')))
+            Invoke-WslStep 'stage image for recovery corruption' ("cp -f '$wslImgPost' '$wslImgWork2'") 120
+            Invoke-WslStep 'overwrite OOSTATE.BIN (corrupt)' ("mcopy -o -i '$wslImgWork2@@$fatOffset' '$wslTmpCorrupt' ::OOSTATE.BIN") 30
+            Invoke-WslStep 'sync corrupted image back to Windows' ("cp -f '$wslImgWork2' '$wslImgPost'") 120
+            Invoke-WslStep 'remove WSL temp image (recovery)' ("rm -f '$wslImgWork2'") 30
+
+            try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpCorrupt } catch {}
+        }
     }
 
-    $serial = Get-Content -Path $serialLog -Raw -ErrorAction SilentlyContinue
-    if (-not $serial) {
-        throw 'Failed to obtain serial log output from QEMU.'
+    $serialLog = $runs[$runs.Count - 1].SerialLog
+    $tmpOut = $runs[$runs.Count - 1].StdOut
+    $tmpErr = $runs[$runs.Count - 1].StdErr
+    $sawShutdown = $runs[$runs.Count - 1].SawShutdown
+    $serial = ($runs | ForEach-Object { $_.Serial }) -join "`r`n"
+
+    if ($Mode -eq 'oo_smoke') {
+        Write-Host '[Test] oo_smoke: extracting OO persistent files from image...' -ForegroundColor Cyan
+        $tmpOoState = Join-Path $env:TEMP ("llm-baremetal-oostate-{0}.bin" -f ([Guid]::NewGuid().ToString('n')))
+        $tmpOoJour = Join-Path $env:TEMP ("llm-baremetal-oojour-{0}.log" -f ([Guid]::NewGuid().ToString('n')))
+        $wslImgPost = ConvertTo-WslPath $IMAGE
+        $wslOoState = ConvertTo-WslPath $tmpOoState
+        $wslOoJour = ConvertTo-WslPath $tmpOoJour
+
+        Invoke-WslStep 'extract OOSTATE.BIN' ("mcopy -o -i '$wslImgPost@@$fatOffset' ::OOSTATE.BIN '$wslOoState'") 30
+        Invoke-WslStep 'extract OOJOUR.LOG' ("mcopy -o -i '$wslImgPost@@$fatOffset' ::OOJOUR.LOG '$wslOoJour'") 30
+
+        $stLen = (Get-Item -LiteralPath $tmpOoState).Length
+        if ($stLen -ne 32) {
+            throw "oo_smoke: unexpected OOSTATE.BIN size: $stLen (expected 32)"
+        }
+
+        $jour = Get-Content -LiteralPath $tmpOoJour -Raw -ErrorAction SilentlyContinue
+        if (-not $jour) { throw 'oo_smoke: OOJOUR.LOG is empty or unreadable' }
+        Assert-Contains $jour 'boot=1' 'journal contains boot=1'
+        Assert-Contains $jour 'boot=2' 'journal contains boot=2'
+
+        try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoState } catch {}
+        try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoJour } catch {}
+    }
+
+    if ($Mode -eq 'oo_recovery') {
+        # run2 should recover from corrupted primary state and enter SAFE.
+        $serial2 = $runs[1].Serial
+        Assert-Contains $serial2 '[oo] RECOVERY:' 'recovery marker printed'
+        Assert-Contains $serial2 'mode=SAFE' 'entered SAFE mode'
+        Assert-Contains $serial2 'OK: OO boot_count=2' 'boot_count progressed to 2'
+
+        Write-Host '[Test] oo_recovery: extracting OOJOUR.LOG for recovery event...' -ForegroundColor Cyan
+        $tmpOoJour = Join-Path $env:TEMP ("llm-baremetal-oojour-recov-{0}.log" -f ([Guid]::NewGuid().ToString('n')))
+        $wslImgPost = ConvertTo-WslPath $IMAGE
+        $wslOoJour = ConvertTo-WslPath $tmpOoJour
+        Invoke-WslStep 'extract OOJOUR.LOG (recovery)' ("mcopy -o -i '$wslImgPost@@$fatOffset' ::OOJOUR.LOG '$wslOoJour'") 30
+        $jour = Get-Content -LiteralPath $tmpOoJour -Raw -ErrorAction SilentlyContinue
+        if (-not $jour) { throw 'oo_recovery: OOJOUR.LOG is empty or unreadable' }
+        Assert-Contains $jour 'event=recover' 'journal contains recover event'
+        try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoJour } catch {}
     }
 
     # If the GGUF parser emits any COMPROMISED_DATA diagnostics, print them for quick copy/paste.
@@ -938,8 +1351,18 @@ try {
         # Validate model name is correct both at boot and in /version.
         # When iterating on GGUF fallback/injection behavior, these checks can be skipped.
         if (-not $skipModelAssertionsEffective) {
-            Assert-Contains $serial ("OK: Model loaded: $expectedLoaded") 'model loaded line'
-            Assert-Contains $serial ("model=$expectedLoaded") 'version shows model'
+            $loadedNeedles = @(
+                ("OK: Model loaded: {0}" -f $expectedLoaded),
+                ("OK: Model loaded: {0}" -f $expectedLoadedFromCfg),
+                ("OK: Model loaded: {0}" -f $expectedLoadedOriginal)
+            )
+            $versionNeedles = @(
+                ("model={0}" -f $expectedLoaded),
+                ("model={0}" -f $expectedLoadedFromCfg),
+                ("model={0}" -f $expectedLoadedOriginal)
+            )
+            Assert-ContainsAny $serial $loadedNeedles 'model loaded line'
+            Assert-ContainsAny $serial $versionNeedles 'version shows model'
         }
 
         # Build id is useful but should not be a hard failure: some environments/log sinks
@@ -983,6 +1406,52 @@ try {
             Assert-Match $serial '(?m)^\s*SCRATCH:\s*used=\d+\s*MB\s*free=\d+\s*MB\s*total=\d+\s*MB\s*$' 'ram scratch line'
             Assert-Match $serial '(?m)^\s*ACTS:\s*used=\d+\s*MB\s*free=\d+\s*MB\s*total=\d+\s*MB\s*$' 'ram acts line'
             Assert-Match $serial '(?m)^\s*ZONEC:\s*used=\d+\s*MB\s*free=\d+\s*MB\s*total=\d+\s*MB\s*$' 'ram zonec line'
+        } elseif ($Mode -eq 'fat83_fallback') {
+            Assert-Contains $serial '[fat] open fallback ok' 'kernel FAT83 fallback logged'
+        } elseif ($Mode -eq 'oo_ctx_clamp') {
+            Assert-Contains $serial 'OK: OO boot_count=' 'OO tick ran'
+            Assert-Contains $serial 'OK: OO ctx_len clamp:' 'OO ctx_len clamp marker'
+            Assert-Contains $serial 'mode=SAFE' 'clamp ran in SAFE mode'
+        } elseif ($Mode -eq 'oo_ctx_clamp_degraded') {
+            Assert-Contains $serial 'OK: OO boot_count=3 mode=DEGRADED' 'OO reached DEGRADED by boot 3'
+            Assert-Contains $serial 'OK: OO ctx_len clamp:' 'OO ctx_len clamp marker'
+            Assert-Contains $serial 'mode=DEGRADED' 'clamp ran in DEGRADED mode'
+        } elseif ($Mode -eq 'oo_model_fallback') {
+            Assert-Contains $serial '[cfg] WARNING: model override not found:' 'invalid model override warning'
+            Assert-Contains $serial 'OK: OO model fallback:' 'OO model fallback marker'
+        } elseif ($Mode -eq 'oo_ram_preflight') {
+            Assert-Contains $serial 'OK: OO zones min_total=512MB' 'OO SAFE zone minimum applied'
+            Assert-Contains $serial 'mode=SAFE' 'RAM preflight ran in SAFE mode'
+        } elseif ($Mode -eq 'oo_ram_preflight_seq') {
+            Assert-Contains $serial 'OK: OO zones min_total=0MB' 'OO zone minimum override applied'
+            Assert-Contains $serial 'OK: OO ram preflight: seq_len' 'OO seq_len reduction marker'
+            Assert-Contains $serial 'mode=SAFE' 'RAM preflight ran in SAFE mode'
+        } elseif ($Mode -eq 'oo_llm_consult') {
+            Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker'
+            Assert-Contains $serial 'OK: OO policy decided:' 'OO policy decision marker'
+            Assert-Contains $serial 'mode=SAFE' 'LLM consult ran in SAFE mode'
+        } elseif ($Mode -eq 'oo_llm_multi') {
+            Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.1)'
+            # Multi-action test expects multiple "OK: OO policy" markers (applied or blocked)
+            # At minimum, we need either "OK: OO policy applied:" or "OK: OO policy blocked:" or "OK: OO policy batch:"
+            if (-not ($serial -match 'OK: OO policy (applied|blocked|batch):')) {
+                throw "Missing OO multi-action markers (applied/blocked/batch)"
+            }
+        } elseif ($Mode -eq 'oo_auto_apply') {
+            Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.2)'
+            # M5.2: Check for auto-apply marker (either applied or simulation/throttled)
+            if (-not ($serial -match 'OK: OO (auto-apply|policy (simulation|throttled)):')) {
+                throw "Missing OO auto-apply markers (auto-apply|simulation|throttled)"
+            }
+            Assert-Contains $serial 'mode=SAFE' 'Auto-apply test ran in SAFE mode'
+        } elseif ($Mode -eq 'oo_consult_log') {
+            # M5.3: Check for 2x consultation log markers
+            $consultCount = ([regex]::Matches($serial, 'OK: OO consult logged to OOCONSULT.LOG')).Count
+            if ($consultCount -lt 2) {
+                throw "Expected 2 consultation log markers, found $consultCount"
+            }
+            Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.3)'
+            Assert-Contains $serial 'mode=SAFE' 'Consult log test ran in SAFE mode'
         } elseif ($Mode -eq 'gen') {
             Assert-Match $serial 'You \(autorun\): /max_tokens \d+' 'autorun set max_tokens'
             Assert-Contains $serial 'You (autorun): /stats 1' 'autorun enabled stats'

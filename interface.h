@@ -354,14 +354,14 @@ static EFI_STATUS InterfaceFx_Begin(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Sy
     g_ifx.Active = 1;
 
     // Overlay config (repl.cfg):
-    //   overlay=0/1           (default 1)
+    //   overlay=0/1           (default 0; off for simplicity)
     //   overlay_top=0/1       (default 0; bottom)
     //   overlay_max_w=<px>    (default 900)
     //   overlay_h=<px>        (default 26)
     //   overlay_digits=0/1    (default 1; show stage x/y)
     //   overlay_time=0/1      (default 1; show timing digits)
     //   overlay_time_mode=0/1/2  (default 1; 0=off 1=ms delta/total 2=ETA/elapsed seconds)
-    g_ifx.OverlayEnabled = 1;
+    g_ifx.OverlayEnabled = 0;
     g_ifx.OverlayPosTop = 0;
     g_ifx.OverlayMaxW = 900;
     g_ifx.OverlayDigits = 1;

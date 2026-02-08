@@ -45,6 +45,7 @@ This file is a “complete” cheat-sheet of the commands available in the UEFI 
     - `1`: on for all Q8 matmuls (fastest, most approximation)
     - `2`: FFN-only (w1/w3/w2 use i8 dot; attention projections stay float for better quality/perf tradeoff)
 - `/models [dir]`: list available model files (`.bin` / `.gguf`) in root and `models\\`
+  - If long filenames fail to open on your firmware, use an 8.3-compatible name (or the `NAME~1.EXT` alias) in `repl.cfg: model=...`.
 - `/cpu`: SIMD status
 - `/attn [auto|sse2|avx2]`: force the attention SIMD path
 - `/zones`: dump allocator zones + sentinel
@@ -175,6 +176,32 @@ Think/auto:
 - `/oo_exec_stop`: stop exec mode
 - `/oo_auto <id> [n] [prompt]`: n cycles think->store->step (stop: `q` or Esc between cycles)
 - `/oo_auto_stop`: stop auto mode
+
+## Operating Organism (OO) — Homeostasis
+
+These commands allow the kernel to monitor and adapt its own state in response to resource pressure:
+
+- `/oo_consult`: ask the embedded LLM for system adaptation suggestions (M5/M5.1/M5.2 features)
+  - LLM receives system state (mode, RAM, ctx_len, boots, journal tail).
+  - LLM suggests ONE brief action (M5) or 1-3 actions (M5.1 if `oo_multi_actions=1`).
+  - Policy engine applies safety-first rules:
+    - **SAFE mode**: only reductions allowed.
+    - **DEGRADED/NORMAL**: increases blocked if RAM < 1GB.
+    - **Reboot/model changes**: logged but not auto-applied (v0).
+  - Multi-action (M5.1): detects and applies multiple compatible actions (ex: "reduce ctx AND seq").
+    - Priority rules: stable>reboot>reduce (reduce blocks increase).
+    - Emits batch summary: `OK: OO policy batch: N applied, M blocked`.
+  - Auto-apply (M5.2): `oo_auto_apply=0|1|2` controls automatic application.
+    - Mode 0: simulation only (log "would_apply_if_enabled").
+    - Mode 1: conservative (auto-apply reductions only).
+    - Mode 2: aggressive (auto-apply reductions + increases if safe).
+    - Throttling: 1 auto-apply per boot to prevent adaptation spirals.
+    - Markers: `OK: OO auto-apply: reduce_ctx (old=512 new=256 check=pass)`.
+  - Deterministic markers:
+    - `OK: OO LLM suggested: <text>` (serial)
+    - `OK: OO policy decided: <action> (reason=<reason>)` (serial)
+    - `oo event=consult decision=<action> reason=<reason>` (journal)
+  - Config: `oo_llm_consult=0|1` (default: follows `oo_enable` value)
 
 ## Autorun
 

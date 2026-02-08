@@ -7,19 +7,73 @@ Made in Senegal 🇸🇳 by Djiby Diop
 ## Build (Windows + WSL)
 
 1) Put `tokenizer.bin` and a model file in this folder.
-	- Supported today for inference: `.bin` (llama2.c export)
-	- Supported today for inspection: `.gguf` (via `/model_info`)
-	- You can also use a base name without extension (the image builder will copy `.bin` and/or `.gguf` if present)
+   - Supported today for inference: `.bin` (llama2.c export)
+   - Supported today for inference: `.gguf` (F16/F32 + common quant types like Q4/Q5/Q8; see below)
+   - You can also use a base name without extension (the image builder will copy `.bin` and/or `.gguf` if present)
 2) Build + create boot image:
 
 ```powershell
 ./build.ps1
 ```
 
+Optional (bootstrap pinned tool wrappers used by some workflows/CI):
+
+```powershell
+./build.ps1 -BootstrapToolchains
+```
+
 Example (base name):
 
 ```powershell
 ./build.ps1 -ModelBin stories110M
+```
+
+### Optional: Cosmopolitan (cosmocc) toolchain
+
+If you want a self-contained C toolchain download (not committed to git), you can bootstrap `cosmocc`:
+
+```powershell
+./tools/get-cosmocc.ps1
+./tools/cosmocc.ps1 --help
+```
+
+Linux/WSL:
+
+```bash
+./tools/get-cosmocc.sh
+./tools/cosmocc.sh --help
+```
+
+### Optional: Justine tools (pinned, not committed)
+
+Pinned bootstrappers (downloaded into `tools/_toolchains/`, ignored by git):
+
+```powershell
+./tools/get-cosmos.ps1
+./tools/get-cosmopolitan-src.ps1
+
+./tools/get-redbean.ps1
+./tools/get-ape.ps1
+./tools/get-apelink.ps1
+```
+
+Wrappers:
+
+```powershell
+./tools/redbean.ps1 --help
+./tools/ape.ps1 --help
+./tools/apelink.ps1 --help
+```
+
+Linux/WSL:
+
+```bash
+./tools/get-cosmos.sh
+./tools/get-cosmopolitan-src.sh
+
+./tools/redbean.sh --help
+./tools/ape.sh --help
+./tools/apelink.sh --help
 ```
 
 ## Build (Linux)
@@ -73,6 +127,8 @@ Copy your model to the USB EFI/FAT partition:
 - Copy your model file (`.gguf` or legacy `.bin`) to the root of the FAT partition (or create a `models/` folder and put it there).
 - `tokenizer.bin` is already included in the Release image.
 
+Note: some UEFI FAT drivers can be unreliable with long filenames. If you hit “file not found / open failed” issues, prefer an 8.3-compatible filename (e.g. `STORIES11.GGU`) or use the FAT 8.3 alias (e.g. `STORIE~1.GGU`) when setting `model=` in `repl.cfg`.
+
 Boot the USB on an x86_64 UEFI machine, then select/load your model from the REPL.
 
 ## Recommended conversational setup (8GB RAM)
@@ -104,6 +160,65 @@ Useful REPL commands:
 
 ```powershell
 ./run.ps1 -Gui
+```
+
+### QEMU autorun tests
+
+Tip: you can also run autorun tests from the repo root using the wrapper `./test-qemu-autorun.ps1 ...` (so you don’t need `cd .\\llm-baremetal`, which can be noisy if you’re already in that folder).
+
+OO M1 smoke (persistence: writes `OOSTATE.BIN` + appends `OOJOUR.LOG`, validates across 2 boots):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\test-qemu-autorun.ps1 -Mode oo_smoke -Accel tcg -TimeoutSec 600 -SkipInspect
+```
+
+OO M2 recovery (corrupts `OOSTATE.BIN` between boots, asserts SAFE rollback + `event=recover`):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_recovery -Accel tcg -TimeoutSec 600 -SkipInspect
+```
+
+OO M3 homeostasis proof (clamps effective context length in SAFE/DEGRADED, checks for serial marker):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_ctx_clamp -Accel tcg -TimeoutSec 600 -SkipInspect -SkipBuild
+```
+
+OO M3 homeostasis proof (reach DEGRADED then clamp with DEGRADED cap; 3 boots without snapshot):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_ctx_clamp_degraded -Accel tcg -TimeoutSec 900 -SkipInspect -SkipBuild
+```
+
+OO M3 policy proof (invalid model in repl.cfg triggers fallback + OO marker):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_model_fallback -Accel tcg -TimeoutSec 600 -SkipInspect -SkipBuild
+```
+
+OO M3 policy proof (RAM budget preflight: low-RAM SAFE zone minimum marker; defaults to `-MemMB 640` unless overridden):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_ram_preflight -Accel tcg -TimeoutSec 600 -SkipInspect -SkipBuild
+```
+
+OO M3 policy proof (RAM preflight reduces seq_len under tight RAM; uses `oo_min_total_mb=0` and defaults to `-MemMB 620`):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_ram_preflight_seq -Accel tcg -TimeoutSec 600 -SkipInspect -SkipBuild
+```
+OO M5 LLM advisor proof (LLM suggests system adaptations, policy engine decides; runs in SAFE mode with 640MB RAM):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_llm_consult -Accel tcg -TimeoutSec 600 -SkipInspect -SkipBuild
+```
+Note (VS Code → PowerShell): if VS Code formats a path into a Markdown-ish link like `.[test-qemu-autorun.ps1](http://...)`, don’t paste that into the terminal. Use a normal path like `.\test-qemu-autorun.ps1 ...`.
+
+Optional (bootstrap pinned tool wrappers before a build/test run):
+
+```powershell
+./test-qemu-autorun.ps1 -BootstrapToolchains
+./bench-matrix.ps1 -BootstrapToolchains
 ```
 
 ## Notes

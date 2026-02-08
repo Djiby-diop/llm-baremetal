@@ -198,6 +198,18 @@ SLACK_MIB=80
 IMAGE_MIB=$(( TOTAL_MIB + SLACK_MIB ))
 if [ $IMAGE_MIB -lt 100 ]; then IMAGE_MIB=100; fi
 
+# Optional override: force a specific image size in MiB.
+# Example:
+#   IMG_MB=1200 NO_MODEL=1 ./create-boot-mtools.sh
+if [ -n "${IMG_MB:-}" ]; then
+    if [[ "${IMG_MB}" =~ ^[0-9]+$ ]] && [ "${IMG_MB}" -gt 0 ]; then
+        IMAGE_MIB="${IMG_MB}"
+    else
+        echo "❌ Invalid IMG_MB: '${IMG_MB}' (expected positive integer MiB)"
+        exit 1
+    fi
+fi
+
 if [ "$NO_MODEL" -eq 1 ]; then
     # Make the no-model image large enough for users to drop in weights later.
     # (Still modest for a release artifact.)
@@ -298,9 +310,38 @@ echo "  ✅ Copied tokenizer.bin"
 # This avoids stale repl.cfg files referencing a different default model.
 AUTO_SET_REPL_MODEL="${AUTO_SET_REPL_MODEL:-1}"
 if [ "$NO_MODEL" -ne 1 ] && [ "$AUTO_SET_REPL_MODEL" -eq 1 ]; then
+    # Some UEFI FAT drivers can fail to open long filenames reliably.
+    # mtools creates a short 8.3 alias alongside the long name; prefer that for repl.cfg.
+    model_long="${MODEL_OUT_NAME}"
+    mdir_path="z:/"
+    model_leaf="$model_long"
+    case "$model_long" in
+        models/*)
+            mdir_path="z:/models"
+            model_leaf="${model_long#models/}"
+            ;;
+    esac
+
+    short_model="$model_long"
+    alias_83="$(mdir "$mdir_path" 2>/dev/null | tr -d '\r' | awk -v t="$model_leaf" '
+        {
+            long=$NF;
+            if (tolower(long)==tolower(t) && $2!="<DIR>") {
+                print $1 "." $2;
+                exit 0;
+            }
+        }
+    ')"
+    if [ -n "$alias_83" ]; then
+        if [ "$mdir_path" = "z:/models" ]; then
+            short_model="models/${alias_83}"
+        else
+            short_model="$alias_83"
+        fi
+    fi
     tmp_cfg="$(mktemp)"
     {
-        echo "model=${MODEL_OUT_NAME}"
+        echo "model=${short_model}"
         if [ -f repl.cfg ]; then
             # Keep existing settings, but override any previous model= line.
             grep -vi '^model=' repl.cfg || true
@@ -308,7 +349,11 @@ if [ "$NO_MODEL" -ne 1 ] && [ "$AUTO_SET_REPL_MODEL" -eq 1 ]; then
     } > "$tmp_cfg"
     mcopy "$tmp_cfg" z:/repl.cfg
     rm -f "$tmp_cfg"
-    echo "  ✅ Wrote repl.cfg (model=${MODEL_OUT_NAME})"
+    if [ "$short_model" != "$model_long" ]; then
+        echo "  ✅ Wrote repl.cfg (model=${short_model}) [alias for ${model_long}]"
+    else
+        echo "  ✅ Wrote repl.cfg (model=${short_model})"
+    fi
 else
     # Optional REPL config (key=value). If present, copy to root.
     if [ -f repl.cfg ]; then
