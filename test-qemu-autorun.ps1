@@ -43,7 +43,7 @@ param(
 
     [switch]$ForceAvx2,
 
-    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log','oo_consult_log_tail','oo_consult_metric','oo_consult_log_rotate','oo_jour_tail')]
+    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log','oo_consult_log_tail','oo_consult_metric','oo_consult_log_rotate','oo_jour_tail','oo_survive_10')]
     [string]$Mode = 'smoke',
 
     # Optional repl.cfg overrides injected into the boot image for the duration of the test.
@@ -707,6 +707,23 @@ switch ($Mode) {
             $TimeoutSec = 600
         }
     }
+    'oo_survive_10' {
+        # OO survivability: 10 consecutive boots without brick.
+        $autorunLinesEffective = @(
+            '# llmk autorun OO survivability (10 boots)',
+            '/version'
+        )
+
+        # Use comfortable RAM to avoid borderline allocation flakiness across repeated boots.
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 1024
+        }
+
+        # Needs model load; keep a generous per-boot timeout.
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 600
+        }
+    }
     'oo_consult_log_rotate' {
         # M5.3: Log rotation test (preload oversized OOCONSULT.LOG, then append once and assert rotated <= 64KB)
         $autorunLinesEffective = @(
@@ -997,7 +1014,7 @@ try {
         "(mdel -i '$wslImg@@$fatOffset' ::oo-test.bin.bak 2>/dev/null || true)"
     ) 30
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_jour_tail') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_jour_tail' -or $Mode -eq 'oo_survive_10') {
         Invoke-WslStep 'clear OO persistent files' (
             "(mdel -i '$wslImg@@$fatOffset' ::OOSTATE.BIN 2>/dev/null || true); " +
             "(mdel -i '$wslImg@@$fatOffset' ::OORECOV.BIN 2>/dev/null || true); " +
@@ -1088,7 +1105,7 @@ try {
         $tmpCfgLines += 'fat83_force=1'
     }
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_jour_tail') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_jour_tail' -or $Mode -eq 'oo_survive_10') {
         $tmpCfgLines += 'oo_enable=1'
     }
     if ($Mode -eq 'oo_net_ro') {
@@ -1187,7 +1204,7 @@ try {
         if ($Mode -eq 'oo_net_ro') {
             $qemuArgsLocal += @('-net','none')
         }
-        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro' -and $Mode -ne 'oo_consult_metric' -and $Mode -ne 'oo_consult_log' -and $Mode -ne 'oo_consult_log_rotate') {
+        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro' -and $Mode -ne 'oo_consult_metric' -and $Mode -ne 'oo_consult_log' -and $Mode -ne 'oo_consult_log_rotate' -and $Mode -ne 'oo_survive_10') {
             $qemuArgsLocal += '-snapshot'
         }
         $qemuArgsLocal += @(
@@ -1259,6 +1276,18 @@ try {
             if ($sawBootFailureLocal) {
                 Write-Host "[Fail] Boot failure detected: $bootFailureReasonLocal" -ForegroundColor Red
                 try { Stop-Process -Id $procLocal.Id -Force -ErrorAction SilentlyContinue } catch {}
+
+                $tail = ''
+                try {
+                    if ($serialLocal) {
+                        $lines = $serialLocal -split "`r?`n"
+                        $tail = ($lines | Select-Object -Last 80) -join "`r`n"
+                    }
+                } catch {}
+
+                if ($tail) {
+                    throw "Boot failure detected: $bootFailureReasonLocal`n--- serial tail ---`n$tail"
+                }
                 throw "Boot failure detected: $bootFailureReasonLocal"
             }
             if ($sawShutdownLocal -or $sawReplExitLocal) {
@@ -1304,6 +1333,7 @@ try {
     $runCount = 1
     if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_consult_metric') { $runCount = 2 }
     if ($Mode -eq 'oo_ctx_clamp_degraded') { $runCount = 3 }
+    if ($Mode -eq 'oo_survive_10') { $runCount = 10 }
 
     $runs = @()
     for ($ri = 1; $ri -le $runCount; $ri++) {
@@ -1313,6 +1343,10 @@ try {
         }
 
         if ($Mode -eq 'oo_ctx_clamp_degraded') {
+            Assert-Contains $runs[$runs.Count - 1].Serial ("OK: OO boot_count={0}" -f $ri) ("OO boot_count == $ri")
+        }
+
+        if ($Mode -eq 'oo_survive_10') {
             Assert-Contains $runs[$runs.Count - 1].Serial ("OK: OO boot_count={0}" -f $ri) ("OO boot_count == $ri")
         }
 
