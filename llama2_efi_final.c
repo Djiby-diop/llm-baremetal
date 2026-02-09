@@ -8359,6 +8359,49 @@ static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_
     }
 }
 
+static void llmk_oo_print_ooconsult_tail_best_effort(int max_lines) {
+    if (!g_root || max_lines <= 0) return;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOCONSULT.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_log] (no OOCONSULT.LOG)\r\n");
+        return;
+    }
+
+    char *cbuf = (char *)buf;
+    UINTN start = 0;
+    int lines = 0;
+    for (UINTN i = len; i > 0; i--) {
+        if (cbuf[i - 1] == '\n') {
+            lines++;
+            if (lines > max_lines) {
+                start = i;
+                break;
+            }
+        }
+    }
+    if (start >= len) start = 0;
+
+    UINTN out_len = len - start;
+    char *out = NULL;
+    if (EFI_ERROR(uefi_call_wrapper(BS->AllocatePool, 3, EfiBootServicesData, out_len + 1, (void **)&out)) || !out) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_log] (OOM printing tail)\r\n");
+        return;
+    }
+
+    CopyMem(out, cbuf + start, out_len);
+    out[out_len] = 0;
+
+    Print(L"%a", out);
+
+    uefi_call_wrapper(BS->FreePool, 1, out);
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
 static void llmk_oo_consult_execute(Config *config, TransformerWeights *weights, 
                                     RunState *state, Tokenizer *tokenizer,
                                     float temperature, float min_p, float top_p, int top_k) {
@@ -13779,6 +13822,16 @@ snap_autoload_done:
                 Print(L"\r\n[oo_consult] Consulting LLM for system status adaptation...\r\n\r\n");
                 llmk_oo_consult_execute(&config, &weights, &state, &tokenizer,
                                        temperature, min_p, top_p, top_k);
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/oo_log", 7) == 0) {
+                if (!g_cfg_oo_enable) {
+                    Print(L"\r\nERROR: OO is not enabled (oo_enable=0)\r\n\r\n");
+                    continue;
+                }
+
+                Print(L"\r\n[oo_log] OOCONSULT.LOG tail:\r\n");
+                llmk_oo_print_ooconsult_tail_best_effort(10);
                 Print(L"\r\n");
                 continue;
             } else if (my_strncmp(prompt, "/autorun_stop", 13) == 0) {

@@ -43,7 +43,7 @@ param(
 
     [switch]$ForceAvx2,
 
-    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log','oo_consult_metric','oo_consult_log_rotate')]
+    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log','oo_consult_log_tail','oo_consult_metric','oo_consult_log_rotate')]
     [string]$Mode = 'smoke',
 
     # Optional repl.cfg overrides injected into the boot image for the duration of the test.
@@ -668,6 +668,26 @@ switch ($Mode) {
             $TimeoutSec = 600
         }
     }
+    'oo_consult_log_tail' {
+        # M5.3: /oo_log prints tail of OOCONSULT.LOG (deterministic via consult mocks)
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M5.3 (consult log tail validation)',
+            '/version',
+            '/oo_consult_mock reduce ctx',
+            '/oo_consult_mock stable',
+            '/oo_log',
+            '/quit'
+        )
+
+        # SAFE mode: 640MB RAM for determinism
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 640
+        }
+
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 600
+        }
+    }
     'oo_consult_log_rotate' {
         # M5.3: Log rotation test (preload oversized OOCONSULT.LOG, then append once and assert rotated <= 64KB)
         $autorunLinesEffective = @(
@@ -958,7 +978,7 @@ try {
         "(mdel -i '$wslImg@@$fatOffset' ::oo-test.bin.bak 2>/dev/null || true)"
     ) 30
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate') {
         Invoke-WslStep 'clear OO persistent files' (
             "(mdel -i '$wslImg@@$fatOffset' ::OOSTATE.BIN 2>/dev/null || true); " +
             "(mdel -i '$wslImg@@$fatOffset' ::OORECOV.BIN 2>/dev/null || true); " +
@@ -982,7 +1002,7 @@ try {
         Invoke-WslStep 'preload oversized OOCONSULT.LOG' ("mcopy -o -i '$wslImg@@$fatOffset' '$wslOoConsult' ::OOCONSULT.LOG") 60
     }
 
-    if ($Mode -eq 'oo_consult_log') {
+    if ($Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail') {
         Invoke-WslStep 'clear OOCONSULT.LOG' ("(mdel -i '$wslImg@@$fatOffset' ::OOCONSULT.LOG 2>/dev/null || true)") 30
     }
 
@@ -1049,7 +1069,7 @@ try {
         $tmpCfgLines += 'fat83_force=1'
     }
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric') {
         $tmpCfgLines += 'oo_enable=1'
     }
     if ($Mode -eq 'oo_net_ro') {
@@ -1060,7 +1080,7 @@ try {
     if ($Mode -eq 'oo_ram_preflight_seq') {
         $tmpCfgLines += 'oo_min_total_mb=0'
     }
-    if ($Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric') {
+    if ($Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric') {
         $tmpCfgLines += 'oo_llm_consult=1'
     }
     if ($Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock') {
@@ -1069,7 +1089,7 @@ try {
     if ($Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_metric') {
         $tmpCfgLines += 'oo_auto_apply=1'
     }
-    if ($Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate') {
+    if ($Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate') {
         $tmpCfgLines += 'oo_consult_log=1'
     }
 
@@ -1621,6 +1641,18 @@ try {
             }
             Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.3)'
             Assert-Contains $serial 'mode=SAFE' 'Consult log test ran in SAFE mode'
+        } elseif ($Mode -eq 'oo_consult_log_tail') {
+            $consultCount = ([regex]::Matches($serial, 'OK: OO consult logged to OOCONSULT.LOG')).Count
+            if ($consultCount -lt 2) {
+                throw "Expected >= 2 consultation log markers, found $consultCount"
+            }
+            Assert-Contains $serial '[oo_log] OOCONSULT.LOG tail:' 'oo_log header printed'
+            # Expect at least 2 printed log lines in the tail.
+            $tailLines = [regex]::Matches($serial, '(?m)^\[boot=\d+\] mode=(SAFE|DEGRADED|NORMAL) ram=\d+ ctx=\d+ seq=\d+ suggestion=".*" decision=.* applied=[01]\s*$').Count
+            if ($tailLines -lt 2) {
+                throw "Expected >= 2 printed OOCONSULT.LOG lines in /oo_log output, found $tailLines"
+            }
+            Assert-Contains $serial 'mode=SAFE' 'Consult log tail test ran in SAFE mode'
         } elseif ($Mode -eq 'oo_consult_log_rotate') {
             # M5.3: Ensure we at least appended once (rotation is validated via extracted file size).
             $consultCount = ([regex]::Matches($serial, 'OK: OO consult logged to OOCONSULT.LOG')).Count
