@@ -3,6 +3,7 @@
 
 #include <efi.h>
 #include <efilib.h>
+#include <efinet.h>
 #include <stdint.h>
 
 // GOP types + GUID are provided by gnu-efi headers (efiprot.h / efilib.h).
@@ -213,6 +214,7 @@ static int llmk_char16_has_dot_ext(const CHAR16 *s) {
 }
 
 static void llmk_char16_copy_cap(CHAR16 *dst, int cap, const CHAR16 *src);
+static void llmk_cfg_copy_ascii_token(char *dst, int cap, const char *src);
 
 static CHAR16 llmk_char16_toupper(CHAR16 c) {
     if (c >= L'a' && c <= L'z') return (CHAR16)(c - (L'a' - L'A'));
@@ -255,6 +257,12 @@ static int g_cfg_oo_auto_apply = 0;
 static int g_oo_auto_applied_this_boot = 0;
 // OO M5.3: Log consultations to OOCONSULT.LOG (default=1 if oo_llm_consult=1).
 static int g_cfg_oo_consult_log = -1;
+
+// OO M4: optional network read-only tick (best-effort; never required to boot).
+// Default is 0 (off).
+static int g_cfg_oo_net = 0;
+// Optional: URL hint to fetch a signed manifest from (placeholder for now).
+static char g_cfg_oo_manifest_url[192];
 
 static UINT64 llmk_get_conventional_ram_bytes_best_effort(void) {
     if (!BS) return 0;
@@ -2968,6 +2976,75 @@ static void llmk_oo_boot_tick_best_effort(void) {
     }
 }
 
+// ============================================================================
+// OO M4 — Network Read-only Tick (placeholder)
+// - Never required for boot
+// - Best-effort: detect if SNP is present; do not perform IO yet
+// - Emits deterministic serial markers and journal events
+// ============================================================================
+
+static void llmk_oo_net_tick_best_effort(void) {
+    if (!g_cfg_oo_enable || !g_cfg_oo_net) return;
+    if (!g_root || !BS) return;
+
+    EFI_GUID SnpGuid = EFI_SIMPLE_NETWORK_PROTOCOL_GUID;
+    EFI_HANDLE *handles = NULL;
+    UINTN count = 0;
+
+    EFI_STATUS st = uefi_call_wrapper(BS->LocateHandleBuffer, 5,
+                                     ByProtocol,
+                                     &SnpGuid,
+                                     NULL,
+                                     &count,
+                                     &handles);
+
+    const int available = (!EFI_ERROR(st) && handles && count > 0);
+    if (!available) {
+        Print(L"OK: OO net: unavailable\r\n");
+
+        EFI_FILE_HANDLE jf = NULL;
+        if (!EFI_ERROR(llmk_open_binary_file_append(&jf, L"OOJOUR.LOG")) && jf) {
+            char line[256];
+            int p = 0;
+            line[0] = 0;
+            llmk_ascii_append_str(line, (int)sizeof(line), &p, "oo event=net_unavailable");
+            if (g_cfg_oo_manifest_url[0]) {
+                llmk_ascii_append_str(line, (int)sizeof(line), &p, " url=");
+                llmk_ascii_append_str(line, (int)sizeof(line), &p, g_cfg_oo_manifest_url);
+            }
+            llmk_ascii_append_str(line, (int)sizeof(line), &p, "\r\n");
+            UINTN nb = (UINTN)p;
+            uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)line);
+            uefi_call_wrapper(jf->Flush, 1, jf);
+            uefi_call_wrapper(jf->Close, 1, jf);
+        }
+
+        if (handles) uefi_call_wrapper(BS->FreePool, 1, handles);
+        return;
+    }
+
+    // Present, but still placeholder (no DHCP/HTTP stack here yet).
+    Print(L"OK: OO net: present\r\n");
+
+    {
+        EFI_FILE_HANDLE jf = NULL;
+        if (!EFI_ERROR(llmk_open_binary_file_append(&jf, L"OOJOUR.LOG")) && jf) {
+            char line[192];
+            int p = 0;
+            line[0] = 0;
+            llmk_ascii_append_str(line, (int)sizeof(line), &p, "oo event=net_present n=");
+            llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)count);
+            llmk_ascii_append_str(line, (int)sizeof(line), &p, "\r\n");
+            UINTN nb = (UINTN)p;
+            uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)line);
+            uefi_call_wrapper(jf->Flush, 1, jf);
+            uefi_call_wrapper(jf->Close, 1, jf);
+        }
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, handles);
+}
+
 // OO M5: /oo_consult — LLM-based system health advisor (safety-first policy)
 // Note: requires g_llmk_ready, weights loaded, etc. 
 // Forward decl moved below after type definitions
@@ -4296,6 +4373,8 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
     //   fat83_force=0/1 (test/diag: prefer FAT 8.3 alias opens)
     //   oo_enable=0/1 (OO v0: write oostate.bin + append oojour.log)
     //   oo_min_total_mb=<int> (OO M3: override Zone-B total minimum, in MB; 0 disables floor)
+    //   oo_net=0/1 (OO M4: network read-only tick placeholder; never required)
+    //   oo_manifest_url=<string> (OO M4: URL hint for a signed manifest fetch; placeholder)
     EFI_FILE_HANDLE f = NULL;
     EFI_STATUS st = llmk_open_read_file(&f, L"repl.cfg");
     if (EFI_ERROR(st) || !f) return;
@@ -4436,6 +4515,13 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
             if (llmk_cfg_parse_bool(val, &b)) {
                 g_cfg_oo_consult_log = (b != 0);
             }
+        } else if (llmk_cfg_streq_ci(key, "oo_net") || llmk_cfg_streq_ci(key, "oo_net_enable") || llmk_cfg_streq_ci(key, "oo_network")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_oo_net = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_manifest_url") || llmk_cfg_streq_ci(key, "oo_manifest") || llmk_cfg_streq_ci(key, "oo_manifest_uri")) {
+            llmk_cfg_copy_ascii_token(g_cfg_oo_manifest_url, (int)sizeof(g_cfg_oo_manifest_url), val);
         }
     }
 }
@@ -8185,6 +8271,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // OO M1: best-effort persistent boot tick (writes OOSTATE.BIN + appends OOJOUR.LOG)
     // Opt-in via repl.cfg: oo_enable=1
     llmk_oo_boot_tick_best_effort();
+
+    // OO M4: best-effort network read-only tick (placeholder)
+    // Opt-in via repl.cfg: oo_net=1 (and oo_enable=1)
+    llmk_oo_net_tick_best_effort();
 
     // Best-effort enable AVX/AVX2 state before feature detection.
     enable_avx_best_effort();

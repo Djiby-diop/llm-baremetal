@@ -43,7 +43,7 @@ param(
 
     [switch]$ForceAvx2,
 
-    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log')]
+    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log')]
     [string]$Mode = 'smoke',
 
     # Optional repl.cfg overrides injected into the boot image for the duration of the test.
@@ -564,6 +564,12 @@ switch ($Mode) {
             $MemMB = 620
         }
     }
+    'oo_net_ro' {
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M4 proof (network read-only tick placeholder)',
+            '/version'
+        )
+    }
     'oo_llm_consult' {
         $autorunLinesEffective = @(
             '# llmk autorun OO M5 proof (LLM consult suggests system adaptation)',
@@ -731,9 +737,9 @@ try {
         Write-Host "[Test] Using temp image: $IMAGE" -ForegroundColor Yellow
     }
 
-    # OO persistence tests must persist disk writes across two boots. Always operate on a temp image copy
+    # OO persistence tests must persist disk writes. Always operate on a temp image copy
     # so we can run without -snapshot and still keep the working tree clean.
-    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery') -and -not $isTempImage) {
+    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro') -and -not $isTempImage) {
         Write-Host "[Test] ${Mode}: using temp image (no -snapshot, 2 boots)" -ForegroundColor Yellow
         $IMAGE = Get-TempImageCopy $IMAGE
         $isTempImage = $true
@@ -908,7 +914,7 @@ try {
         "(mdel -i '$wslImg@@$fatOffset' ::oo-test.bin.bak 2>/dev/null || true)"
     ) 30
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro') {
         Invoke-WslStep 'clear OO persistent files' (
             "(mdel -i '$wslImg@@$fatOffset' ::OOSTATE.BIN 2>/dev/null || true); " +
             "(mdel -i '$wslImg@@$fatOffset' ::OORECOV.BIN 2>/dev/null || true); " +
@@ -981,6 +987,11 @@ try {
 
     if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log') {
         $tmpCfgLines += 'oo_enable=1'
+    }
+    if ($Mode -eq 'oo_net_ro') {
+        $tmpCfgLines += 'oo_enable=1'
+        $tmpCfgLines += 'oo_net=1'
+        $tmpCfgLines += 'oo_manifest_url=http://example.invalid/oo-manifest'
     }
     if ($Mode -eq 'oo_ram_preflight_seq') {
         $tmpCfgLines += 'oo_min_total_mb=0'
@@ -1068,7 +1079,12 @@ try {
             '-machine', 'q35',
             '-cpu', $cpu
         )
-        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded') {
+
+        # Make M4 deterministic: ensure no NIC is present.
+        if ($Mode -eq 'oo_net_ro') {
+            $qemuArgsLocal += @('-net','none')
+        }
+        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro') {
             $qemuArgsLocal += '-snapshot'
         }
         $qemuArgsLocal += @(
@@ -1218,11 +1234,29 @@ try {
         }
     }
 
+    # Aggregate logs immediately after QEMU runs so any mode-specific assertions can fail
+    # while still showing meaningful debug output.
     $serialLog = $runs[$runs.Count - 1].SerialLog
     $tmpOut = $runs[$runs.Count - 1].StdOut
     $tmpErr = $runs[$runs.Count - 1].StdErr
     $sawShutdown = $runs[$runs.Count - 1].SawShutdown
     $serial = ($runs | ForEach-Object { $_.Serial }) -join "`r`n"
+
+    if ($Mode -eq 'oo_net_ro') {
+        # Assert deterministic marker from the kernel.
+        Assert-Contains $serial 'OK: OO net: unavailable' 'OO net placeholder marker'
+
+        # And that it was journaled.
+        Write-Host '[Test] oo_net_ro: extracting OOJOUR.LOG for net marker...' -ForegroundColor Cyan
+        $tmpOoJour = Join-Path $env:TEMP ("llm-baremetal-oojour-net-{0}.log" -f ([Guid]::NewGuid().ToString('n')))
+        $wslImgPost = ConvertTo-WslPath $IMAGE
+        $wslOoJour = ConvertTo-WslPath $tmpOoJour
+        Invoke-WslStep 'extract OOJOUR.LOG (net)' ("mcopy -o -i '$wslImgPost@@$fatOffset' ::OOJOUR.LOG '$wslOoJour'") 30
+        $jour = Get-Content -LiteralPath $tmpOoJour -Raw -ErrorAction SilentlyContinue
+        if (-not $jour) { throw 'oo_net_ro: OOJOUR.LOG is empty or unreadable' }
+        Assert-Contains $jour 'event=net_unavailable' 'journal contains net_unavailable event'
+        try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoJour } catch {}
+    }
 
     if ($Mode -eq 'oo_smoke') {
         Write-Host '[Test] oo_smoke: extracting OO persistent files from image...' -ForegroundColor Cyan
