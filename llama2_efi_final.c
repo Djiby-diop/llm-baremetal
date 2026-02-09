@@ -2901,6 +2901,8 @@ static EFI_STATUS llmk_oo_write_recovery_best_effort(const LlmkOoState *s) {
     return EFI_SUCCESS;
 }
 
+static void llmk_oo_jour_log_rotate_best_effort(void);
+
 static void llmk_oo_journal_append_best_effort(const LlmkOoState *s, const char *event) {
     if (!g_root || !s) return;
 
@@ -2929,6 +2931,10 @@ static void llmk_oo_journal_append_best_effort(const LlmkOoState *s, const char 
         uefi_call_wrapper(f->Flush, 1, f);
     }
     uefi_call_wrapper(f->Close, 1, f);
+
+    // Enforce a max size cap (best-effort; never blocks boot).
+    // Keep only the newest part of the log (FIFO truncation).
+    llmk_oo_jour_log_rotate_best_effort();
 }
 
 static int llmk_oo_consult_metrics_tick_best_effort(LlmkOoState *s, char *out_event, int out_cap) {
@@ -3100,6 +3106,9 @@ static void llmk_oo_net_tick_best_effort(void) {
             uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)line);
             uefi_call_wrapper(jf->Flush, 1, jf);
             uefi_call_wrapper(jf->Close, 1, jf);
+
+            // Enforce max journal size (best-effort).
+            llmk_oo_jour_log_rotate_best_effort();
         }
 
         if (handles) uefi_call_wrapper(BS->FreePool, 1, handles);
@@ -3122,6 +3131,9 @@ static void llmk_oo_net_tick_best_effort(void) {
             uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)line);
             uefi_call_wrapper(jf->Flush, 1, jf);
             uefi_call_wrapper(jf->Close, 1, jf);
+
+            // Enforce max journal size (best-effort).
+            llmk_oo_jour_log_rotate_best_effort();
         }
     }
 
@@ -8253,6 +8265,9 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
             uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)jlog);
             uefi_call_wrapper(jf->Flush, 1, jf);
             uefi_call_wrapper(jf->Close, 1, jf);
+
+            // Enforce max journal size (best-effort).
+            llmk_oo_jour_log_rotate_best_effort();
         }
     }
 }
@@ -8261,6 +8276,49 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
 // Spec: cap log at 64KB and truncate oldest (FIFO) when exceeded.
 #define LLMK_OO_CONSULT_LOG_MAX_BYTES  (64u * 1024u)
 #define LLMK_OO_CONSULT_LOG_KEEP_BYTES (32u * 1024u)
+
+// Journal cap (same policy as consult log): cap at 64KB and keep newest 32KB.
+#define LLMK_OO_JOUR_LOG_MAX_BYTES  (64u * 1024u)
+#define LLMK_OO_JOUR_LOG_KEEP_BYTES (32u * 1024u)
+
+static void llmk_oo_jour_log_rotate_best_effort(void) {
+    if (!g_root) return;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOJOUR.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        return;
+    }
+
+    if (len <= (UINTN)LLMK_OO_JOUR_LOG_MAX_BYTES) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        return;
+    }
+
+    UINTN keep = (UINTN)LLMK_OO_JOUR_LOG_KEEP_BYTES;
+    if (keep >= len) keep = len;
+    UINTN start = len - keep;
+
+    // Align to line boundary (avoid starting mid-line).
+    char *cbuf = (char *)buf;
+    for (UINTN i = start; i < len; i++) {
+        if (cbuf[i] == '\n') { start = i + 1; break; }
+    }
+    if (start >= len) start = 0;
+
+    EFI_FILE_HANDLE f = NULL;
+    st = llmk_open_binary_file(&f, L"OOJOUR.LOG");
+    if (!EFI_ERROR(st) && f) {
+        UINTN nb = len - start;
+        (void)llmk_file_write_bytes(f, (const void *)(cbuf + start), nb);
+        (void)uefi_call_wrapper(f->Flush, 1, f);
+        uefi_call_wrapper(f->Close, 1, f);
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+}
 
 static void llmk_oo_consult_log_rotate_best_effort(void) {
     if (!g_root) return;

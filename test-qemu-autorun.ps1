@@ -43,7 +43,7 @@ param(
 
     [switch]$ForceAvx2,
 
-    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log','oo_consult_log_tail','oo_consult_metric','oo_consult_log_rotate','oo_jour_tail','oo_survive_10')]
+    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log','oo_consult_log_tail','oo_consult_metric','oo_consult_log_rotate','oo_jour_tail','oo_jour_rotate','oo_survive_10')]
     [string]$Mode = 'smoke',
 
     # Optional repl.cfg overrides injected into the boot image for the duration of the test.
@@ -393,6 +393,7 @@ $tmpOut = $null
 $tmpErr = $null
 
 $preloadOoConsultLog = $false
+$preloadOoJourLog = $false
 
 $IMAGE = $null
 $fatOffset = $null
@@ -707,6 +708,24 @@ switch ($Mode) {
             $TimeoutSec = 600
         }
     }
+    'oo_jour_rotate' {
+        # OO: cap/rotation for OOJOUR.LOG (preload oversized, then boot once and validate <=64KB)
+        $autorunLinesEffective = @(
+            '# llmk autorun OO (OOJOUR.LOG rotation validation)',
+            '/version'
+        )
+
+        $preloadOoJourLog = $true
+
+        # SAFE mode: 640MB RAM for determinism
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 640
+        }
+
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 600
+        }
+    }
     'oo_survive_10' {
         # OO survivability: 10 consecutive boots without brick.
         $autorunLinesEffective = @(
@@ -839,7 +858,7 @@ try {
 
     # OO persistence tests must persist disk writes. Always operate on a temp image copy
     # so we can run without -snapshot and still keep the working tree clean.
-    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate') -and -not $isTempImage) {
+    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_jour_rotate') -and -not $isTempImage) {
         Write-Host "[Test] ${Mode}: using temp image (no -snapshot, 2 boots)" -ForegroundColor Yellow
         $IMAGE = Get-TempImageCopy $IMAGE
         $isTempImage = $true
@@ -1014,7 +1033,7 @@ try {
         "(mdel -i '$wslImg@@$fatOffset' ::oo-test.bin.bak 2>/dev/null || true)"
     ) 30
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_jour_tail' -or $Mode -eq 'oo_survive_10') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_jour_tail' -or $Mode -eq 'oo_jour_rotate' -or $Mode -eq 'oo_survive_10') {
         Invoke-WslStep 'clear OO persistent files' (
             "(mdel -i '$wslImg@@$fatOffset' ::OOSTATE.BIN 2>/dev/null || true); " +
             "(mdel -i '$wslImg@@$fatOffset' ::OORECOV.BIN 2>/dev/null || true); " +
@@ -1036,6 +1055,24 @@ try {
         $wslOoConsult = ConvertTo-WslPath $tmpOoConsultLogPath
         Invoke-WslStep 'clear OOCONSULT.LOG (preload)' ("(mdel -i '$wslImg@@$fatOffset' ::OOCONSULT.LOG 2>/dev/null || true)") 30
         Invoke-WslStep 'preload oversized OOCONSULT.LOG' ("mcopy -o -i '$wslImg@@$fatOffset' '$wslOoConsult' ::OOCONSULT.LOG") 60
+    }
+
+    if ($preloadOoJourLog) {
+        # Build a deterministic oversized journal log (>64KB) so guest rotation logic must trim it.
+        $sb = New-Object System.Text.StringBuilder
+        $targetChars = 70 * 1024
+        $i = 0
+        while ($sb.Length -lt $targetChars) {
+            $i++
+            [void]$sb.AppendFormat("preload_jour {0:0000} {1}`r`n", $i, ('j' * 180))
+        }
+        $tmpOoJourPreload = Join-Path $env:TEMP ("llm-baremetal-oojour-preload-{0}.log" -f ([Guid]::NewGuid().ToString('n')))
+        [System.IO.File]::WriteAllText($tmpOoJourPreload, $sb.ToString(), [System.Text.Encoding]::ASCII)
+
+        $wslOoJourPreload = ConvertTo-WslPath $tmpOoJourPreload
+        Invoke-WslStep 'clear OOJOUR.LOG (preload)' ("(mdel -i '$wslImg@@$fatOffset' ::OOJOUR.LOG 2>/dev/null || true)") 30
+        Invoke-WslStep 'preload oversized OOJOUR.LOG' ("mcopy -o -i '$wslImg@@$fatOffset' '$wslOoJourPreload' ::OOJOUR.LOG") 60
+        try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoJourPreload } catch {}
     }
 
     if ($Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail') {
@@ -1105,7 +1142,7 @@ try {
         $tmpCfgLines += 'fat83_force=1'
     }
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_jour_tail' -or $Mode -eq 'oo_survive_10') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_jour_tail' -or $Mode -eq 'oo_jour_rotate' -or $Mode -eq 'oo_survive_10') {
         $tmpCfgLines += 'oo_enable=1'
     }
     if ($Mode -eq 'oo_net_ro') {
@@ -1204,7 +1241,7 @@ try {
         if ($Mode -eq 'oo_net_ro') {
             $qemuArgsLocal += @('-net','none')
         }
-        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro' -and $Mode -ne 'oo_consult_metric' -and $Mode -ne 'oo_consult_log' -and $Mode -ne 'oo_consult_log_rotate' -and $Mode -ne 'oo_survive_10') {
+        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro' -and $Mode -ne 'oo_consult_metric' -and $Mode -ne 'oo_consult_log' -and $Mode -ne 'oo_consult_log_rotate' -and $Mode -ne 'oo_jour_rotate' -and $Mode -ne 'oo_survive_10') {
             $qemuArgsLocal += '-snapshot'
         }
         $qemuArgsLocal += @(
@@ -1460,6 +1497,21 @@ try {
         }
 
         try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoConsult } catch {}
+    }
+
+    if ($Mode -eq 'oo_jour_rotate') {
+        Write-Host '[Test] oo_jour_rotate: extracting OOJOUR.LOG for size check...' -ForegroundColor Cyan
+        $tmpOoJour = Join-Path $env:TEMP ("llm-baremetal-oojour-rotate-{0}.log" -f ([Guid]::NewGuid().ToString('n')))
+        $wslImgPost = ConvertTo-WslPath $IMAGE
+        $wslOoJour = ConvertTo-WslPath $tmpOoJour
+        Invoke-WslStep 'extract OOJOUR.LOG (rotate)' ("mcopy -o -i '$wslImgPost@@$fatOffset' ::OOJOUR.LOG '$wslOoJour'") 30
+
+        $len = (Get-Item -LiteralPath $tmpOoJour).Length
+        if ($len -gt 65536) {
+            throw "oo_jour_rotate: OOJOUR.LOG too large after rotation: $len bytes (expected <= 65536)"
+        }
+
+        try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoJour } catch {}
     }
 
     if ($Mode -eq 'oo_smoke') {
