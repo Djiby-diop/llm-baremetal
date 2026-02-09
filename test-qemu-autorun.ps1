@@ -783,7 +783,7 @@ try {
 
     # OO persistence tests must persist disk writes. Always operate on a temp image copy
     # so we can run without -snapshot and still keep the working tree clean.
-    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log_rotate') -and -not $isTempImage) {
+    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate') -and -not $isTempImage) {
         Write-Host "[Test] ${Mode}: using temp image (no -snapshot, 2 boots)" -ForegroundColor Yellow
         $IMAGE = Get-TempImageCopy $IMAGE
         $isTempImage = $true
@@ -958,7 +958,7 @@ try {
         "(mdel -i '$wslImg@@$fatOffset' ::oo-test.bin.bak 2>/dev/null || true)"
     ) 30
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log_rotate') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate') {
         Invoke-WslStep 'clear OO persistent files' (
             "(mdel -i '$wslImg@@$fatOffset' ::OOSTATE.BIN 2>/dev/null || true); " +
             "(mdel -i '$wslImg@@$fatOffset' ::OORECOV.BIN 2>/dev/null || true); " +
@@ -980,6 +980,10 @@ try {
         $wslOoConsult = ConvertTo-WslPath $tmpOoConsultLogPath
         Invoke-WslStep 'clear OOCONSULT.LOG (preload)' ("(mdel -i '$wslImg@@$fatOffset' ::OOCONSULT.LOG 2>/dev/null || true)") 30
         Invoke-WslStep 'preload oversized OOCONSULT.LOG' ("mcopy -o -i '$wslImg@@$fatOffset' '$wslOoConsult' ::OOCONSULT.LOG") 60
+    }
+
+    if ($Mode -eq 'oo_consult_log') {
+        Invoke-WslStep 'clear OOCONSULT.LOG' ("(mdel -i '$wslImg@@$fatOffset' ::OOCONSULT.LOG 2>/dev/null || true)") 30
     }
 
     # 2) Optional: copy an extra model under ::models/.
@@ -1144,7 +1148,7 @@ try {
         if ($Mode -eq 'oo_net_ro') {
             $qemuArgsLocal += @('-net','none')
         }
-        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro' -and $Mode -ne 'oo_consult_metric' -and $Mode -ne 'oo_consult_log_rotate') {
+        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro' -and $Mode -ne 'oo_consult_metric' -and $Mode -ne 'oo_consult_log' -and $Mode -ne 'oo_consult_log_rotate') {
             $qemuArgsLocal += '-snapshot'
         }
         $qemuArgsLocal += @(
@@ -1344,6 +1348,30 @@ try {
     if ($Mode -eq 'oo_consult_metric') {
         # M5.4: metric marker should appear on boot2.
         Assert-Contains $serial 'OK: OO consult metric: action=reduce_ctx' 'OO consult metric marker'
+    }
+
+    if ($Mode -eq 'oo_consult_log') {
+        Write-Host '[Test] oo_consult_log: extracting OOCONSULT.LOG for content check...' -ForegroundColor Cyan
+        $tmpOoConsult = Join-Path $env:TEMP ("llm-baremetal-ooconsult-{0}.log" -f ([Guid]::NewGuid().ToString('n')))
+        $wslImgPost = ConvertTo-WslPath $IMAGE
+        $wslOoConsult = ConvertTo-WslPath $tmpOoConsult
+        Invoke-WslStep 'extract OOCONSULT.LOG' ("mcopy -o -i '$wslImgPost@@$fatOffset' ::OOCONSULT.LOG '$wslOoConsult'") 30
+
+        $logText = Get-Content -LiteralPath $tmpOoConsult -Raw -ErrorAction SilentlyContinue
+        if (-not $logText) { throw 'oo_consult_log: OOCONSULT.LOG is empty or unreadable' }
+
+        $lines = ($logText -split "`r?`n") | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -ne '' }
+        if ($lines.Count -ne 2) {
+            throw "oo_consult_log: expected exactly 2 log lines, got $($lines.Count)"
+        }
+
+        foreach ($ln in $lines) {
+            if (-not ($ln -match '^\[boot=\d+\] mode=(SAFE|DEGRADED|NORMAL) ram=\d+ ctx=\d+ seq=\d+ suggestion=".*" decision=.* applied=[01]$')) {
+                throw "oo_consult_log: invalid log line format: $ln"
+            }
+        }
+
+        try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoConsult } catch {}
     }
 
     if ($Mode -eq 'oo_consult_log_rotate') {
