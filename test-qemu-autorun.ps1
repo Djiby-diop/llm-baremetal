@@ -43,7 +43,7 @@ param(
 
     [switch]$ForceAvx2,
 
-    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log','oo_consult_metric')]
+    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log','oo_consult_metric','oo_consult_log_rotate')]
     [string]$Mode = 'smoke',
 
     # Optional repl.cfg overrides injected into the boot image for the duration of the test.
@@ -392,6 +392,8 @@ $serialLog = $null
 $tmpOut = $null
 $tmpErr = $null
 
+$preloadOoConsultLog = $false
+
 $IMAGE = $null
 $fatOffset = $null
 $didModifyImage = $false
@@ -409,6 +411,7 @@ if ($Mode -eq 'custom' -and $AutorunScript) {
 
 $tmpCfgPath = Join-Path $env:TEMP ("llm-baremetal-replcfg-test-{0}.cfg" -f ([Guid]::NewGuid().ToString('n')))
 $autorunPath = Join-Path $env:TEMP ("llm-baremetal-autorun-test-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
+$tmpOoConsultLogPath = Join-Path $env:TEMP ("llm-baremetal-ooconsult-preload-{0}.log" -f ([Guid]::NewGuid().ToString('n')))
 
 function Backup-ImageFile {
     param(
@@ -665,6 +668,27 @@ switch ($Mode) {
             $TimeoutSec = 600
         }
     }
+    'oo_consult_log_rotate' {
+        # M5.3: Log rotation test (preload oversized OOCONSULT.LOG, then append once and assert rotated <= 64KB)
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M5.3 (consult log rotation validation)',
+            '/version',
+            '/oo_consult_mock stable',
+            '/quit'
+        )
+
+        $preloadOoConsultLog = $true
+
+        # SAFE mode: 640MB RAM for determinism
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 640
+        }
+
+        # Still needs model load under QEMU/TCG
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 600
+        }
+    }
     'oo_consult_metric' {
         # M5.4: Metrics test (auto-apply on boot1, observe metric on boot2)
         $autorunLinesEffective = @(
@@ -759,7 +783,7 @@ try {
 
     # OO persistence tests must persist disk writes. Always operate on a temp image copy
     # so we can run without -snapshot and still keep the working tree clean.
-    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric') -and -not $isTempImage) {
+    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log_rotate') -and -not $isTempImage) {
         Write-Host "[Test] ${Mode}: using temp image (no -snapshot, 2 boots)" -ForegroundColor Yellow
         $IMAGE = Get-TempImageCopy $IMAGE
         $isTempImage = $true
@@ -934,12 +958,28 @@ try {
         "(mdel -i '$wslImg@@$fatOffset' ::oo-test.bin.bak 2>/dev/null || true)"
     ) 30
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log_rotate') {
         Invoke-WslStep 'clear OO persistent files' (
             "(mdel -i '$wslImg@@$fatOffset' ::OOSTATE.BIN 2>/dev/null || true); " +
             "(mdel -i '$wslImg@@$fatOffset' ::OORECOV.BIN 2>/dev/null || true); " +
             "(mdel -i '$wslImg@@$fatOffset' ::OOJOUR.LOG 2>/dev/null || true)"
         ) 30
+    }
+
+    if ($preloadOoConsultLog) {
+        # Build a deterministic oversized consult log (>64KB) so the guest rotation logic must trim it.
+        $sb = New-Object System.Text.StringBuilder
+        $targetChars = 70 * 1024
+        $i = 0
+        while ($sb.Length -lt $targetChars) {
+            $i++
+            [void]$sb.AppendFormat("preload {0:0000} {1}`r`n", $i, ('x' * 180))
+        }
+        [System.IO.File]::WriteAllText($tmpOoConsultLogPath, $sb.ToString(), [System.Text.Encoding]::ASCII)
+
+        $wslOoConsult = ConvertTo-WslPath $tmpOoConsultLogPath
+        Invoke-WslStep 'clear OOCONSULT.LOG (preload)' ("(mdel -i '$wslImg@@$fatOffset' ::OOCONSULT.LOG 2>/dev/null || true)") 30
+        Invoke-WslStep 'preload oversized OOCONSULT.LOG' ("mcopy -o -i '$wslImg@@$fatOffset' '$wslOoConsult' ::OOCONSULT.LOG") 60
     }
 
     # 2) Optional: copy an extra model under ::models/.
@@ -1005,7 +1045,7 @@ try {
         $tmpCfgLines += 'fat83_force=1'
     }
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_metric') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric') {
         $tmpCfgLines += 'oo_enable=1'
     }
     if ($Mode -eq 'oo_net_ro') {
@@ -1016,7 +1056,7 @@ try {
     if ($Mode -eq 'oo_ram_preflight_seq') {
         $tmpCfgLines += 'oo_min_total_mb=0'
     }
-    if ($Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_metric') {
+    if ($Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric') {
         $tmpCfgLines += 'oo_llm_consult=1'
     }
     if ($Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock') {
@@ -1025,7 +1065,7 @@ try {
     if ($Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_metric') {
         $tmpCfgLines += 'oo_auto_apply=1'
     }
-    if ($Mode -eq 'oo_consult_log') {
+    if ($Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate') {
         $tmpCfgLines += 'oo_consult_log=1'
     }
 
@@ -1104,7 +1144,7 @@ try {
         if ($Mode -eq 'oo_net_ro') {
             $qemuArgsLocal += @('-net','none')
         }
-        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro' -and $Mode -ne 'oo_consult_metric') {
+        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro' -and $Mode -ne 'oo_consult_metric' -and $Mode -ne 'oo_consult_log_rotate') {
             $qemuArgsLocal += '-snapshot'
         }
         $qemuArgsLocal += @(
@@ -1304,6 +1344,21 @@ try {
     if ($Mode -eq 'oo_consult_metric') {
         # M5.4: metric marker should appear on boot2.
         Assert-Contains $serial 'OK: OO consult metric: action=reduce_ctx' 'OO consult metric marker'
+    }
+
+    if ($Mode -eq 'oo_consult_log_rotate') {
+        Write-Host '[Test] oo_consult_log_rotate: extracting OOCONSULT.LOG for size check...' -ForegroundColor Cyan
+        $tmpOoConsult = Join-Path $env:TEMP ("llm-baremetal-ooconsult-rotate-{0}.log" -f ([Guid]::NewGuid().ToString('n')))
+        $wslImgPost = ConvertTo-WslPath $IMAGE
+        $wslOoConsult = ConvertTo-WslPath $tmpOoConsult
+        Invoke-WslStep 'extract OOCONSULT.LOG (rotate)' ("mcopy -o -i '$wslImgPost@@$fatOffset' ::OOCONSULT.LOG '$wslOoConsult'") 30
+
+        $len = (Get-Item -LiteralPath $tmpOoConsult).Length
+        if ($len -gt 65536) {
+            throw "oo_consult_log_rotate: OOCONSULT.LOG too large after rotation: $len bytes (expected <= 65536)"
+        }
+
+        try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoConsult } catch {}
     }
 
     if ($Mode -eq 'oo_smoke') {
@@ -1538,6 +1593,13 @@ try {
             }
             Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.3)'
             Assert-Contains $serial 'mode=SAFE' 'Consult log test ran in SAFE mode'
+        } elseif ($Mode -eq 'oo_consult_log_rotate') {
+            # M5.3: Ensure we at least appended once (rotation is validated via extracted file size).
+            $consultCount = ([regex]::Matches($serial, 'OK: OO consult logged to OOCONSULT.LOG')).Count
+            if ($consultCount -lt 1) {
+                throw "Expected >= 1 consultation log marker, found $consultCount"
+            }
+            Assert-Contains $serial 'mode=SAFE' 'Consult log rotation test ran in SAFE mode'
         } elseif ($Mode -eq 'oo_consult_metric') {
             Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.4)'
             Assert-Contains $serial 'OK: OO auto-apply: reduce_ctx' 'OO auto-apply marker (M5.2)'
@@ -1593,6 +1655,7 @@ try {
 } finally {
     try { if (Test-Path $tmpCfgPath) { Remove-Item -Force $tmpCfgPath -ErrorAction SilentlyContinue } } catch {}
     try { if (Test-Path $autorunPath) { Remove-Item -Force $autorunPath -ErrorAction SilentlyContinue } } catch {}
+    try { if (Test-Path $tmpOoConsultLogPath) { Remove-Item -Force $tmpOoConsultLogPath -ErrorAction SilentlyContinue } } catch {}
 
     if ((-not $isTempImage) -and $didModifyImage -and $IMAGE -and $fatOffset -and $imageBackups -and $imageBackups.Count -gt 0) {
         try {

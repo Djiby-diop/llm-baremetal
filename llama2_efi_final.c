@@ -8258,6 +8258,49 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
 }
 
 // M5.3: Log consultation to OOCONSULT.LOG (append-only)
+// Spec: cap log at 64KB and truncate oldest (FIFO) when exceeded.
+#define LLMK_OO_CONSULT_LOG_MAX_BYTES  (64u * 1024u)
+#define LLMK_OO_CONSULT_LOG_KEEP_BYTES (32u * 1024u)
+
+static void llmk_oo_consult_log_rotate_best_effort(void) {
+    if (!g_root) return;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOCONSULT.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        return;
+    }
+
+    if (len <= (UINTN)LLMK_OO_CONSULT_LOG_MAX_BYTES) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        return;
+    }
+
+    UINTN keep = (UINTN)LLMK_OO_CONSULT_LOG_KEEP_BYTES;
+    if (keep >= len) keep = len;
+    UINTN start = len - keep;
+
+    // Try to align on a line boundary to avoid starting mid-line.
+    char *cbuf = (char *)buf;
+    for (UINTN i = start; i < len; i++) {
+        if (cbuf[i] == '\n') { start = i + 1; break; }
+    }
+    if (start >= len) start = 0;
+
+    EFI_FILE_HANDLE f = NULL;
+    st = llmk_open_binary_file(&f, L"OOCONSULT.LOG");
+    if (!EFI_ERROR(st) && f) {
+        UINTN nb = len - start;
+        (void)llmk_file_write_bytes(f, (const void *)(cbuf + start), nb);
+        (void)uefi_call_wrapper(f->Flush, 1, f);
+        uefi_call_wrapper(f->Close, 1, f);
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
 static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_mb, 
                                      int ctx, int seq, const char *suggestion, 
                                      const char *decision, int applied) {
@@ -8310,6 +8353,9 @@ static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_
         uefi_call_wrapper(logf->Flush, 1, logf);
         uefi_call_wrapper(logf->Close, 1, logf);
         Print(L"OK: OO consult logged to OOCONSULT.LOG\r\n");
+
+        // Enforce max size (best-effort; no boot impact).
+        llmk_oo_consult_log_rotate_best_effort();
     }
 }
 
