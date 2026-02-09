@@ -16,64 +16,10 @@ Made in Senegal 🇸🇳 by Djiby Diop
 ./build.ps1
 ```
 
-Optional (bootstrap pinned tool wrappers used by some workflows/CI):
-
-```powershell
-./build.ps1 -BootstrapToolchains
-```
-
 Example (base name):
 
 ```powershell
 ./build.ps1 -ModelBin stories110M
-```
-
-### Optional: Cosmopolitan (cosmocc) toolchain
-
-If you want a self-contained C toolchain download (not committed to git), you can bootstrap `cosmocc`:
-
-```powershell
-./tools/get-cosmocc.ps1
-./tools/cosmocc.ps1 --help
-```
-
-Linux/WSL:
-
-```bash
-./tools/get-cosmocc.sh
-./tools/cosmocc.sh --help
-```
-
-### Optional: Cosmopolitan tools (pinned, not committed)
-
-Pinned bootstrappers (downloaded into `tools/_toolchains/`, ignored by git):
-
-```powershell
-./tools/get-cosmos.ps1
-./tools/get-cosmopolitan-src.ps1
-
-./tools/get-redbean.ps1
-./tools/get-ape.ps1
-./tools/get-apelink.ps1
-```
-
-Wrappers:
-
-```powershell
-./tools/redbean.ps1 --help
-./tools/ape.ps1 --help
-./tools/apelink.ps1 --help
-```
-
-Linux/WSL:
-
-```bash
-./tools/get-cosmos.sh
-./tools/get-cosmopolitan-src.sh
-
-./tools/redbean.sh --help
-./tools/ape.sh --help
-./tools/apelink.sh --help
 ```
 
 ## Build (Linux)

@@ -439,10 +439,15 @@ static EFI_STATUS InterfaceFx_Begin(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Sy
 
     // 2. Load and draw static splash image
     Status = Interface_DrawBMP(ImageHandle, g_ifx.Gop, L"splash.bmp");
+
+    // Splash is optional: if missing or invalid, continue boot normally.
+    if (EFI_ERROR(Status)) {
+        return EFI_SUCCESS;
+    }
     
     // 3. Pause for visibility (configurable via repl.cfg: splash_ms=NNNN)
     // Default: 2500ms. Clamp: 0..10000ms.
-    if (!EFI_ERROR(Status)) {
+    {
         UINT32 splash_ms = 2500;
         UINT32 cfg_ms = 0;
         if (Interface_ReadCfgU32(ImageHandle, "splash_ms", &cfg_ms)) {
@@ -454,11 +459,9 @@ static EFI_STATUS InterfaceFx_Begin(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Sy
     }
 
     // Clear back to black so subsequent UI (banner/REPL) starts clean.
-    if (!EFI_ERROR(Status)) {
-        Interface_DrawRect(g_ifx.Gop, 0, 0, g_ifx.ScreenW, g_ifx.ScreenH, ColorBlack);
-    }
+    Interface_DrawRect(g_ifx.Gop, 0, 0, g_ifx.ScreenW, g_ifx.ScreenH, ColorBlack);
 
-    return Status;
+    return EFI_SUCCESS;
 }
 
 static void InterfaceFx_DrawSeg(EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop, UINT32 x, UINT32 y, UINT32 w, UINT32 h, EFI_GRAPHICS_OUTPUT_BLT_PIXEL c) {

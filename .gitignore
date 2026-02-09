@@ -141,5 +141,34 @@ __pycache__/
 *.pyc
 .venv/
 
+# Keep repo minimal: non-essential docs/notes are local only
+ROADMAP.md
+REPERE.md
+COMMANDES.md
+OO_SPEC.md
+
+# CI / release helpers are not part of the booter yet
+.github/
+release-image.ps1
+bench-matrix.ps1
+
+# Optional dev tools (downloaders, wrappers, helpers)
+tools/
+
+# Misc helpers (non essentiels)
+extract-splash-from-img.sh
+
+# Editable splash source (optional local asset)
+llm2.png
+
+# Generated/optional splash (boot works without it)
+splash.bmp
+
+# Desktop-only header (not part of booter build)
+interface_desktop.h
+
+# Repo-local toolchains dir (if created)
+tools/_toolchains/
+
 # Local toolchains (downloaded, not tracked)
 tools/_toolchains/

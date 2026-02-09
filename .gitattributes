@@ -2,6 +2,9 @@
 *.img filter=lfs diff=lfs merge=lfs -text
 *.efi filter=lfs diff=lfs merge=lfs -text
 
+# tokenizer.bin is intentionally stored directly in git (small, required at runtime)
+tokenizer.bin -filter -diff -merge -text
+
 # Keep bash scripts usable from WSL/Linux
 *.sh text eol=lf
 

@@ -31,7 +31,7 @@ param(
 
     [switch]$SkipBuild,
 
-    # Optional: bootstrap pinned toolchains (downloaded into tools/_toolchains/, ignored by git)
+    # Optional: bootstrap pinned toolchains (downloaded into a per-user cache dir)
     # before running any build steps.
     [switch]$BootstrapToolchains,
     [switch]$SkipExtract,

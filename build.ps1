@@ -3,10 +3,6 @@ param(
 	[ValidateSet('repl')]
 	[string]$Target = 'repl',
 
-	# Optional: bootstrap pinned toolchains (downloaded to tools/_toolchains/, ignored by git).
-	# Does not change the build output; it just makes the tool wrappers available for workflows/CI.
-	[switch]$BootstrapToolchains,
-
 	# Build an image without embedding any model weights.
 	# Useful for release artifacts and for users who want to copy their own model later.
 	[switch]$NoModel,
@@ -37,9 +33,6 @@ Set-Location -LiteralPath $PSScriptRoot
 
 Write-Host "`n[Build] Build + Image (WSL)" -ForegroundColor Cyan
 Write-Host "  Target: $Target" -ForegroundColor Gray
-if ($BootstrapToolchains) {
-	Write-Host "  Tools:  bootstrap pinned toolchains" -ForegroundColor Gray
-}
 if ($NoModel) {
 	Write-Host "  Model:  (no-model image)" -ForegroundColor Gray
 } else {
@@ -96,7 +89,7 @@ if (-not $NoModel) {
 
 function Update-SplashBmpFromPng-BestEffort {
 	# The UEFI splash renderer only supports 24-bit uncompressed BMP (splash.bmp).
-	# Keep llm2.png as the editable source asset and generate splash.bmp automatically.
+	# If llm2.png exists locally, generate splash.bmp automatically.
 	$src = Join-Path $PSScriptRoot 'llm2.png'
 	$dst = Join-Path $PSScriptRoot 'splash.bmp'
 	if (-not (Test-Path $src)) { return }
@@ -136,15 +129,6 @@ function Update-SplashBmpFromPng-BestEffort {
 }
 
 Update-SplashBmpFromPng-BestEffort
-
-if ($BootstrapToolchains) {
-	Write-Host "[Build] Bootstrapping toolchains (pinned)" -ForegroundColor Gray
-	& (Join-Path $PSScriptRoot 'tools\get-cosmos.ps1')
-	& (Join-Path $PSScriptRoot 'tools\get-redbean.ps1')
-	& (Join-Path $PSScriptRoot 'tools\get-ape.ps1')
-	& (Join-Path $PSScriptRoot 'tools\get-cosmocc.ps1')
-	& (Join-Path $PSScriptRoot 'tools\get-apelink.ps1')
-}
 
 function ConvertTo-WslPath([string]$winPath) {
 	# Deterministic conversion (avoids occasional unreliable `wslpath` output).
