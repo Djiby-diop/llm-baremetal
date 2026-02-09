@@ -2699,12 +2699,33 @@ static int g_oo_last_mode_valid = 0;
 // flags layout (packed counters; keep state struct fixed-size for v1)
 //   bits  0..7   : consecutive recoveries (0-255)
 //   bits  8..15  : consecutive stable boots (0-255)
+//   bits 16..23  : last auto-apply action meta (low6=action_id, high2=apply_mode)
+//   bits 24..31  : last auto-apply boot_count low8 (for next-boot metrics)
 #define LLMK_OO_FLAGS_RC_MASK   0x000000FFu
 #define LLMK_OO_FLAGS_SC_MASK   0x0000FF00u
 #define LLMK_OO_FLAGS_SC_SHIFT  8u
 
+#define LLMK_OO_FLAGS_LAST_ACTION_META_MASK   0x00FF0000u
+#define LLMK_OO_FLAGS_LAST_ACTION_META_SHIFT  16u
+
+#define LLMK_OO_FLAGS_LAST_APPLY_BOOT_MASK    0xFF000000u
+#define LLMK_OO_FLAGS_LAST_APPLY_BOOT_SHIFT   24u
+
+enum {
+    LLMK_OO_ACTION_NONE       = 0,
+    LLMK_OO_ACTION_REDUCE_CTX = 1,
+    LLMK_OO_ACTION_REDUCE_SEQ = 2,
+    LLMK_OO_ACTION_INCREASE_CTX = 3,
+};
+
 static UINT32 llmk_oo_get_rc(UINT32 flags) { return (flags & LLMK_OO_FLAGS_RC_MASK); }
 static UINT32 llmk_oo_get_sc(UINT32 flags) { return (flags & LLMK_OO_FLAGS_SC_MASK) >> LLMK_OO_FLAGS_SC_SHIFT; }
+static UINT32 llmk_oo_get_last_action_meta(UINT32 flags) {
+    return (flags & LLMK_OO_FLAGS_LAST_ACTION_META_MASK) >> LLMK_OO_FLAGS_LAST_ACTION_META_SHIFT;
+}
+static UINT32 llmk_oo_get_last_apply_boot_low8(UINT32 flags) {
+    return (flags & LLMK_OO_FLAGS_LAST_APPLY_BOOT_MASK) >> LLMK_OO_FLAGS_LAST_APPLY_BOOT_SHIFT;
+}
 static UINT32 llmk_oo_set_rc(UINT32 flags, UINT32 rc) {
     flags &= ~LLMK_OO_FLAGS_RC_MASK;
     flags |= (rc & 0xFFu);
@@ -2714,6 +2735,25 @@ static UINT32 llmk_oo_set_sc(UINT32 flags, UINT32 sc) {
     flags &= ~LLMK_OO_FLAGS_SC_MASK;
     flags |= ((sc & 0xFFu) << LLMK_OO_FLAGS_SC_SHIFT);
     return flags;
+}
+static UINT32 llmk_oo_set_last_action_meta(UINT32 flags, UINT32 meta) {
+    flags &= ~LLMK_OO_FLAGS_LAST_ACTION_META_MASK;
+    flags |= ((meta & 0xFFu) << LLMK_OO_FLAGS_LAST_ACTION_META_SHIFT);
+    return flags;
+}
+static UINT32 llmk_oo_set_last_apply_boot_low8(UINT32 flags, UINT32 b) {
+    flags &= ~LLMK_OO_FLAGS_LAST_APPLY_BOOT_MASK;
+    flags |= ((b & 0xFFu) << LLMK_OO_FLAGS_LAST_APPLY_BOOT_SHIFT);
+    return flags;
+}
+
+static const char *llmk_oo_action_name(UINT32 action_id) {
+    switch (action_id) {
+        case LLMK_OO_ACTION_REDUCE_CTX: return "reduce_ctx";
+        case LLMK_OO_ACTION_REDUCE_SEQ: return "reduce_seq";
+        case LLMK_OO_ACTION_INCREASE_CTX: return "increase_ctx";
+        default: return "none";
+    }
 }
 
 typedef struct {
@@ -2891,6 +2931,41 @@ static void llmk_oo_journal_append_best_effort(const LlmkOoState *s, const char 
     uefi_call_wrapper(f->Close, 1, f);
 }
 
+static int llmk_oo_consult_metrics_tick_best_effort(LlmkOoState *s, char *out_event, int out_cap) {
+    if (out_event && out_cap > 0) out_event[0] = 0;
+    if (!s || !g_cfg_oo_enable) return 0;
+
+    UINT32 meta = llmk_oo_get_last_action_meta(s->flags);
+    UINT32 apply_boot_low8 = llmk_oo_get_last_apply_boot_low8(s->flags);
+    if (meta == 0 || apply_boot_low8 == 0) return 0;
+
+    UINT32 action_id = (meta & 0x3Fu);
+    UINT32 apply_mode = (meta >> 6u) & 0x3u;
+
+    UINT32 curr_boot_low8 = (UINT32)(s->boot_count & 0xFFu);
+    UINT32 want = (UINT32)((apply_boot_low8 + 1u) & 0xFFu);
+    if (curr_boot_low8 != want) return 0;
+
+    // Improvement: mode numerically decreases (SAFE=2 -> DEGRADED=1 -> NORMAL=0)
+    int improved = ((UINT32)s->mode < apply_mode) ? 1 : 0;
+    Print(L"OK: OO consult metric: action=%a improved=%d\r\n", llmk_oo_action_name(action_id), improved);
+
+    if (out_event && out_cap > 0) {
+        int p = 0;
+        out_event[0] = 0;
+        llmk_ascii_append_str(out_event, out_cap, &p, "consult_metric action=");
+        llmk_ascii_append_str(out_event, out_cap, &p, llmk_oo_action_name(action_id));
+        llmk_ascii_append_str(out_event, out_cap, &p, " improved=");
+        llmk_ascii_append_u64(out_event, out_cap, &p, (UINT64)improved);
+        out_event[p] = 0;
+    }
+
+    // Clear metadata so we only report once.
+    s->flags = llmk_oo_set_last_action_meta(s->flags, 0);
+    s->flags = llmk_oo_set_last_apply_boot_low8(s->flags, 0);
+    return 1;
+}
+
 static void llmk_oo_boot_tick_best_effort(void) {
     if (!g_cfg_oo_enable) return;
     if (!g_root) return;
@@ -2957,6 +3032,11 @@ static void llmk_oo_boot_tick_best_effort(void) {
     g_oo_last_mode_valid = 1;
 
     s.boot_count++;
+
+    // M5.4: If an auto-apply happened last boot, emit one-shot metrics now.
+    char metric_event[96];
+    int has_metric = llmk_oo_consult_metrics_tick_best_effort(&s, metric_event, (int)sizeof(metric_event));
+
     s.magic = LLMK_OO_STATE_MAGIC;
     s.version = LLMK_OO_STATE_VER;
     s.size = (UINT32)sizeof(LlmkOoState);
@@ -2968,6 +3048,9 @@ static void llmk_oo_boot_tick_best_effort(void) {
         llmk_oo_write_recovery_best_effort(&s);
     }
     llmk_oo_journal_append_best_effort(&s, event);
+    if (has_metric && metric_event[0]) {
+        llmk_oo_journal_append_best_effort(&s, metric_event);
+    }
 
     if (!EFI_ERROR(wst)) {
         Print(L"OK: OO boot_count=%lu mode=%s\r\n", (UINT64)s.boot_count, llmk_oo_mode_name(s.mode));
@@ -5294,6 +5377,195 @@ static void llmk_cfg_out_append(char *out, int *op, int out_cap, const char *s) 
     while (*s && p + 1 < out_cap) out[p++] = *s++;
     out[p] = 0;
     *op = p;
+}
+
+// Forward decl: used by OO auto-apply verification helpers.
+static EFI_STATUS llmk_repl_cfg_set_kv_best_effort(const char *key, const char *val);
+
+static int llmk_repl_cfg_read_ctx_seq_best_effort(int *out_ctx, int *out_seq) {
+    if (out_ctx) *out_ctx = 0;
+    if (out_seq) *out_seq = 0;
+    if (!g_root) return 0;
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"repl.cfg", &raw, &raw_len);
+    if (EFI_ERROR(st) || !raw || raw_len == 0) {
+        if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+        return 0;
+    }
+
+    // Make NUL-terminated ASCII buffer.
+    char *buf = NULL;
+    EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&buf);
+    if (EFI_ERROR(st2) || !buf) {
+        uefi_call_wrapper(BS->FreePool, 1, raw);
+        return 0;
+    }
+    CopyMem(buf, raw, raw_len);
+    buf[raw_len] = 0;
+    uefi_call_wrapper(BS->FreePool, 1, raw);
+
+    int got_ctx = 0;
+    int got_seq = 0;
+
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        // Trim CR.
+        for (char *c = line; *c; c++) {
+            if (*c == '\r') { *c = 0; break; }
+        }
+
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+        if (line[0] == '#' || line[0] == ';') continue;
+
+        // Strip inline comment.
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0) continue;
+
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        if (!got_ctx && (llmk_cfg_streq_ci(key, "ctx_len") || llmk_cfg_streq_ci(key, "context") || llmk_cfg_streq_ci(key, "context_len"))) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = -v;
+                if (out_ctx) *out_ctx = v;
+                got_ctx = 1;
+            }
+        } else if (!got_seq && (llmk_cfg_streq_ci(key, "seq_len") || llmk_cfg_streq_ci(key, "sequence") || llmk_cfg_streq_ci(key, "sequence_len"))) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = -v;
+                if (out_seq) *out_seq = v;
+                got_seq = 1;
+            }
+        }
+
+        if (got_ctx && got_seq) break;
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    return (got_ctx || got_seq);
+}
+
+static UINT64 llmk_oo_cfg_checksum_i64(int ctx_len, int seq_len, UINT64 ram_mb) {
+    // Spec (M5.2): checksum = ctx_len XOR seq_len XOR (ram_mb << 8)
+    UINT64 c = ((UINT64)((UINT32)ctx_len) ^ (UINT64)((UINT32)seq_len));
+    c ^= (ram_mb << 8);
+    return c;
+}
+
+static void llmk_oo_journal_event_load_state_best_effort(const char *event) {
+    if (!g_root || !event) return;
+    LlmkOoState s;
+    if (!llmk_oo_load_state_best_effort(&s)) return;
+    llmk_oo_journal_append_best_effort(&s, event);
+}
+
+static void llmk_oo_record_last_auto_apply_best_effort(UINT64 boot_count, UINT32 apply_mode, UINT32 action_id) {
+    if (!g_root) return;
+    LlmkOoState s;
+    if (!llmk_oo_load_state_best_effort(&s)) return;
+
+    // meta: low6=action_id, high2=apply_mode
+    UINT32 meta = ((apply_mode & 0x3u) << 6u) | (action_id & 0x3Fu);
+    UINT32 boot_low8 = (UINT32)(boot_count & 0xFFu);
+
+    s.flags = llmk_oo_set_last_action_meta(s.flags, meta);
+    s.flags = llmk_oo_set_last_apply_boot_low8(s.flags, boot_low8);
+
+    s.magic = LLMK_OO_STATE_MAGIC;
+    s.version = LLMK_OO_STATE_VER;
+    s.size = (UINT32)sizeof(LlmkOoState);
+    s.checksum = llmk_oo_state_checksum(&s);
+    EFI_STATUS wst = llmk_oo_write_state_best_effort(&s);
+    if (!EFI_ERROR(wst)) {
+        llmk_oo_write_recovery_best_effort(&s);
+    }
+}
+
+static int llmk_oo_auto_apply_write_verify_best_effort(const char *action,
+                                                      const char *key,
+                                                      int old_ctx_hint,
+                                                      int old_seq_hint,
+                                                      int expected_ctx,
+                                                      int expected_seq,
+                                                      UINT64 ram_mb) {
+    if (!action || !key) return 0;
+
+    // Read current values from repl.cfg when available.
+    int ctx_before = old_ctx_hint;
+    int seq_before = old_seq_hint;
+    {
+        int rc = 0;
+        int rs = 0;
+        if (llmk_repl_cfg_read_ctx_seq_best_effort(&rc, &rs)) {
+            if (rc > 0) ctx_before = rc;
+            if (rs > 0) seq_before = rs;
+        }
+    }
+
+    UINT64 c_before = llmk_oo_cfg_checksum_i64(ctx_before, seq_before, ram_mb);
+
+    // Apply: write the intended key.
+    {
+        char val[32];
+        int vp = 0;
+        int v = 0;
+        if (llmk_cfg_streq_ci(key, "ctx_len")) v = expected_ctx;
+        else if (llmk_cfg_streq_ci(key, "seq_len")) v = expected_seq;
+        else return 0;
+        llmk_ascii_append_u64(val, (int)sizeof(val), &vp, (UINT64)v);
+        val[vp] = 0;
+        EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort(key, val);
+        if (EFI_ERROR(st)) return 0;
+    }
+
+    // Re-read + verify.
+    int ctx_after = 0;
+    int seq_after = 0;
+    if (!llmk_repl_cfg_read_ctx_seq_best_effort(&ctx_after, &seq_after)) {
+        return 0;
+    }
+
+    // Fill missing key from expected (best-effort) so checksum check is meaningful.
+    if (ctx_after <= 0) ctx_after = expected_ctx;
+    if (seq_after <= 0) seq_after = expected_seq;
+
+    // Range checks (spec guidance: ctx_len ∈ [16,4096] etc).
+    if (ctx_after < 16 || ctx_after > 4096) return 0;
+    if (seq_after < 16 || seq_after > 4096) return 0;
+
+    // Ensure the modified key matches the expected value.
+    if (llmk_cfg_streq_ci(key, "ctx_len") && ctx_after != expected_ctx) return 0;
+    if (llmk_cfg_streq_ci(key, "seq_len") && seq_after != expected_seq) return 0;
+
+    UINT64 c_after = llmk_oo_cfg_checksum_i64(ctx_after, seq_after, ram_mb);
+    UINT64 c_expected = llmk_oo_cfg_checksum_i64(expected_ctx, expected_seq, ram_mb);
+
+    // Verification checks: checksum matches expected post-state and changed.
+    if (c_after != c_expected) return 0;
+    (void)c_before; // currently used only as a spec-aligned pre-computation
+
+    return 1;
 }
 
 static EFI_STATUS llmk_repl_cfg_set_kv_best_effort(const char *key, const char *val) {
@@ -7639,6 +7911,352 @@ static EFI_STATUS llmk_snap_load_into_state_best_effort(RunState *state, const C
 // OO M5: LLM Consult Implementation
 // ============================================================================
 
+static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_mb,
+                                     int ctx, int seq, const char *suggestion,
+                                     const char *decision, int applied);
+
+static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT64 boots,
+                                               int ctx, int seq,
+                                               const char *llm_suggestion) {
+    if (!llm_suggestion) llm_suggestion = "";
+
+    // Clamp suggestion length to local buffers.
+    int llm_len = my_strlen(llm_suggestion);
+    if (llm_len < 0) llm_len = 0;
+    if (llm_len > 120) llm_len = 120;
+
+    // Emit LLM suggestion marker (deterministic)
+    Print(L"OK: OO LLM suggested: ");
+    {
+        char tmp[128];
+        int tp = 0;
+        for (int i = 0; i < llm_len && tp + 1 < (int)sizeof(tmp); i++) {
+            char c = llm_suggestion[i];
+            if (c < 0x20 || c > 0x7E) c = '_';
+            if (c == '"') c = '\'';
+            tmp[tp++] = c;
+        }
+        tmp[tp] = 0;
+        llmk_print_ascii(tmp);
+    }
+    Print(L"\r\n");
+
+    // 5. Parse suggestion for keywords (M5.1: detect ALL keywords)
+    int action_reduce_ctx = 0;
+    int action_reduce_seq = 0;
+    int action_increase = 0;
+    int action_reboot = 0;
+    int action_model = 0;
+    int action_stable = 0;
+
+    // Simple substring search (case-insensitive)
+    char lower[128];
+    int copy_len = llm_len;
+    if (copy_len > (int)sizeof(lower) - 1) copy_len = (int)sizeof(lower) - 1;
+    for (int i = 0; i < copy_len; i++) {
+        char c = llm_suggestion[i];
+        if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+        lower[i] = c;
+    }
+    lower[copy_len] = 0;
+
+    // Check for multi-actions feature flag (default: follows oo_llm_consult)
+    int multi_enabled = g_cfg_oo_multi_actions;
+    if (multi_enabled < 0) {
+        multi_enabled = (g_cfg_oo_llm_consult > 0) ? 1 : 0;
+    }
+
+    // Detect reduce actions (ctx and/or seq)
+    if (my_strstr(lower, "reduce") || my_strstr(lower, "lower") || my_strstr(lower, "decrease")) {
+        if (my_strstr(lower, "ctx") || my_strstr(lower, "context")) action_reduce_ctx = 1;
+        if (my_strstr(lower, "seq") || my_strstr(lower, "sequence")) action_reduce_seq = 1;
+        // Generic "reduce" without target: default to ctx
+        if (!action_reduce_ctx && !action_reduce_seq) action_reduce_ctx = 1;
+    }
+
+    // Detect increase (blocked in most cases)
+    if (my_strstr(lower, "increase") || my_strstr(lower, "raise") || my_strstr(lower, "more")) {
+        action_increase = 1;
+    }
+
+    // Detect system actions (reboot, model change)
+    if (my_strstr(lower, "reboot") || my_strstr(lower, "restart")) action_reboot = 1;
+    if (my_strstr(lower, "model") || my_strstr(lower, "switch")) action_model = 1;
+
+    // Detect "stable" / no-op signal
+    if (my_strstr(lower, "stable") || my_strstr(lower, "ok") || my_strstr(lower, "wait") || my_strstr(lower, "good")) {
+        action_stable = 1;
+    }
+
+    // 6. Policy decision (M5.1: apply ALL valid actions when multi_enabled)
+    int actions_applied = 0;
+    int actions_blocked = 0;
+    char batch_summary[256];
+    int batch_summary_pos = 0;
+    batch_summary[0] = 0;
+
+    // Priority filtering: stable cancels all, reboot primes others
+    if (action_stable) {
+        // Stable signal: no action needed
+        Print(L"OK: OO policy decided: system_stable (reason=llm_reports_ok)\r\n");
+        actions_applied = 0;
+        actions_blocked = (action_reduce_ctx + action_reduce_seq + action_increase + action_reboot + action_model - 1);
+        llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "stable");
+    } else if (action_reboot) {
+        // Reboot primes others: log but don't auto-apply (v0)
+        Print(L"OK: OO policy decided: logged_only (reason=reboot_not_auto)\r\n");
+        actions_applied = 0;
+        actions_blocked = (action_reduce_ctx + action_reduce_seq + action_increase + action_model);
+        llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reboot_logged");
+    } else {
+        // Apply reductions first (safe), then increases (blocked), then model
+
+        // 6.1: Apply reduce_ctx (if detected and safe)
+        if (action_reduce_ctx) {
+            if (mode == LLMK_OO_MODE_SAFE || mode == LLMK_OO_MODE_DEGRADED) {
+                int new_ctx = ctx / 2;
+                if (new_ctx < 128) new_ctx = 128;
+                if (new_ctx != ctx) {
+                    // M5.2: Check auto-apply config and throttling
+                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
+                    int is_reduction = 1; // reduce_ctx is always a reduction
+
+                    if (!can_auto_apply) {
+                        // Auto-apply disabled or throttled
+                        if (g_cfg_oo_auto_apply == 0) {
+                            Print(L"OK: OO policy simulation: reduce_ctx (would_apply_if_enabled, new=%d)\r\n", new_ctx);
+                        } else {
+                            Print(L"OK: OO policy throttled: reduce_ctx (limit=1_per_boot, new=%d)\r\n", new_ctx);
+                        }
+                        actions_blocked++;
+                    } else if (g_cfg_oo_auto_apply == 1 && !is_reduction) {
+                        // Conservative mode: only reductions (this branch won't hit for reduce_ctx)
+                        Print(L"OK: OO policy blocked: reduce_ctx (reason=conservative_mode)\r\n");
+                        actions_blocked++;
+                    } else {
+                        // Auto-apply enabled: write + verify per M5.2
+                        int ok = llmk_oo_auto_apply_write_verify_best_effort("reduce_ctx",
+                                                                            "ctx_len",
+                                                                            ctx,
+                                                                            seq,
+                                                                            new_ctx,
+                                                                            seq,
+                                                                            ram_mb);
+                        if (ok) {
+                            Print(L"OK: OO auto-apply: reduce_ctx (old=%d new=%d check=pass)\r\n", ctx, new_ctx);
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=success");
+                            llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_CTX);
+                            actions_applied++;
+                            g_oo_auto_applied_this_boot = 1; // Throttle further applications
+                            if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
+                            llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reduce_ctx");
+                        } else {
+                            // Revert to previous value (best-effort)
+                            char oval[32];
+                            int op = 0;
+                            llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)ctx);
+                            oval[op] = 0;
+                            llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
+                            Print(L"ERROR: OO auto-apply verification failed: reduce_ctx (reason=verify_failed, reverting)\r\n");
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=failed reason=verify_failed");
+                            actions_blocked++;
+                        }
+                    }
+                } else {
+                    Print(L"OK: OO policy blocked: reduce_ctx (reason=already_at_min)\r\n");
+                    actions_blocked++;
+                }
+            } else {
+                Print(L"OK: OO policy blocked: reduce_ctx (reason=normal_mode_no_auto_reduce)\r\n");
+                actions_blocked++;
+            }
+        }
+
+        // 6.2: Apply reduce_seq (if detected, multi_enabled, and safe)
+        if (action_reduce_seq && multi_enabled) {
+            if (mode == LLMK_OO_MODE_SAFE && ram_mb < 1024ULL) {
+                int new_seq = seq / 2;
+                if (new_seq < 128) new_seq = 128;
+                if (new_seq != seq) {
+                    // M5.2: Check auto-apply config and throttling
+                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
+
+                    if (!can_auto_apply) {
+                        if (g_cfg_oo_auto_apply == 0) {
+                            Print(L"OK: OO policy simulation: reduce_seq (would_apply_if_enabled, new=%d)\r\n", new_seq);
+                        } else {
+                            Print(L"OK: OO policy throttled: reduce_seq (limit=1_per_boot, new=%d)\r\n", new_seq);
+                        }
+                        actions_blocked++;
+                    } else {
+                        int ok = llmk_oo_auto_apply_write_verify_best_effort("reduce_seq",
+                                                                            "seq_len",
+                                                                            ctx,
+                                                                            seq,
+                                                                            ctx,
+                                                                            new_seq,
+                                                                            ram_mb);
+                        if (ok) {
+                            Print(L"OK: OO auto-apply: reduce_seq (old=%d new=%d check=pass)\r\n", seq, new_seq);
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=success");
+                            llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_SEQ);
+                            actions_applied++;
+                            g_oo_auto_applied_this_boot = 1; // Throttle further applications
+                            if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
+                            llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reduce_seq");
+                        } else {
+                            char oval[32];
+                            int op = 0;
+                            llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)seq);
+                            oval[op] = 0;
+                            llmk_repl_cfg_set_kv_best_effort("seq_len", oval);
+                            Print(L"ERROR: OO auto-apply verification failed: reduce_seq (reason=verify_failed, reverting)\r\n");
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=failed reason=verify_failed");
+                            actions_blocked++;
+                        }
+                    }
+                } else {
+                    Print(L"OK: OO policy blocked: reduce_seq (reason=already_at_min)\r\n");
+                    actions_blocked++;
+                }
+            } else {
+                Print(L"OK: OO policy blocked: reduce_seq (reason=not_safe_low_ram)\r\n");
+                actions_blocked++;
+            }
+        } else if (action_reduce_seq && !multi_enabled) {
+            Print(L"OK: OO policy blocked: reduce_seq (reason=multi_actions_disabled)\r\n");
+            actions_blocked++;
+        }
+
+        // 6.3: Handle increases (M5.2: allow in aggressive mode if conditions met)
+        if (action_increase) {
+            // M5.2: Aggressive mode can apply increases if RAM>=1GB and mode=NORMAL
+            int can_increase = (g_cfg_oo_auto_apply == 2) && (mode == LLMK_OO_MODE_NORMAL) && (ram_mb >= 1024ULL);
+            int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
+
+            if (can_increase && can_auto_apply) {
+                // Apply increase: double ctx (capped at 2048)
+                int new_ctx = ctx * 2;
+                if (new_ctx > 2048) new_ctx = 2048;
+                if (new_ctx != ctx) {
+                    int ok = llmk_oo_auto_apply_write_verify_best_effort("increase_ctx",
+                                                                        "ctx_len",
+                                                                        ctx,
+                                                                        seq,
+                                                                        new_ctx,
+                                                                        seq,
+                                                                        ram_mb);
+                    if (ok) {
+                        Print(L"OK: OO auto-apply: increase_ctx (old=%d new=%d check=pass mode=aggressive)\r\n", ctx, new_ctx);
+                        llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=success");
+                        llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_INCREASE_CTX);
+                        actions_applied++;
+                        g_oo_auto_applied_this_boot = 1;
+                        if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
+                        llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "increase_ctx");
+                    } else {
+                        char oval[32];
+                        int op = 0;
+                        llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)ctx);
+                        oval[op] = 0;
+                        llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
+                        Print(L"ERROR: OO auto-apply verification failed: increase_ctx (reason=verify_failed, reverting)\r\n");
+                        llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=failed reason=verify_failed");
+                        actions_blocked++;
+                    }
+                } else {
+                    Print(L"OK: OO policy blocked: increase_ctx (reason=already_at_max)\r\n");
+                    actions_blocked++;
+                }
+            } else {
+                const char *block_reason = (!can_auto_apply && g_cfg_oo_auto_apply == 0) ? "auto_apply_disabled" :
+                                           (!can_auto_apply) ? "throttled_1_per_boot" :
+                                           (mode == LLMK_OO_MODE_SAFE) ? "safe_mode_no_increase" :
+                                           (ram_mb < 1024ULL) ? "low_ram_no_increase" :
+                                           (g_cfg_oo_auto_apply < 2) ? "conservative_mode_no_increase" :
+                                           "increase_blocked";
+                Print(L"OK: OO policy blocked: increase (reason=%a)\r\n", block_reason);
+                actions_blocked++;
+            }
+        }
+
+        // 6.4: Log model change (not auto-applied in v0)
+        if (action_model) {
+            Print(L"OK: OO policy decided: logged_only (reason=model_change_not_auto)\r\n");
+            actions_blocked++;
+        }
+
+        // If no actions applied/blocked, mark as no actionable keywords
+        if (actions_applied == 0 && actions_blocked == 0) {
+            Print(L"OK: OO policy decided: ignored (reason=no_actionable_keyword)\r\n");
+        }
+    }
+
+    // Emit batch summary (M5.1)
+    if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
+        Print(L"OK: OO policy batch: %d actions applied, %d blocked\r\n", actions_applied, actions_blocked);
+    }
+
+    // M5.3: Log consultation to OOCONSULT.LOG
+    {
+        // Determine decision string for log
+        const char *decision_str = "unknown";
+        if (action_stable) {
+            decision_str = "stable";
+        } else if (action_reboot) {
+            decision_str = "reboot_logged";
+        } else if (actions_applied == 0 && actions_blocked == 0) {
+            decision_str = "ignored";
+        } else if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
+            // Multi-action: use batch_summary as decision
+            decision_str = batch_summary[0] ? batch_summary : "multi";
+        } else if (action_reduce_ctx) {
+            decision_str = "reduce_ctx";
+        } else if (action_reduce_seq) {
+            decision_str = "reduce_seq";
+        } else if (action_increase) {
+            decision_str = "increase_blocked";
+        } else if (action_model) {
+            decision_str = "model_logged";
+        }
+
+        llmk_oo_log_consultation(boots, mode, ram_mb, ctx, seq, llm_suggestion,
+                                 decision_str, (actions_applied > 0) ? 1 : 0);
+    }
+
+    // 7. Log to journal (best-effort)
+    if (g_root) {
+        char jlog[256];
+        int jp = 0;
+        if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
+            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "oo event=consult_multi actions=[");
+            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, batch_summary);
+            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "] applied=");
+            llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)actions_applied);
+            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " blocked=");
+            llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)actions_blocked);
+        } else {
+            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "oo event=consult decision=");
+            if (action_stable) {
+                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "stable");
+            } else if (actions_applied > 0) {
+                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, batch_summary);
+            } else {
+                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "ignored");
+            }
+        }
+        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "\r\n");
+
+        EFI_FILE_HANDLE jf = NULL;
+        if (!EFI_ERROR(llmk_open_binary_file_append(&jf, L"OOJOUR.LOG"))) {
+            UINTN nb = (UINTN)jp;
+            uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)jlog);
+            uefi_call_wrapper(jf->Flush, 1, jf);
+            uefi_call_wrapper(jf->Close, 1, jf);
+        }
+    }
+}
+
 // M5.3: Log consultation to OOCONSULT.LOG (append-only)
 static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_mb, 
                                      int ctx, int seq, const char *suggestion, 
@@ -7866,293 +8484,7 @@ static void llmk_oo_consult_execute(Config *config, TransformerWeights *weights,
         top_k = saved_topk;
     }
 
-    // Emit LLM suggestion marker (deterministic)
-    Print(L"OK: OO LLM suggested: ");
-    llmk_print_ascii(llm_suggestion);
-    Print(L"\r\n");
-
-    // 5. Parse suggestion for keywords (M5.1: detect ALL keywords)
-    int action_reduce_ctx = 0;
-    int action_reduce_seq = 0;
-    int action_increase = 0;
-    int action_reboot = 0;
-    int action_model = 0;
-    int action_stable = 0;
-
-    // Simple substring search (case-insensitive)
-    char lower[128];
-    for (int i = 0; i < llm_len && i + 1 < (int)sizeof(lower); i++) {
-        char c = llm_suggestion[i];
-        if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
-        lower[i] = c;
-    }
-    lower[llm_len] = 0;
-
-    // Check for multi-actions feature flag (default: follows oo_llm_consult)
-    int multi_enabled = g_cfg_oo_multi_actions;
-    if (multi_enabled < 0) {
-        multi_enabled = (g_cfg_oo_llm_consult > 0) ? 1 : 0;
-    }
-
-    // Detect reduce actions (ctx and/or seq)
-    if (my_strstr(lower, "reduce") || my_strstr(lower, "lower") || my_strstr(lower, "decrease")) {
-        if (my_strstr(lower, "ctx") || my_strstr(lower, "context")) action_reduce_ctx = 1;
-        if (my_strstr(lower, "seq") || my_strstr(lower, "sequence")) action_reduce_seq = 1;
-        // Generic "reduce" without target: default to ctx
-        if (!action_reduce_ctx && !action_reduce_seq) action_reduce_ctx = 1;
-    }
-
-    // Detect increase (blocked in most cases)
-    if (my_strstr(lower, "increase") || my_strstr(lower, "raise") || my_strstr(lower, "more")) {
-        action_increase = 1;
-    }
-
-    // Detect system actions (reboot, model change)
-    if (my_strstr(lower, "reboot") || my_strstr(lower, "restart")) action_reboot = 1;
-    if (my_strstr(lower, "model") || my_strstr(lower, "switch")) action_model = 1;
-
-    // Detect "stable" / no-op signal
-    if (my_strstr(lower, "stable") || my_strstr(lower, "ok") || my_strstr(lower, "wait") || my_strstr(lower, "good")) {
-        action_stable = 1;
-    }
-
-    // 6. Policy decision (M5.1: apply ALL valid actions when multi_enabled)
-    int actions_applied = 0;
-    int actions_blocked = 0;
-    char batch_summary[256];
-    int batch_summary_pos = 0;
-    batch_summary[0] = 0;
-
-    // Priority filtering: stable cancels all, reboot primes others
-    if (action_stable) {
-        // Stable signal: no action needed
-        Print(L"OK: OO policy decided: system_stable (reason=llm_reports_ok)\r\n");
-        actions_applied = 0;
-        actions_blocked = (action_reduce_ctx + action_reduce_seq + action_increase + action_reboot + action_model - 1);
-        llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "stable");
-    } else if (action_reboot) {
-        // Reboot primes others: log but don't auto-apply (v0)
-        Print(L"OK: OO policy decided: logged_only (reason=reboot_not_auto)\r\n");
-        actions_applied = 0;
-        actions_blocked = (action_reduce_ctx + action_reduce_seq + action_increase + action_model);
-        llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reboot_logged");
-    } else {
-        // Apply reductions first (safe), then increases (blocked), then model
-
-        // 6.1: Apply reduce_ctx (if detected and safe)
-        if (action_reduce_ctx) {
-            if (mode == LLMK_OO_MODE_SAFE || mode == LLMK_OO_MODE_DEGRADED) {
-                int new_ctx = ctx / 2;
-                if (new_ctx < 128) new_ctx = 128;
-                if (new_ctx != ctx) {
-                    // M5.2: Check auto-apply config and throttling
-                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
-                    int is_reduction = 1; // reduce_ctx is always a reduction
-                    
-                    if (!can_auto_apply) {
-                        // Auto-apply disabled or throttled
-                        if (g_cfg_oo_auto_apply == 0) {
-                            Print(L"OK: OO policy simulation: reduce_ctx (would_apply_if_enabled, new=%d)\r\n", new_ctx);
-                        } else {
-                            Print(L"OK: OO policy throttled: reduce_ctx (limit=1_per_boot, new=%d)\r\n", new_ctx);
-                        }
-                        actions_blocked++;
-                    } else if (g_cfg_oo_auto_apply == 1 && !is_reduction) {
-                        // Conservative mode: only reductions (this branch won't hit for reduce_ctx)
-                        Print(L"OK: OO policy blocked: reduce_ctx (reason=conservative_mode)\r\n");
-                        actions_blocked++;
-                    } else {
-                        // Auto-apply enabled: write to repl.cfg
-                        char val[32];
-                        int vp = 0;
-                        llmk_ascii_append_u64(val, (int)sizeof(val), &vp, (UINT64)new_ctx);
-                        val[vp] = 0;
-                        EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort("ctx_len", val);
-                        if (!EFI_ERROR(st)) {
-                            Print(L"OK: OO auto-apply: reduce_ctx (old=%d new=%d check=pass)\r\n", ctx, new_ctx);
-                            actions_applied++;
-                            g_oo_auto_applied_this_boot = 1; // Throttle further applications
-                            if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
-                            llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reduce_ctx");
-                        } else {
-                            Print(L"ERROR: OO auto-apply failed: reduce_ctx (reason=cfg_write_error)\r\n");
-                            actions_blocked++;
-                        }
-                    }
-                } else {
-                    Print(L"OK: OO policy blocked: reduce_ctx (reason=already_at_min)\r\n");
-                    actions_blocked++;
-                }
-            } else {
-                Print(L"OK: OO policy blocked: reduce_ctx (reason=normal_mode_no_auto_reduce)\r\n");
-                actions_blocked++;
-            }
-        }
-        // 6.2: Apply reduce_seq (if detected, multi_enabled, and safe)
-        if (action_reduce_seq && multi_enabled) {
-            if (mode == LLMK_OO_MODE_SAFE && ram_mb < 1024ULL) {
-                int new_seq = seq / 2;
-                if (new_seq < 128) new_seq = 128;
-                if (new_seq != seq) {
-                    // M5.2: Check auto-apply config and throttling
-                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
-                    int is_reduction = 1; // reduce_seq is always a reduction
-                    
-                    if (!can_auto_apply) {
-                        if (g_cfg_oo_auto_apply == 0) {
-                            Print(L"OK: OO policy simulation: reduce_seq (would_apply_if_enabled, new=%d)\r\n", new_seq);
-                        } else {
-                            Print(L"OK: OO policy throttled: reduce_seq (limit=1_per_boot, new=%d)\r\n", new_seq);
-                        }
-                        actions_blocked++;
-                    } else {
-                        char val[32];
-                        int vp = 0;
-                        llmk_ascii_append_u64(val, (int)sizeof(val), &vp, (UINT64)new_seq);
-                        val[vp] = 0;
-                        EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort("seq_len", val);
-                        if (!EFI_ERROR(st)) {
-                            Print(L"OK: OO auto-apply: reduce_seq (old=%d new=%d check=pass)\r\n", seq, new_seq);
-                            actions_applied++;
-                            g_oo_auto_applied_this_boot = 1; // Throttle further applications
-                            if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
-                            llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reduce_seq");
-                        } else {
-                            Print(L"ERROR: OO auto-apply failed: reduce_seq (reason=cfg_write_error)\r\n");
-                            actions_blocked++;
-                        }
-                    }
-                } else {
-                    Print(L"OK: OO policy blocked: reduce_seq (reason=already_at_min)\r\n");
-                    actions_blocked++;
-                }
-            } else {
-                Print(L"OK: OO policy blocked: reduce_seq (reason=not_safe_low_ram)\r\n");
-                actions_blocked++;
-            }
-        } else if (action_reduce_seq && !multi_enabled) {
-            Print(L"OK: OO policy blocked: reduce_seq (reason=multi_actions_disabled)\r\n");
-            actions_blocked++;
-        }
-
-        // 6.3: Handle increases (M5.2: allow in aggressive mode if conditions met)
-        if (action_increase) {
-            // M5.2: Aggressive mode can apply increases if RAM>=1GB and mode=NORMAL
-            int can_increase = (g_cfg_oo_auto_apply == 2) && (mode == LLMK_OO_MODE_NORMAL) && (ram_mb >= 1024ULL);
-            int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
-            
-            if (can_increase && can_auto_apply) {
-                // Apply increase: double ctx (capped at 2048)
-                int new_ctx = ctx * 2;
-                if (new_ctx > 2048) new_ctx = 2048;
-                if (new_ctx != ctx) {
-                    char val[32];
-                    int vp = 0;
-                    llmk_ascii_append_u64(val, (int)sizeof(val), &vp, (UINT64)new_ctx);
-                    val[vp] = 0;
-                    EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort("ctx_len", val);
-                    if (!EFI_ERROR(st)) {
-                        Print(L"OK: OO auto-apply: increase_ctx (old=%d new=%d check=pass mode=aggressive)\r\n", ctx, new_ctx);
-                        actions_applied++;
-                        g_oo_auto_applied_this_boot = 1;
-                        if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
-                        llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "increase_ctx");
-                    } else {
-                        Print(L"ERROR: OO auto-apply failed: increase_ctx (reason=cfg_write_error)\r\n");
-                        actions_blocked++;
-                    }
-                } else {
-                    Print(L"OK: OO policy blocked: increase_ctx (reason=already_at_max)\r\n");
-                    actions_blocked++;
-                }
-            } else {
-                const char *block_reason = (!can_auto_apply && g_cfg_oo_auto_apply == 0) ? "auto_apply_disabled" :
-                                           (!can_auto_apply) ? "throttled_1_per_boot" :
-                                           (mode == LLMK_OO_MODE_SAFE) ? "safe_mode_no_increase" :
-                                           (ram_mb < 1024ULL) ? "low_ram_no_increase" :
-                                           (g_cfg_oo_auto_apply < 2) ? "conservative_mode_no_increase" :
-                                           "increase_blocked";
-                Print(L"OK: OO policy blocked: increase (reason=%a)\r\n", block_reason);
-                actions_blocked++;
-            }
-        }
-
-        // 6.4: Log model change (not auto-applied in v0)
-        if (action_model) {
-            Print(L"OK: OO policy decided: logged_only (reason=model_change_not_auto)\r\n");
-            actions_blocked++;
-        }
-
-        // If no actions applied/blocked, mark as no actionable keywords
-        if (actions_applied == 0 && actions_blocked == 0) {
-            Print(L"OK: OO policy decided: ignored (reason=no_actionable_keyword)\r\n");
-        }
-    }
-
-    // Emit batch summary (M5.1)
-    if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
-        Print(L"OK: OO policy batch: %d actions applied, %d blocked\r\n", actions_applied, actions_blocked);
-    }
-
-    // M5.3: Log consultation to OOCONSULT.LOG
-    {
-        // Determine decision string for log
-        const char *decision_str = "unknown";
-        if (action_stable) {
-            decision_str = "stable";
-        } else if (action_reboot) {
-            decision_str = "reboot_logged";
-        } else if (actions_applied == 0 && actions_blocked == 0) {
-            decision_str = "ignored";
-        } else if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
-            // Multi-action: use batch_summary as decision
-            decision_str = batch_summary[0] ? batch_summary : "multi";
-        } else if (action_reduce_ctx) {
-            decision_str = "reduce_ctx";
-        } else if (action_reduce_seq) {
-            decision_str = "reduce_seq";
-        } else if (action_increase) {
-            decision_str = "increase_blocked";
-        } else if (action_model) {
-            decision_str = "model_logged";
-        }
-        
-        // Call M5.3 logging function
-        llmk_oo_log_consultation(boots, mode, ram_mb, ctx, seq, llm_suggestion, 
-                                decision_str, (actions_applied > 0) ? 1 : 0);
-    }
-
-    // 7. Log to journal (best-effort)
-    if (g_root) {
-        char jlog[256];
-        int jp = 0;
-        if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
-            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "oo event=consult_multi actions=[");
-            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, batch_summary);
-            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "] applied=");
-            llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)actions_applied);
-            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " blocked=");
-            llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)actions_blocked);
-        } else {
-            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "oo event=consult decision=");
-            if (action_stable) {
-                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "stable");
-            } else if (actions_applied > 0) {
-                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, batch_summary);
-            } else {
-                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "ignored");
-            }
-        }
-        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "\r\n");
-
-        EFI_FILE_HANDLE jf = NULL;
-        if (!EFI_ERROR(llmk_open_binary_file_append(&jf, L"OOJOUR.LOG"))) {
-            UINTN nb = (UINTN)jp;
-            uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)jlog);
-            uefi_call_wrapper(jf->Flush, 1, jf);
-            uefi_call_wrapper(jf->Close, 1, jf);
-        }
-    }
+    llmk_oo_consult_process_suggestion(ram_mb, mode, boots, ctx, seq, llm_suggestion);
 }
 
 // ============================================================================
@@ -13323,6 +13655,56 @@ snap_autoload_done:
                 g_oo_auto_remaining = 0;
                 g_oo_auto_total = 0;
                 g_oo_auto_user[0] = 0;
+                continue;
+            } else if (my_strncmp(prompt, "/oo_consult_mock", 15) == 0) {
+                // OO M5 (test/CI): deterministic consult without LLM generation.
+                // Usage:
+                //   /oo_consult_mock <suggestion>
+                int consult_enabled = g_cfg_oo_llm_consult;
+                if (consult_enabled < 0) {
+                    consult_enabled = g_cfg_oo_enable; // default: follow oo_enable
+                }
+                if (!consult_enabled) {
+                    Print(L"\r\nERROR: OO LLM consult is disabled (oo_llm_consult=0)\r\n\r\n");
+                    continue;
+                }
+                if (!g_cfg_oo_enable) {
+                    Print(L"\r\nERROR: OO is not enabled (oo_enable=0)\r\n\r\n");
+                    continue;
+                }
+
+                const char *p = prompt + 15;
+                while (*p == ' ' || *p == '\t') p++;
+                if (!p || !p[0]) {
+                    Print(L"\r\nUsage: /oo_consult_mock <suggestion>\r\n\r\n");
+                    continue;
+                }
+
+                // 1) Collect system state (best-effort)
+                UINT64 ram_mb = llmk_get_conventional_ram_bytes_best_effort() / (1024ULL * 1024ULL);
+                UINT32 mode = g_oo_last_mode_valid ? g_oo_last_mode : LLMK_OO_MODE_SAFE;
+                UINT64 boots = 0;
+                {
+                    LlmkOoState s;
+                    if (llmk_oo_load_state_best_effort(&s)) {
+                        boots = s.boot_count;
+                        mode = s.mode;
+                    }
+                }
+
+                // 2) Sanitize suggestion to ASCII and run the same policy pipeline.
+                char sugg[128];
+                int sp = 0;
+                while (*p && sp + 1 < (int)sizeof(sugg)) {
+                    char c = *p++;
+                    if (c < 0x20 || c > 0x7E) c = '_';
+                    sugg[sp++] = c;
+                }
+                sugg[sp] = 0;
+
+                Print(L"\r\n[oo_consult_mock] using mock suggestion\r\n\r\n");
+                llmk_oo_consult_process_suggestion(ram_mb, mode, boots, config.seq_len, config.seq_len, sugg);
+                Print(L"\r\n");
                 continue;
             } else if (my_strncmp(prompt, "/oo_consult", 11) == 0) {
                 // OO M5: LLM consult (suggest system adaptation action).

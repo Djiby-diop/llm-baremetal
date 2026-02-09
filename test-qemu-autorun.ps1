@@ -43,7 +43,7 @@ param(
 
     [switch]$ForceAvx2,
 
-    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log')]
+    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log','oo_consult_metric')]
     [string]$Mode = 'smoke',
 
     # Optional repl.cfg overrides injected into the boot image for the duration of the test.
@@ -590,9 +590,9 @@ switch ($Mode) {
     }
     'oo_llm_multi' {
         $autorunLinesEffective = @(
-            '# llmk autorun OO M5.1 proof (LLM multi-action parsing)',
+            '# llmk autorun OO M5.1 proof (multi-action parsing; deterministic mock)',
             '/version',
-            '/oo_consult',
+            '/oo_consult_mock reduce ctx and seq',
             '/quit'
         )
 
@@ -601,7 +601,7 @@ switch ($Mode) {
             $MemMB = 768
         }
 
-        # Extend timeout to allow LLM generation.
+        # Still needs model load under QEMU/TCG.
         if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
             $TimeoutSec = 600
         }
@@ -620,9 +620,9 @@ switch ($Mode) {
             $MemMB = 768
         }
 
-        # Fast mock test (no LLM generation)
+        # Still needs model load under QEMU/TCG
         if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
-            $TimeoutSec = 30
+            $TimeoutSec = 600
         }
     }
     'oo_auto_apply' {
@@ -631,7 +631,7 @@ switch ($Mode) {
             '# llmk autorun OO M5.2 (auto-apply validation)',
             '/version',
             '/ctx',
-            '/oo_consult',
+            '/oo_consult_mock reduce ctx',
             '/quit'
         )
 
@@ -640,7 +640,7 @@ switch ($Mode) {
             $MemMB = 640
         }
 
-        # Extend timeout to allow LLM generation
+        # Still needs model load under QEMU/TCG
         if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
             $TimeoutSec = 600
         }
@@ -650,8 +650,8 @@ switch ($Mode) {
         $autorunLinesEffective = @(
             '# llmk autorun OO M5.3 (consultation logging validation)',
             '/version',
-            '/oo_consult',
-            '/oo_consult',
+            '/oo_consult_mock reduce ctx',
+            '/oo_consult_mock reduce ctx',
             '/quit'
         )
 
@@ -660,9 +660,29 @@ switch ($Mode) {
             $MemMB = 640
         }
 
-        # Extend timeout for 2x LLM generations
+        # Still needs model load under QEMU/TCG
         if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
-            $TimeoutSec = 900
+            $TimeoutSec = 600
+        }
+    }
+    'oo_consult_metric' {
+        # M5.4: Metrics test (auto-apply on boot1, observe metric on boot2)
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M5.4 (consult metrics validation) [run1]',
+            '/version',
+            '/ctx',
+            '/oo_consult_mock reduce ctx',
+            '/quit'
+        )
+
+        # SAFE mode: 640MB RAM to trigger reductions
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 640
+        }
+
+        # Still needs model load under QEMU/TCG
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 600
         }
     }
     'gen' {
@@ -739,7 +759,7 @@ try {
 
     # OO persistence tests must persist disk writes. Always operate on a temp image copy
     # so we can run without -snapshot and still keep the working tree clean.
-    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro') -and -not $isTempImage) {
+    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric') -and -not $isTempImage) {
         Write-Host "[Test] ${Mode}: using temp image (no -snapshot, 2 boots)" -ForegroundColor Yellow
         $IMAGE = Get-TempImageCopy $IMAGE
         $isTempImage = $true
@@ -914,7 +934,7 @@ try {
         "(mdel -i '$wslImg@@$fatOffset' ::oo-test.bin.bak 2>/dev/null || true)"
     ) 30
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric') {
         Invoke-WslStep 'clear OO persistent files' (
             "(mdel -i '$wslImg@@$fatOffset' ::OOSTATE.BIN 2>/dev/null || true); " +
             "(mdel -i '$wslImg@@$fatOffset' ::OORECOV.BIN 2>/dev/null || true); " +
@@ -985,7 +1005,7 @@ try {
         $tmpCfgLines += 'fat83_force=1'
     }
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log') {
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_metric') {
         $tmpCfgLines += 'oo_enable=1'
     }
     if ($Mode -eq 'oo_net_ro') {
@@ -996,13 +1016,13 @@ try {
     if ($Mode -eq 'oo_ram_preflight_seq') {
         $tmpCfgLines += 'oo_min_total_mb=0'
     }
-    if ($Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log') {
+    if ($Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_metric') {
         $tmpCfgLines += 'oo_llm_consult=1'
     }
-    if ($Mode -eq 'oo_llm_multi') {
+    if ($Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock') {
         $tmpCfgLines += 'oo_multi_actions=1'
     }
-    if ($Mode -eq 'oo_auto_apply') {
+    if ($Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_metric') {
         $tmpCfgLines += 'oo_auto_apply=1'
     }
     if ($Mode -eq 'oo_consult_log') {
@@ -1084,7 +1104,7 @@ try {
         if ($Mode -eq 'oo_net_ro') {
             $qemuArgsLocal += @('-net','none')
         }
-        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro') {
+        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro' -and $Mode -ne 'oo_consult_metric') {
             $qemuArgsLocal += '-snapshot'
         }
         $qemuArgsLocal += @(
@@ -1199,7 +1219,7 @@ try {
     }
 
     $runCount = 1
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery') { $runCount = 2 }
+    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_consult_metric') { $runCount = 2 }
     if ($Mode -eq 'oo_ctx_clamp_degraded') { $runCount = 3 }
 
     $runs = @()
@@ -1232,6 +1252,29 @@ try {
 
             try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpCorrupt } catch {}
         }
+
+        if ($Mode -eq 'oo_consult_metric' -and $ri -eq 1) {
+            Write-Host '[Test] oo_consult_metric: updating autorun script for run2...' -ForegroundColor Yellow
+            $tmpAr2 = Join-Path $env:TEMP ("llm-baremetal-autorun-metric2-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
+            $ar2Lines = @(
+                '# llmk autorun OO M5.4 (consult metrics validation) [run2]',
+                '/version',
+                '/quit'
+            )
+            [System.IO.File]::WriteAllText($tmpAr2, ($ar2Lines -join "`r`n") + "`r`n", [System.Text.Encoding]::ASCII)
+
+            $wslImgPost = ConvertTo-WslPath $IMAGE
+            $wslTmpAr2 = ConvertTo-WslPath $tmpAr2
+
+            # Stage in WSL temp to avoid /mnt/c mtools hangs.
+            $wslImgWork2 = ("/tmp/llmk-imgwork-metric-{0}.img" -f ([Guid]::NewGuid().ToString('n')))
+            Invoke-WslStep 'stage image for metric autorun update' ("cp -f '$wslImgPost' '$wslImgWork2'") 120
+            Invoke-WslStep 'overwrite llmk-autorun.txt (metric run2)' ("mcopy -o -i '$wslImgWork2@@$fatOffset' '$wslTmpAr2' ::llmk-autorun.txt") 30
+            Invoke-WslStep 'sync updated image back to Windows' ("cp -f '$wslImgWork2' '$wslImgPost'") 120
+            Invoke-WslStep 'remove WSL temp image (metric)' ("rm -f '$wslImgWork2'") 30
+
+            try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpAr2 } catch {}
+        }
     }
 
     # Aggregate logs immediately after QEMU runs so any mode-specific assertions can fail
@@ -1256,6 +1299,11 @@ try {
         if (-not $jour) { throw 'oo_net_ro: OOJOUR.LOG is empty or unreadable' }
         Assert-Contains $jour 'event=net_unavailable' 'journal contains net_unavailable event'
         try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoJour } catch {}
+    }
+
+    if ($Mode -eq 'oo_consult_metric') {
+        # M5.4: metric marker should appear on boot2.
+        Assert-Contains $serial 'OK: OO consult metric: action=reduce_ctx' 'OO consult metric marker'
     }
 
     if ($Mode -eq 'oo_smoke') {
@@ -1471,6 +1519,10 @@ try {
             if (-not ($serial -match 'OK: OO policy (applied|blocked|batch):')) {
                 throw "Missing OO multi-action markers (applied/blocked/batch)"
             }
+        } elseif ($Mode -eq 'oo_llm_multi_mock') {
+            Assert-Contains $serial 'You (autorun): /oo_consult_mock reduce ctx and seq' 'autorun ran consult mock'
+            Assert-Contains $serial 'OK: OO LLM suggested:' 'OO mock suggestion marker (M5.1)'
+            Assert-Contains $serial 'OK: OO policy batch:' 'OO multi-action batch marker (M5.1)'
         } elseif ($Mode -eq 'oo_auto_apply') {
             Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.2)'
             # M5.2: Check for auto-apply marker (either applied or simulation/throttled)
@@ -1486,6 +1538,10 @@ try {
             }
             Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.3)'
             Assert-Contains $serial 'mode=SAFE' 'Consult log test ran in SAFE mode'
+        } elseif ($Mode -eq 'oo_consult_metric') {
+            Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.4)'
+            Assert-Contains $serial 'OK: OO auto-apply: reduce_ctx' 'OO auto-apply marker (M5.2)'
+            Assert-Contains $serial 'OK: OO consult metric: action=reduce_ctx' 'OO consult metric marker (M5.4)'
         } elseif ($Mode -eq 'gen') {
             Assert-Match $serial 'You \(autorun\): /max_tokens \d+' 'autorun set max_tokens'
             Assert-Contains $serial 'You (autorun): /stats 1' 'autorun enabled stats'
