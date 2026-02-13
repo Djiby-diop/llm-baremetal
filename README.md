@@ -158,8 +158,23 @@ Rebuild artifacts before checking:
 ./m6-package-check.ps1 -Rebuild
 ```
 
+### M6.3 release upload prep
+
+Prepare a clean GitHub Release upload bundle (`.img.xz` + `SHA256SUMS.txt` + notes):
+
+```powershell
+./m6-release-prep.ps1 -Rebuild
+```
+
+Optional: include raw `.img` in the upload bundle:
+
+```powershell
+./m6-release-prep.ps1 -Rebuild -IncludeRawImage
+```
+
 ## Notes
 
 - Model weights are intentionally not tracked in git; use GitHub Releases or your own files.
 - Optional config: copy `repl.cfg.example` → `repl.cfg` (not committed) and rebuild.
+- Next roadmap after M6.x: see `INNOVATIONS_NEXT.md`.
 
