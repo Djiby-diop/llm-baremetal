@@ -124,6 +124,26 @@ For headless runs:
 ./run.ps1 -Preflight
 ```
 
+### M6.1 final verification (one command)
+
+Run the full operator flow in one command:
+
+```powershell
+./m6-verify.ps1 -ModelBin stories110M.bin -Gui
+```
+
+Fast check (preflight + build only):
+
+```powershell
+./m6-verify.ps1 -ModelBin stories110M.bin -SkipRun
+```
+
+Release checklist:
+
+- Preflight says `READY`.
+- Build produces a fresh boot image.
+- QEMU starts from `run.ps1 -Preflight` (GUI or headless).
+
 ## Notes
 
 - Model weights are intentionally not tracked in git; use GitHub Releases or your own files.
