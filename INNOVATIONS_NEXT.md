@@ -2,6 +2,11 @@
 
 This file defines the next practical innovation wave after M6.x hardening.
 
+## Current sprint status
+- ✅ A2 baseline implemented (structured observability markers in runtime + OO consult).
+- ✅ B1 baseline implemented in log-only mode (confidence score + threshold logged, no policy gating yet).
+- ▶️ Next coding target: B1 threshold gating behind config flag, then A1 startup latency work.
+
 ## Track A — llm-baremetal core
 
 ### A1. Faster startup path (model open + metadata)

@@ -7925,7 +7925,40 @@ static EFI_STATUS llmk_snap_load_into_state_best_effort(RunState *state, const C
 
 static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_mb,
                                      int ctx, int seq, const char *suggestion,
-                                     const char *decision, int applied);
+                                     const char *decision, int applied,
+                                     int confidence_score, int confidence_threshold);
+
+static int llmk_oo_confidence_score(UINT32 mode, UINT64 ram_mb, int ctx, int seq,
+                                    int llm_len,
+                                    int action_reduce_ctx, int action_reduce_seq,
+                                    int action_increase, int action_reboot,
+                                    int action_model, int action_stable) {
+    int score = 50;
+
+    if (mode == LLMK_OO_MODE_NORMAL) score += 20;
+    else if (mode == LLMK_OO_MODE_DEGRADED) score += 10;
+
+    if (ram_mb >= 1024ULL) score += 15;
+    else if (ram_mb >= 768ULL) score += 8;
+    else score += 2;
+
+    if (ctx <= 512) score += 5;
+    else if (ctx > 2048) score -= 5;
+
+    if (seq <= 1024) score += 5;
+    else if (seq > 2048) score -= 5;
+
+    if (llm_len <= 0) score -= 15;
+
+    if (action_stable) score += 10;
+    if (action_reduce_ctx || action_reduce_seq) score += 5;
+    if (action_increase && mode != LLMK_OO_MODE_NORMAL) score -= 10;
+    if (action_reboot || action_model) score -= 5;
+
+    if (score < 0) score = 0;
+    if (score > 100) score = 100;
+    return score;
+}
 
 static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT64 boots,
                                                int ctx, int seq,
@@ -7999,6 +8032,14 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
     if (my_strstr(lower, "stable") || my_strstr(lower, "ok") || my_strstr(lower, "wait") || my_strstr(lower, "good")) {
         action_stable = 1;
     }
+
+    const int confidence_threshold = 60;
+    int confidence_score = llmk_oo_confidence_score(mode, ram_mb, ctx, seq, llm_len,
+                                                    action_reduce_ctx, action_reduce_seq,
+                                                    action_increase, action_reboot,
+                                                    action_model, action_stable);
+    Print(L"OK: OO confidence: score=%d threshold=%d gate=log_only\r\n",
+          confidence_score, confidence_threshold);
 
     // 6. Policy decision (M5.1: apply ALL valid actions when multi_enabled)
     int actions_applied = 0;
@@ -8233,7 +8274,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
         }
 
         llmk_oo_log_consultation(boots, mode, ram_mb, ctx, seq, llm_suggestion,
-                                 decision_str, (actions_applied > 0) ? 1 : 0);
+                                 decision_str, (actions_applied > 0) ? 1 : 0,
+                                 confidence_score, confidence_threshold);
     }
 
     // 7. Log to journal (best-effort)
@@ -8257,6 +8299,11 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                 llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "ignored");
             }
         }
+        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " score=");
+        llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)confidence_score);
+        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " threshold=");
+        llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)confidence_threshold);
+        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " gate=log_only");
         llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "\r\n");
 
         EFI_FILE_HANDLE jf = NULL;
@@ -8361,7 +8408,8 @@ static void llmk_oo_consult_log_rotate_best_effort(void) {
 
 static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_mb, 
                                      int ctx, int seq, const char *suggestion, 
-                                     const char *decision, int applied) {
+                                     const char *decision, int applied,
+                                     int confidence_score, int confidence_threshold) {
     // Check if logging enabled
     int log_enabled = g_cfg_oo_consult_log;
     if (log_enabled < 0) {
@@ -8400,6 +8448,11 @@ static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, decision);
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " applied=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)applied);
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " score=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)confidence_score);
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " threshold=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)confidence_threshold);
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " gate=log_only");
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "\r\n");
     logline[lp] = 0;
 
@@ -8521,6 +8574,11 @@ static void llmk_oo_consult_execute(Config *config, TransformerWeights *weights,
         boots = s.boot_count;
         mode = s.mode;
     }
+
+    const char *mode_str = (mode == LLMK_OO_MODE_NORMAL) ? "NORMAL" :
+                           (mode == LLMK_OO_MODE_DEGRADED) ? "DEGRADED" : "SAFE";
+    Print(L"[obs][oo] consult_start mode=%a ram=%lu ctx=%d seq=%d boots=%lu\r\n",
+          mode_str, ram_mb, ctx, seq, boots);
 
     // Read tail of journal (last 3 lines, best-effort)
     char journal_tail[256];
@@ -8673,6 +8731,8 @@ static void llmk_oo_consult_execute(Config *config, TransformerWeights *weights,
         temperature = saved_temp;
         top_k = saved_topk;
     }
+
+    Print(L"[obs][oo] consult_gen prompt_tok=%d out_chars=%d\r\n", n_prompt, llm_len);
 
     llmk_oo_consult_process_suggestion(ram_mb, mode, boots, ctx, seq, llm_suggestion);
 }
@@ -15163,6 +15223,21 @@ snap_autoload_done:
             CHAR16 msg[96];
             SPrint(msg, sizeof(msg), L"[gen] tokens=%d\r\n", generated_count);
             llmk_serial_write_char16(msg);
+
+            {
+                const CHAR16 *obs_reason = stop_reason ? stop_reason : L"max_tokens";
+                CHAR16 omsg[224];
+                SPrint(omsg, sizeof(omsg),
+                       L"[obs] gen_end tokens=%d reason=%s step=%d pos=%d repeat_escape=%d loop_escape=%d overrun_d=%d\r\n",
+                       generated_count,
+                       (CHAR16 *)obs_reason,
+                       stop_step,
+                       stop_pos,
+                       repeat_escape_used,
+                       loop_escape_used,
+                       (int)g_budget_overruns_decode);
+                llmk_serial_write_char16(omsg);
+            }
         }
 
         if (stats_enabled && !g_capture_mode) {
