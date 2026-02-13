@@ -257,6 +257,10 @@ static int g_cfg_oo_auto_apply = 0;
 static int g_oo_auto_applied_this_boot = 0;
 // OO M5.3: Log consultations to OOCONSULT.LOG (default=1 if oo_llm_consult=1).
 static int g_cfg_oo_consult_log = -1;
+// OO M7: Confidence gate (0=off/log-only, 1=enforced for auto-apply).
+static int g_cfg_oo_conf_gate = 0;
+// OO M7: Confidence threshold [0..100], default 60.
+static int g_cfg_oo_conf_threshold = 60;
 
 // OO M4: optional network read-only tick (best-effort; never required to boot).
 // Default is 0 (off).
@@ -4610,6 +4614,18 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
             if (llmk_cfg_parse_bool(val, &b)) {
                 g_cfg_oo_consult_log = (b != 0);
             }
+        } else if (llmk_cfg_streq_ci(key, "oo_conf_gate") || llmk_cfg_streq_ci(key, "oo_confidence_gate") || llmk_cfg_streq_ci(key, "oo_conf_gate_enable")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_oo_conf_gate = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_conf_threshold") || llmk_cfg_streq_ci(key, "oo_confidence_threshold")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > 100) v = 100;
+                g_cfg_oo_conf_threshold = v;
+            }
         } else if (llmk_cfg_streq_ci(key, "oo_net") || llmk_cfg_streq_ci(key, "oo_net_enable") || llmk_cfg_streq_ci(key, "oo_network")) {
             int b;
             if (llmk_cfg_parse_bool(val, &b)) {
@@ -7926,7 +7942,8 @@ static EFI_STATUS llmk_snap_load_into_state_best_effort(RunState *state, const C
 static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_mb,
                                      int ctx, int seq, const char *suggestion,
                                      const char *decision, int applied,
-                                     int confidence_score, int confidence_threshold);
+                                     int confidence_score, int confidence_threshold,
+                                     int confidence_gate_enabled);
 
 static int llmk_oo_confidence_score(UINT32 mode, UINT64 ram_mb, int ctx, int seq,
                                     int llm_len,
@@ -8033,13 +8050,20 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
         action_stable = 1;
     }
 
-    const int confidence_threshold = 60;
+        int confidence_threshold = g_cfg_oo_conf_threshold;
+        if (confidence_threshold < 0) confidence_threshold = 0;
+        if (confidence_threshold > 100) confidence_threshold = 100;
+        int confidence_gate_enabled = (g_cfg_oo_conf_gate != 0);
     int confidence_score = llmk_oo_confidence_score(mode, ram_mb, ctx, seq, llm_len,
                                                     action_reduce_ctx, action_reduce_seq,
                                                     action_increase, action_reboot,
                                                     action_model, action_stable);
-    Print(L"OK: OO confidence: score=%d threshold=%d gate=log_only\r\n",
-          confidence_score, confidence_threshold);
+        int confidence_gate_pass = (confidence_score >= confidence_threshold);
+        Print(L"OK: OO confidence: score=%d threshold=%d gate=%a pass=%a\r\n",
+            confidence_score,
+            confidence_threshold,
+            confidence_gate_enabled ? "enforced" : "log_only",
+            confidence_gate_pass ? "yes" : "no");
 
     // 6. Policy decision (M5.1: apply ALL valid actions when multi_enabled)
     int actions_applied = 0;
@@ -8071,12 +8095,16 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                 if (new_ctx < 128) new_ctx = 128;
                 if (new_ctx != ctx) {
                     // M5.2: Check auto-apply config and throttling
-                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
+                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot) &&
+                                         (!confidence_gate_enabled || confidence_gate_pass);
                     int is_reduction = 1; // reduce_ctx is always a reduction
 
                     if (!can_auto_apply) {
                         // Auto-apply disabled or throttled
-                        if (g_cfg_oo_auto_apply == 0) {
+                        if (confidence_gate_enabled && !confidence_gate_pass) {
+                            Print(L"OK: OO policy blocked: reduce_ctx (reason=confidence_below_threshold score=%d threshold=%d)\r\n",
+                                  confidence_score, confidence_threshold);
+                        } else if (g_cfg_oo_auto_apply == 0) {
                             Print(L"OK: OO policy simulation: reduce_ctx (would_apply_if_enabled, new=%d)\r\n", new_ctx);
                         } else {
                             Print(L"OK: OO policy throttled: reduce_ctx (limit=1_per_boot, new=%d)\r\n", new_ctx);
@@ -8132,10 +8160,14 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                 if (new_seq < 128) new_seq = 128;
                 if (new_seq != seq) {
                     // M5.2: Check auto-apply config and throttling
-                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
+                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot) &&
+                                         (!confidence_gate_enabled || confidence_gate_pass);
 
                     if (!can_auto_apply) {
-                        if (g_cfg_oo_auto_apply == 0) {
+                        if (confidence_gate_enabled && !confidence_gate_pass) {
+                            Print(L"OK: OO policy blocked: reduce_seq (reason=confidence_below_threshold score=%d threshold=%d)\r\n",
+                                  confidence_score, confidence_threshold);
+                        } else if (g_cfg_oo_auto_apply == 0) {
                             Print(L"OK: OO policy simulation: reduce_seq (would_apply_if_enabled, new=%d)\r\n", new_seq);
                         } else {
                             Print(L"OK: OO policy throttled: reduce_seq (limit=1_per_boot, new=%d)\r\n", new_seq);
@@ -8185,7 +8217,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
         if (action_increase) {
             // M5.2: Aggressive mode can apply increases if RAM>=1GB and mode=NORMAL
             int can_increase = (g_cfg_oo_auto_apply == 2) && (mode == LLMK_OO_MODE_NORMAL) && (ram_mb >= 1024ULL);
-            int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot);
+            int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot) &&
+                                 (!confidence_gate_enabled || confidence_gate_pass);
 
             if (can_increase && can_auto_apply) {
                 // Apply increase: double ctx (capped at 2048)
@@ -8222,7 +8255,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                     actions_blocked++;
                 }
             } else {
-                const char *block_reason = (!can_auto_apply && g_cfg_oo_auto_apply == 0) ? "auto_apply_disabled" :
+                const char *block_reason = (!can_auto_apply && confidence_gate_enabled && !confidence_gate_pass) ? "confidence_below_threshold" :
+                                           (!can_auto_apply && g_cfg_oo_auto_apply == 0) ? "auto_apply_disabled" :
                                            (!can_auto_apply) ? "throttled_1_per_boot" :
                                            (mode == LLMK_OO_MODE_SAFE) ? "safe_mode_no_increase" :
                                            (ram_mb < 1024ULL) ? "low_ram_no_increase" :
@@ -8275,7 +8309,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
 
         llmk_oo_log_consultation(boots, mode, ram_mb, ctx, seq, llm_suggestion,
                                  decision_str, (actions_applied > 0) ? 1 : 0,
-                                 confidence_score, confidence_threshold);
+                                 confidence_score, confidence_threshold,
+                                 confidence_gate_enabled);
     }
 
     // 7. Log to journal (best-effort)
@@ -8303,7 +8338,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
         llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)confidence_score);
         llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " threshold=");
         llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)confidence_threshold);
-        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " gate=log_only");
+        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " gate=");
+        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, confidence_gate_enabled ? "enforced" : "log_only");
         llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "\r\n");
 
         EFI_FILE_HANDLE jf = NULL;
@@ -8409,7 +8445,8 @@ static void llmk_oo_consult_log_rotate_best_effort(void) {
 static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_mb, 
                                      int ctx, int seq, const char *suggestion, 
                                      const char *decision, int applied,
-                                     int confidence_score, int confidence_threshold) {
+                                     int confidence_score, int confidence_threshold,
+                                     int confidence_gate_enabled) {
     // Check if logging enabled
     int log_enabled = g_cfg_oo_consult_log;
     if (log_enabled < 0) {
@@ -8452,7 +8489,8 @@ static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)confidence_score);
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " threshold=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)confidence_threshold);
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " gate=log_only");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " gate=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, confidence_gate_enabled ? "enforced" : "log_only");
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "\r\n");
     logline[lp] = 0;
 
