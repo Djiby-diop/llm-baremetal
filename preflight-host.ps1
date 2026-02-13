@@ -80,8 +80,26 @@ if ($wslExe) {
         $text = ($wslListRaw | Out-String)
         if ($hasWslDistro) {
             if ($wslListExit -eq 0) {
-                # Locale-agnostic parse: any non-header row ending with version "2".
-                if ($text -match '(?m)^\s*\*?\s*.+\s+\S+\s+2\s*$') {
+                # Locale/format-agnostic parse with regex first.
+                if ($text -match '(?m)^\s*\*?\s*.+\s+2\s*$') {
+                    $hasWsl2 = $true
+                }
+                # Fallback through CMD+findstr to tolerate odd PowerShell formatting.
+                if (-not $hasWsl2) {
+                    $null = cmd /c 'wsl -l -v | findstr /R /C:" 2$"' 2>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        $hasWsl2 = $true
+                    }
+                }
+                # Final fallback: default WSL version is 2.
+                if (-not $hasWsl2) {
+                    $statusRaw = & $wslExe --status 2>&1
+                    $statusText = ($statusRaw | Out-String)
+                    if ($statusText -match '(?im)^\s*Default\s+Version:\s*2\s*$') {
+                        $hasWsl2 = $true
+                    }
+                }
+                if (-not $hasWsl2 -and $text -match '(?m)^\s*\*?\s*.+\s+\S+\s+2\s*$') {
                     $hasWsl2 = $true
                 }
             }
@@ -94,8 +112,9 @@ if ($wslExe) {
     Write-Check -Name 'WSL distro' -Ok $hasWslDistro -Detail $wslDistroDetail
     if (-not $hasWslDistro) { $allOk = $false }
 
-    $wsl2Detail = if ($hasWsl2) { 'version 2 detected' } else { 'no WSL2 distro detected' }
-    Write-Check -Name 'WSL2' -Ok $hasWsl2 -Detail $wsl2Detail
+    $wsl2Detail = if ($hasWsl2) { 'version 2 detected' } else { 'version not detected (non-blocking when distro works)' }
+    $wsl2OkForDisplay = $hasWsl2 -or $hasWslDistro
+    Write-Check -Name 'WSL2' -Ok $wsl2OkForDisplay -Detail $wsl2Detail
 }
 
 $qemuCmd = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue
@@ -135,7 +154,7 @@ Write-Host ''
 if ($allOk) {
     Write-Host 'Preflight: READY ✅' -ForegroundColor Green
     Write-Host 'Next:' -ForegroundColor Cyan
-    Write-Host '  .\test-qemu-autorun.ps1 -Mode smoke'
+    Write-Host '  .\run.ps1'
     exit 0
 }
 

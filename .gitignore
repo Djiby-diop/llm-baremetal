@@ -61,10 +61,6 @@ GITHUB_UPLOAD.md
 serve_model.py
 test-*.ps1
 
-# Keep the main autorun harness tracked
-!test-qemu-autorun.ps1
-!test-qemu-manual-smoke.ps1
-
 
 
 # Local notes (keep repo clean)
