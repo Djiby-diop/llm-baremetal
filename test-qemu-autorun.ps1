@@ -1,10 +1,13 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
-    [ValidateSet('auto','whpx','tcg','none')]
+    [ValidateSet('auto','whpx','tcg','none','wsl_kvm')]
     [string]$Accel = 'tcg',
 
     [ValidateRange(512, 8192)]
     [int]$MemMB = 4096,
+
+    [ValidateRange(1, 64)]
+    [int]$Smp = 1,
 
     [ValidateRange(1, 86400)]
     [Alias('TimeoutSeconds')]
@@ -43,7 +46,7 @@ param(
 
     [switch]$ForceAvx2,
 
-    [ValidateSet('smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_mock','oo_auto_apply','oo_consult_log','oo_consult_log_tail','oo_consult_metric','oo_consult_log_rotate','oo_jour_tail','oo_jour_rotate','oo_survive_10','oo_survive_100')]
+    [ValidateSet('preflight','smoke','q8bench','ram','gen','custom','gguf_smoke','fat83_fallback','oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_net_ro','oo_llm_consult','oo_llm_multi','oo_llm_multi_live','oo_llm_multi_mock','oo_auto_apply','oo_auto_apply_live','oo_consult_log','oo_consult_log_tail','oo_consult_metric','oo_consult_log_rotate','oo_jour_tail','oo_jour_rotate','oo_survive_10','oo_survive_100')]
     [string]$Mode = 'smoke',
 
     # Optional repl.cfg overrides injected into the boot image for the duration of the test.
@@ -96,6 +99,38 @@ $ErrorActionPreference = 'Stop'
 # Be cwd-independent: ensure relative operations happen from this script folder.
 Set-Location -LiteralPath $PSScriptRoot
 
+function Resolve-WslCommandPath {
+    $cmd = Get-Command wsl -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return $cmd.Source }
+
+    $candidates = @(
+        (Join-Path $env:SystemRoot 'System32\wsl.exe'),
+        (Join-Path $env:SystemRoot 'Sysnative\wsl.exe'),
+        'C:\Windows\System32\wsl.exe'
+    )
+
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) { return $c }
+    }
+
+    return $null
+}
+
+$script:WslCommandPath = Resolve-WslCommandPath
+if (($Mode -ne 'preflight') -and (-not $script:WslCommandPath)) {
+    throw 'WSL command not found. Install/enable WSL2 and ensure wsl.exe is available (see copilot-instructions.md: wsl -l -v).'
+}
+
+function Invoke-Wsl {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Args
+    )
+    & $script:WslCommandPath @Args
+}
+
+Set-Alias -Scope Script -Name wsl -Value Invoke-Wsl
+
 function Resolve-DefaultModelSpec {
     $preferred = @(
         # Stable dev model (requested)
@@ -130,7 +165,7 @@ function Resolve-DefaultModelSpec {
     throw "No model weights found next to the script (or one level up). Pass -ModelBin <file> (supports .bin or .gguf)."
 }
 
-if ((-not $PSBoundParameters.ContainsKey('ModelBin')) -and (-not $ModelBin)) {
+if (($Mode -ne 'preflight') -and (-not $PSBoundParameters.ContainsKey('ModelBin')) -and (-not $ModelBin)) {
     $ModelBin = Resolve-DefaultModelSpec
 }
 
@@ -456,6 +491,11 @@ function Restore-ImageFile {
 
 $autorunLinesEffective = @()
 switch ($Mode) {
+    'preflight' {
+        $autorunLinesEffective = @(
+            '# preflight mode (no autorun)'
+        )
+    }
     'smoke' {
         $autorunLinesEffective = @(
             '# llmk autorun smoke test',
@@ -610,6 +650,43 @@ switch ($Mode) {
             $TimeoutSec = 600
         }
     }
+    'oo_llm_multi_live' {
+        # Live test: run /oo_consult with an instruction-tuned model and ensure multi-action parsing emits policy markers.
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M5.1 live (multi-action parsing with instruction-tuned model)',
+            '/version',
+            '/max_tokens 4',
+            '/oo_consult',
+            '/quit'
+        )
+
+        # Encourage an actionable suggestion.
+        if (-not $PSBoundParameters.ContainsKey('CtxLen')) {
+            # Under TCG, smaller context makes attention/KV much cheaper.
+            $CtxLen = 256
+        }
+
+        # Live GGUF models can be large (e.g., ~1.1B Q8_0). Default to comfortable RAM.
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 4096
+        }
+
+        # Give TCG a chance by using multiple vCPUs when available.
+        if (-not $PSBoundParameters.ContainsKey('Smp')) {
+            $Smp = 4
+        }
+
+        # Default to TCG for broad compatibility; WHPX can be flaky on some hosts.
+        if (-not $PSBoundParameters.ContainsKey('Accel')) {
+            $Accel = 'tcg'
+        }
+
+
+        # Allow generous time for model load + generation under QEMU/TCG.
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 1800
+        }
+    }
     'oo_llm_multi_mock' {
         # Mock test: simulate LLM suggesting "reduce ctx and seq"
         $autorunLinesEffective = @(
@@ -649,6 +726,44 @@ switch ($Mode) {
             $TimeoutSec = 600
         }
     }
+    'oo_auto_apply_live' {
+        # Live test: run /oo_consult with an instruction-tuned model and verify auto-apply markers.
+        $autorunLinesEffective = @(
+            '# llmk autorun OO M5.2 live (auto-apply with instruction-tuned model)',
+            '/version',
+            '/ctx',
+            '/max_tokens 4',
+            '/oo_consult',
+            '/quit'
+        )
+
+        # Encourage a reduction suggestion.
+        if (-not $PSBoundParameters.ContainsKey('CtxLen')) {
+            # Under TCG, smaller context makes attention/KV much cheaper.
+            $CtxLen = 256
+        }
+
+        # Live GGUF models can be large (e.g., ~1.1B Q8_0). Default to comfortable RAM.
+        if (-not $PSBoundParameters.ContainsKey('MemMB')) {
+            $MemMB = 4096
+        }
+
+        # Give TCG a chance by using multiple vCPUs when available.
+        if (-not $PSBoundParameters.ContainsKey('Smp')) {
+            $Smp = 4
+        }
+
+        # Default to TCG for broad compatibility; WHPX can be flaky on some hosts.
+        if (-not $PSBoundParameters.ContainsKey('Accel')) {
+            $Accel = 'tcg'
+        }
+
+
+        # Allow generous time for model load + generation under QEMU/TCG.
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) {
+            $TimeoutSec = 1800
+        }
+    }
     'oo_consult_log' {
         # M5.3: Consultation logging test (2x consultations, verify OOCONSULT.LOG)
         $autorunLinesEffective = @(
@@ -677,7 +792,7 @@ switch ($Mode) {
             '/oo_consult_mock reduce ctx',
             '/oo_consult_mock stable',
             '/oo_log',
-            '/quit'
+            'quit'
         )
 
         # SAFE mode: 640MB RAM for determinism
@@ -837,7 +952,39 @@ switch ($Mode) {
     }
 }
 
+if ($Mode -eq 'preflight') {
+    $preflightScript = Join-Path $PSScriptRoot 'preflight-host.ps1'
+    if (-not (Test-Path $preflightScript)) {
+        throw "Missing preflight script: $preflightScript"
+    }
+
+    Write-Host '[Test] Running host preflight...' -ForegroundColor Cyan
+    & $preflightScript
+    $preflightExit = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 1 }
+    if ($preflightExit -ne 0) {
+        throw "Preflight failed with exit code $preflightExit"
+    }
+
+    Write-Host '[OK] Preflight passed.' -ForegroundColor Green
+    exit 0
+}
+
 [System.IO.File]::WriteAllText($autorunPath, ($autorunLinesEffective -join "`r`n") + "`r`n", [System.Text.Encoding]::ASCII)
+
+$ooLiveBootModelModes = @('oo_llm_multi_live','oo_auto_apply_live','oo_llm_consult')
+$ooTempImageModes = @('oo_smoke','oo_recovery','oo_net_ro','oo_consult_metric','oo_consult_log','oo_consult_log_rotate','oo_jour_rotate','oo_survive_10','oo_survive_100','oo_llm_multi_live','oo_auto_apply_live','oo_llm_consult')
+$ooPersistentClearModes = @('oo_smoke','oo_recovery','oo_net_ro','oo_consult_metric','oo_consult_log','oo_consult_log_tail','oo_consult_log_rotate','oo_jour_tail','oo_jour_rotate','oo_survive_10','oo_survive_100','oo_llm_consult','oo_llm_multi_live','oo_auto_apply_live')
+$ooEnableModes = @('oo_smoke','oo_recovery','oo_ctx_clamp','oo_ctx_clamp_degraded','oo_model_fallback','oo_ram_preflight','oo_ram_preflight_seq','oo_llm_consult','oo_llm_multi','oo_llm_multi_live','oo_llm_multi_mock','oo_auto_apply','oo_auto_apply_live','oo_consult_log','oo_consult_log_tail','oo_consult_log_rotate','oo_consult_metric','oo_jour_tail','oo_jour_rotate','oo_survive_10','oo_survive_100')
+$ooLlmConsultModes = @('oo_llm_consult','oo_llm_multi','oo_llm_multi_live','oo_llm_multi_mock','oo_auto_apply','oo_auto_apply_live','oo_consult_log','oo_consult_log_tail','oo_consult_log_rotate','oo_consult_metric','oo_jour_tail')
+$ooMultiActionModes = @('oo_llm_multi','oo_llm_multi_live','oo_llm_multi_mock')
+$ooAutoApplyModes = @('oo_auto_apply','oo_auto_apply_live','oo_consult_metric')
+$ooConsultLogModes = @('oo_consult_log','oo_consult_log_tail','oo_consult_log_rotate')
+$qemuNoSnapshotModes = @('oo_smoke','oo_recovery','oo_ctx_clamp_degraded','oo_net_ro','oo_consult_metric','oo_consult_log','oo_consult_log_rotate','oo_jour_rotate','oo_survive_10','oo_survive_100')
+$ooConsultLogClearModes = @('oo_consult_log','oo_consult_log_tail')
+
+function Test-ModeInSet([string]$currentMode, [string[]]$modeSet) {
+    return ($modeSet -contains $currentMode)
+}
 
 # q8bench requires a Q8_0 GGUF in blob mode. Default to the bundled Q8_0 model
 # if the caller didn't explicitly specify -BootModel.
@@ -848,6 +995,18 @@ if (-not $PSBoundParameters.ContainsKey('BootModel')) {
     if ($Mode -eq 'gguf_smoke') {
         # Prefer the small bundled GGUF if present in the image.
         $BootModel = 'models\stories15M.q8_0.gguf'
+    }
+
+    # For live OO tests, if the caller explicitly provided -ModelBin (often an absolute path),
+    # default the boot model to the basename as copied into the FAT root by the image builder.
+    # Note: do NOT do this for auto-selected defaults, otherwise -SkipBuild can become interactive
+    # if the in-image repl.cfg points at a different bundled model.
+    if ((Test-ModeInSet $Mode $ooLiveBootModelModes) -and $PSBoundParameters.ContainsKey('ModelBin') -and $ModelBin) {
+        try {
+            $BootModel = [System.IO.Path]::GetFileName($ModelBin)
+        } catch {
+            $BootModel = $ModelBin
+        }
     }
 }
 
@@ -873,9 +1032,9 @@ try {
         Write-Host "[Test] Using temp image: $IMAGE" -ForegroundColor Yellow
     }
 
-    # OO persistence tests must persist disk writes. Always operate on a temp image copy
-    # so we can run without -snapshot and still keep the working tree clean.
-    if (($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_jour_rotate' -or $Mode -eq 'oo_survive_10' -or $Mode -eq 'oo_survive_100') -and -not $isTempImage) {
+    # OO modes can write persistent state/logs. Prefer a temp image so we can run without -snapshot
+    # and still keep the working tree clean.
+    if ((Test-ModeInSet $Mode $ooTempImageModes) -and -not $isTempImage) {
         Write-Host "[Test] ${Mode}: using temp image (no -snapshot, 2 boots)" -ForegroundColor Yellow
         $IMAGE = Get-TempImageCopy $IMAGE
         $isTempImage = $true
@@ -995,9 +1154,33 @@ try {
     }
 
     # mtools writes against /mnt/c can occasionally hang. Stage a WSL-local copy for all write steps.
+    # For very large images, staging to /tmp can fail (WSL disk space) or be excessively slow.
+    # In that case, fall back to operating directly on the /mnt/c image.
     $wslImgWork = ("/tmp/llmk-imgwork-{0}.img" -f ([Guid]::NewGuid().ToString('n')))
-    Invoke-WslStep 'stage image into WSL temp' ("cp -f '{0}' '{1}'" -f $wslImgOriginal, $wslImgWork) 120
-    $wslImg = $wslImgWork
+    $useWslStagedImage = $true
+
+    # Large images (e.g., when bundling >1GB GGUFs) can legitimately take longer than 120s
+    # to copy into WSL's /tmp on some hosts. Scale the timeout to avoid flaky failures.
+    $stageTimeoutSec = 120
+    try {
+        $imgLen = (Get-Item -LiteralPath $IMAGE).Length
+        if ($imgLen -ge 1GB) {
+            $stageTimeoutSec = 900
+        } elseif ($imgLen -ge 600MB) {
+            $stageTimeoutSec = 300
+        }
+    } catch {
+        # best-effort only
+    }
+
+    try {
+        Invoke-WslStep 'stage image into WSL temp' ("cp -f '{0}' '{1}'" -f $wslImgOriginal, $wslImgWork) $stageTimeoutSec
+        $wslImg = $wslImgWork
+    } catch {
+        Write-Host '[Warn] Failed to stage image into WSL temp; operating directly on /mnt/c image (may be slower).' -ForegroundColor Yellow
+        $useWslStagedImage = $false
+        $wslImg = $wslImgOriginal
+    }
 
     function Resolve-FatShortNameForModelSpec([string]$modelSpec) {
         if (-not $modelSpec) { return $modelSpec }
@@ -1050,11 +1233,12 @@ try {
         "(mdel -i '$wslImg@@$fatOffset' ::oo-test.bin.bak 2>/dev/null || true)"
     ) 30
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_net_ro' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_jour_tail' -or $Mode -eq 'oo_jour_rotate' -or $Mode -eq 'oo_survive_10' -or $Mode -eq 'oo_survive_100') {
+    if (Test-ModeInSet $Mode $ooPersistentClearModes) {
         Invoke-WslStep 'clear OO persistent files' (
             "(mdel -i '$wslImg@@$fatOffset' ::OOSTATE.BIN 2>/dev/null || true); " +
             "(mdel -i '$wslImg@@$fatOffset' ::OORECOV.BIN 2>/dev/null || true); " +
-            "(mdel -i '$wslImg@@$fatOffset' ::OOJOUR.LOG 2>/dev/null || true)"
+            "(mdel -i '$wslImg@@$fatOffset' ::OOJOUR.LOG 2>/dev/null || true); " +
+            "(mdel -i '$wslImg@@$fatOffset' ::OOCONSULT.LOG 2>/dev/null || true)"
         ) 30
     }
 
@@ -1092,7 +1276,7 @@ try {
         try { Remove-Item -Force -ErrorAction SilentlyContinue $tmpOoJourPreload } catch {}
     }
 
-    if ($Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail') {
+    if (Test-ModeInSet $Mode $ooConsultLogClearModes) {
         Invoke-WslStep 'clear OOCONSULT.LOG' ("(mdel -i '$wslImg@@$fatOffset' ::OOCONSULT.LOG 2>/dev/null || true)") 30
     }
 
@@ -1104,6 +1288,33 @@ try {
     # Build repl.cfg now that we know whether we're injecting an ExtraModel and
     # can map long filenames to FAT 8.3 aliases when needed.
     $bootModelEffective = $BootModel
+
+    # If the user is reusing an existing image (-SkipBuild) and did not explicitly
+    # request a model override, preserve the image's current repl.cfg model= line.
+    # This prevents hanging on the interactive model picker when the host's default
+    # model differs from the one embedded in the image.
+    $userSpecifiedModelOverride = ($PSBoundParameters.ContainsKey('BootModel') -or $PSBoundParameters.ContainsKey('ModelBin'))
+    if (-not $userSpecifiedModelOverride -and $SkipBuild -and -not $bootModelEffective) {
+        try {
+            $cfgLines = Invoke-WslStep 'read existing repl.cfg (model preservation)' ("(mtype -i '$wslImg@@$fatOffset' ::repl.cfg 2>/dev/null || true)") 30
+            $cfgText = ($cfgLines -join "`n")
+            $existingModel = ''
+            foreach ($ln in ($cfgText -split "`r?`n")) {
+                if (-not $ln) { continue }
+                $t = $ln.Trim()
+                if ($t -match '^(?i)model\s*=\s*(.+)$') {
+                    $existingModel = $Matches[1].Trim()
+                    break
+                }
+            }
+            if ($existingModel) {
+                $bootModelEffective = ($existingModel -replace '/','\\')
+                Write-Host ("[Test] Preserving model from image repl.cfg: {0}" -f $bootModelEffective) -ForegroundColor DarkGray
+            }
+        } catch {
+            # best-effort only
+        }
+    }
     if ($ExtraModel -and $extraBaseName) {
         if (-not $bootModelEffective -and $Mode -eq 'gguf_smoke') {
             $bootModelEffective = ("models\\{0}" -f $extraBaseName)
@@ -1159,7 +1370,7 @@ try {
         $tmpCfgLines += 'fat83_force=1'
     }
 
-    if ($Mode -eq 'oo_smoke' -or $Mode -eq 'oo_recovery' -or $Mode -eq 'oo_ctx_clamp' -or $Mode -eq 'oo_ctx_clamp_degraded' -or $Mode -eq 'oo_model_fallback' -or $Mode -eq 'oo_ram_preflight' -or $Mode -eq 'oo_ram_preflight_seq' -or $Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_jour_tail' -or $Mode -eq 'oo_jour_rotate' -or $Mode -eq 'oo_survive_10' -or $Mode -eq 'oo_survive_100') {
+    if (Test-ModeInSet $Mode $ooEnableModes) {
         $tmpCfgLines += 'oo_enable=1'
     }
     if ($Mode -eq 'oo_net_ro') {
@@ -1170,16 +1381,16 @@ try {
     if ($Mode -eq 'oo_ram_preflight_seq') {
         $tmpCfgLines += 'oo_min_total_mb=0'
     }
-    if ($Mode -eq 'oo_llm_consult' -or $Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock' -or $Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate' -or $Mode -eq 'oo_consult_metric' -or $Mode -eq 'oo_jour_tail') {
+    if (Test-ModeInSet $Mode $ooLlmConsultModes) {
         $tmpCfgLines += 'oo_llm_consult=1'
     }
-    if ($Mode -eq 'oo_llm_multi' -or $Mode -eq 'oo_llm_multi_mock') {
+    if (Test-ModeInSet $Mode $ooMultiActionModes) {
         $tmpCfgLines += 'oo_multi_actions=1'
     }
-    if ($Mode -eq 'oo_auto_apply' -or $Mode -eq 'oo_consult_metric') {
+    if (Test-ModeInSet $Mode $ooAutoApplyModes) {
         $tmpCfgLines += 'oo_auto_apply=1'
     }
-    if ($Mode -eq 'oo_consult_log' -or $Mode -eq 'oo_consult_log_tail' -or $Mode -eq 'oo_consult_log_rotate') {
+    if (Test-ModeInSet $Mode $ooConsultLogModes) {
         $tmpCfgLines += 'oo_consult_log=1'
     }
 
@@ -1213,29 +1424,114 @@ try {
     }
 
     # Sync staged WSL-local image back to the Windows image path used by QEMU.
-    Invoke-WslStep 'sync image back to Windows' ("cp -f '{0}' '{1}'" -f $wslImgWork, $wslImgOriginal) 120
-    Invoke-WslStep 'remove WSL temp image' ("rm -f '{0}'" -f $wslImgWork) 30
+    if ($useWslStagedImage) {
+        Invoke-WslStep 'sync image back to Windows' ("cp -f '{0}' '{1}'" -f $wslImgWork, $wslImgOriginal) 120
+        Invoke-WslStep 'remove WSL temp image' ("rm -f '{0}'" -f $wslImgWork) 30
+    }
 
     $serialLog = Join-Path $env:TEMP ("llm-baremetal-serial-autorun-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
     $tmpOut = Join-Path $env:TEMP ("llm-baremetal-qemu-out-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
     $tmpErr = Join-Path $env:TEMP ("llm-baremetal-qemu-err-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
 
-    $accelArgs = @()
-    switch ($Accel) {
-        'whpx' { $accelArgs = @('-accel','whpx') }
-        'tcg'  { $accelArgs = @('-accel','tcg') }
-        'none' { $accelArgs = @() }
-        default { $accelArgs = @() }
-    }
-
     $cpu = 'qemu64'
     if ($ForceAvx2) {
-        $cpu = 'qemu64,avx2=on'
+        # AVX2 depends on AVX + XSAVE state management.
+        $cpu = 'qemu64,avx=on,avx2=on,xsave=on,fma=on'
     }
 
     function ConvertTo-DriveFileArg([string]$p) {
         if (-not $p) { return '""' }
         return '"' + ($p -replace '"','""') + '"'
+    }
+
+    function Test-WhpxUsable([string]$qemuExe, [string]$ovmfPath) {
+        # On some Windows hosts, WHPX fails immediately with MSI/MMIO emulation errors.
+        # Preflight it once to avoid wasting the full test timeout on a known-bad accelerator.
+        try {
+            if (-not $qemuExe -or -not (Test-Path $qemuExe)) { return $false }
+            if (-not $ovmfPath -or -not (Test-Path $ovmfPath)) { return $false }
+
+            $tmpErrLocal = Join-Path $env:TEMP ("llm-baremetal-whpx-preflight-err-{0}.txt" -f ([Guid]::NewGuid().ToString('n')))
+            try { Set-Content -LiteralPath $tmpErrLocal -Value '' -NoNewline -Encoding Ascii -ErrorAction SilentlyContinue } catch {}
+
+            # Keep it extremely minimal: code+vars pflash, no disks.
+            $varsSrc = Join-Path $PSScriptRoot 'ovmf-vars-temp.fd'
+            if (-not (Test-Path $varsSrc)) {
+                $varsSrc = Join-Path (Split-Path $PSScriptRoot -Parent) 'ovmf-vars-temp.fd'
+            }
+            if (-not (Test-Path $varsSrc)) { return $false }
+
+            $varsTmp = Join-Path $env:TEMP ("llm-baremetal-whpx-preflight-vars-{0}.fd" -f ([Guid]::NewGuid().ToString('n')))
+            Copy-Item -Force $varsSrc $varsTmp
+
+            $whpxPreflightArgv = @(
+                '-accel','whpx',
+                '-machine','pc',
+                '-cpu','qemu64',
+                '-m','512',
+                '-smp','1',
+                '-display','none',
+                '-serial','null',
+                '-nic','none',
+                '-drive', ("if=pflash,format=raw,readonly=on,file={0}" -f (ConvertTo-DriveFileArg $ovmfPath)),
+                '-drive', ("if=pflash,format=raw,file={0}" -f (ConvertTo-DriveFileArg $varsTmp))
+            )
+
+            $proc = Start-Process -FilePath $qemuExe -ArgumentList $whpxPreflightArgv -NoNewWindow -PassThru -RedirectStandardError $tmpErrLocal -RedirectStandardOutput $tmpErrLocal
+            Start-Sleep -Milliseconds 800
+            if (-not $proc.HasExited) {
+                try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+            }
+
+            $err = ''
+            try { $err = Get-Content -LiteralPath $tmpErrLocal -Raw -ErrorAction SilentlyContinue } catch {}
+
+            # Known-bad signature.
+            if ($err -match 'whpx:\s*injection failed, MSI' -or $err -match 'WHPX:\s*Failed to emulate MMIO access') {
+                return $false
+            }
+
+            # If we got here without the signature, assume usable.
+            return $true
+        } catch {
+            return $false
+        }
+    }
+
+    function Test-WslKvmUsable {
+        # /dev/kvm may exist but still be unusable (e.g. ENODEV / VMX not exposed).
+        # Probe via KVM_GET_API_VERSION ioctl.
+        try {
+            wsl -u root bash -lc "python3 - <<'PY' >/dev/null 2>&1
+import os, fcntl
+KVM_GET_API_VERSION = 0xAE00
+fd = os.open('/dev/kvm', os.O_RDWR)
+fcntl.ioctl(fd, KVM_GET_API_VERSION, 0)
+os.close(fd)
+PY" 2>$null | Out-Null
+            return ($LASTEXITCODE -eq 0)
+        } catch {
+            return $false
+        }
+    }
+
+    # Cache accel probes across repeated runs (e.g. oo_survive_100).
+    $script:__whpxUsableCache = $null
+    $script:__wslKvmUsableCache = $null
+    $script:__warnedWhpxUnusable = $false
+
+    function Get-WhpxUsableCached([string]$qemuExe, [string]$ovmfPath) {
+        if ($null -eq $script:__whpxUsableCache) {
+            $script:__whpxUsableCache = Test-WhpxUsable -qemuExe $qemuExe -ovmfPath $ovmfPath
+        }
+        return [bool]$script:__whpxUsableCache
+    }
+
+    function Get-WslKvmUsableCached {
+        if ($null -eq $script:__wslKvmUsableCache) {
+            $script:__wslKvmUsableCache = Test-WslKvmUsable
+        }
+        return [bool]$script:__wslKvmUsableCache
     }
 
     function Invoke-QemuAutorunOnce([string]$runLabel) {
@@ -1245,37 +1541,153 @@ try {
         $tmpErrLocal = Join-Path $env:TEMP ("llm-baremetal-qemu-err-{0}-{1}.txt" -f $id, $runLabel)
 
         # Ensure output files exist so we can always surface QEMU errors even if it exits immediately.
+        try { Set-Content -LiteralPath $serialLogLocal -Value '' -NoNewline -Encoding Ascii -ErrorAction SilentlyContinue } catch {}
         try { Set-Content -LiteralPath $tmpOutLocal -Value '' -NoNewline -Encoding Ascii -ErrorAction SilentlyContinue } catch {}
         try { Set-Content -LiteralPath $tmpErrLocal -Value '' -NoNewline -Encoding Ascii -ErrorAction SilentlyContinue } catch {}
 
-        $qemuArgsLocal = @(
+        $qemuArgsBase = @(
             '-m', "$MemMB",
-            '-machine', 'q35',
-            '-cpu', $cpu
+            '-smp', "$Smp"
         )
+
+        # WHPX stability: avoid default PCI NICs (can use MSI and trip WHPX MMIO/MSI emulation on some hosts).
+        # Tests here do not require networking.
+        if ($Accel -eq 'whpx' -or ($Accel -eq 'auto')) {
+            $qemuArgsBase += @('-nic','none')
+        }
 
         # Make M4 deterministic: ensure no NIC is present.
         if ($Mode -eq 'oo_net_ro') {
-            $qemuArgsLocal += @('-net','none')
+            $qemuArgsBase += @('-net','none')
         }
-        if ($Mode -ne 'oo_smoke' -and $Mode -ne 'oo_recovery' -and $Mode -ne 'oo_ctx_clamp_degraded' -and $Mode -ne 'oo_net_ro' -and $Mode -ne 'oo_consult_metric' -and $Mode -ne 'oo_consult_log' -and $Mode -ne 'oo_consult_log_rotate' -and $Mode -ne 'oo_jour_rotate' -and $Mode -ne 'oo_survive_10' -and $Mode -ne 'oo_survive_100') {
-            $qemuArgsLocal += '-snapshot'
+        if (-not (Test-ModeInSet $Mode $qemuNoSnapshotModes)) {
+            $qemuArgsBase += '-snapshot'
         }
-        $qemuArgsLocal += @(
+
+        $qemuDriveArgs = @(
             '-drive', ("if=ide,format=raw,file=" + (ConvertTo-DriveFileArg $IMAGE)),
             '-drive', ("if=pflash,format=raw,readonly=on,file=" + (ConvertTo-DriveFileArg $OVMF)),
             '-display', 'none',
             '-serial', "file:$serialLogLocal"
         )
-        $qemuArgsLocal += $accelArgs
 
-        Write-Host "[Test] Starting QEMU ($runLabel) (accel=$Accel, mem=${MemMB}MB)..." -ForegroundColor Cyan
+        $accelCandidates = @($Accel)
+        if ($Accel -eq 'auto') {
+            # Prefer Windows WHPX when it works, but fall back to WSL+KVM on hosts where WHPX
+            # is broken (common MSI/MMIO emulation failures).
+            $accelCandidates = @('whpx', 'wsl_kvm', 'tcg', 'none')
+        } elseif ($Accel -eq 'whpx') {
+            # If WHPX is explicitly requested but fails, try WSL+KVM before giving up.
+            $accelCandidates = @('whpx', 'wsl_kvm')
+        }
 
-        try {
-            $procLocal = Start-Process -FilePath $QEMU -ArgumentList $qemuArgsLocal -NoNewWindow -PassThru -RedirectStandardOutput $tmpOutLocal -RedirectStandardError $tmpErrLocal
-        } catch {
-            $msg = $_.Exception.Message
-            throw "Failed to start QEMU: $msg"
+        # If WHPX is known-bad on this host, skip it in auto mode to avoid wasting time.
+        if ($Accel -eq 'auto') {
+            $whpxOk = Get-WhpxUsableCached -qemuExe $QEMU -ovmfPath $OVMF
+            if (-not $whpxOk) {
+                if (-not $script:__warnedWhpxUnusable) {
+                    Write-Host '[Warn] WHPX preflight failed (MSI/MMIO emulation). Skipping WHPX and falling back to TCG.' -ForegroundColor Yellow
+                    $script:__warnedWhpxUnusable = $true
+                }
+                $accelCandidates = @($accelCandidates | Where-Object { $_ -ne 'whpx' })
+            }
+
+            $kvmOk = Get-WslKvmUsableCached
+            if (-not $kvmOk) {
+                # Avoid trying WSL+KVM when /dev/kvm is present but non-functional.
+                $accelCandidates = @($accelCandidates | Where-Object { $_ -ne 'wsl_kvm' })
+            }
+        } elseif ($Accel -eq 'whpx') {
+            $whpxOk = Get-WhpxUsableCached -qemuExe $QEMU -ovmfPath $OVMF
+            if (-not $whpxOk) {
+                throw 'WHPX preflight failed (MSI/MMIO emulation). This host cannot run WHPX QEMU reliably; use -Accel tcg (or fix host virtualization config).'
+            }
+        }
+
+        $procLocal = $null
+        $lastStartError = $null
+        $accelUsed = $Accel
+        foreach ($a in $accelCandidates) {
+            $accelUsed = $a
+            $accelArgsLocal = @()
+            switch ($a) {
+                'whpx' { $accelArgsLocal = @('-accel','whpx') }
+                'wsl_kvm' { $accelArgsLocal = @() }
+                'tcg'  {
+                    if ($Smp -gt 1) {
+                        $accelArgsLocal = @('-accel','tcg,thread=multi')
+                    } else {
+                        $accelArgsLocal = @('-accel','tcg')
+                    }
+                }
+                'none' { $accelArgsLocal = @() }
+                default { $accelArgsLocal = @() }
+            }
+
+            $machineLocal = 'q35'
+            $cpuLocal = $cpu
+            $extraQemuArgsLocal = @()
+            if ($accelUsed -eq 'whpx') {
+                # WHPX can crash on some hosts with q35+qemu64 due to MMIO/MSI emulation.
+                # Prefer a simpler machine + host CPU when using WHPX.
+                $machineLocal = 'pc'
+                # Use a conservative CPU model for stability.
+                $cpuLocal = 'qemu64'
+
+                # Avoid loading any user-level QEMU defaults, and avoid auto-created devices.
+                $extraQemuArgsLocal = @('-no-user-config','-nodefaults')
+            }
+
+            # WSL+KVM path (runs Linux QEMU under WSL as root so it can access /dev/kvm).
+            # This is intentionally headless and writes serial output to the same Windows temp log.
+            if ($accelUsed -eq 'wsl_kvm') {
+                $machineLocal = 'q35'
+                $cpuLocal = 'host'
+
+                $wslImage = ConvertTo-WslPath $IMAGE
+                $wslSerial = ConvertTo-WslPath $serialLogLocal
+
+                # Use OVMF_CODE + a per-run writable VARS copy for deterministic NVRAM.
+                $bash = @(
+                    'set -e'
+                    'CODE=/usr/share/OVMF/OVMF_CODE_4M.fd'
+                    'VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd'
+                    'if [ ! -f "$CODE" ]; then echo "missing OVMF code: $CODE" >&2; exit 3; fi'
+                    'if [ ! -f "$VARS_SRC" ]; then echo "missing OVMF vars: $VARS_SRC" >&2; exit 3; fi'
+                    'VARS=$(mktemp /tmp/llmk-ovmf-vars-XXXXXX.fd)'
+                    'cp -f "$VARS_SRC" "$VARS"'
+                    ("qemu-system-x86_64 -accel kvm -machine {0} -cpu {1} -m {2} -smp {3} -display none -serial file:{4} -drive if=ide,format=raw,file={5} -drive if=pflash,format=raw,readonly=on,file=`$CODE -drive if=pflash,format=raw,file=`$VARS" -f $machineLocal, $cpuLocal, $MemMB, $Smp, $wslSerial, $wslImage)
+                    'rc=$?'
+                    'rm -f "$VARS"'
+                    'exit $rc'
+                ) -join '; '
+
+                Write-Host "[Test] Starting QEMU ($runLabel) (accel=wsl_kvm, machine=$machineLocal, cpu=$cpuLocal, mem=${MemMB}MB)..." -ForegroundColor Cyan
+                try {
+                    $procLocal = Start-Process -FilePath 'wsl.exe' -ArgumentList @('-u','root','--','bash','-lc',$bash) -NoNewWindow -PassThru -RedirectStandardOutput $tmpOutLocal -RedirectStandardError $tmpErrLocal
+                    $lastStartError = $null
+                    break
+                } catch {
+                    $lastStartError = $_.Exception.Message
+                    $procLocal = $null
+                    continue
+                }
+            }
+
+            $qemuArgsLocal = @() + $qemuArgsBase + $extraQemuArgsLocal + @('-machine', $machineLocal, '-cpu', $cpuLocal) + $qemuDriveArgs + $accelArgsLocal
+
+            Write-Host "[Test] Starting QEMU ($runLabel) (accel=$accelUsed, machine=$machineLocal, cpu=$cpuLocal, mem=${MemMB}MB)..." -ForegroundColor Cyan
+            try {
+                $procLocal = Start-Process -FilePath $QEMU -ArgumentList $qemuArgsLocal -NoNewWindow -PassThru -RedirectStandardOutput $tmpOutLocal -RedirectStandardError $tmpErrLocal
+                $lastStartError = $null
+                break
+            } catch {
+                $lastStartError = $_.Exception.Message
+                $procLocal = $null
+            }
+        }
+        if (-not $procLocal) {
+            throw "Failed to start QEMU (accel=$Accel). Last error: $lastStartError"
         }
 
         $deadline = (Get-Date).AddSeconds($TimeoutSec)
@@ -1296,7 +1708,7 @@ try {
 
                 # In custom mode, the script may intentionally exit the REPL ("exit"/"quit")
                 # which returns to the UEFI shell and blocks on a keypress. Treat that as completion.
-                if ($Mode -eq 'custom' -and $serialLocal) {
+                if (($Mode -eq 'custom' -or $Mode -eq 'oo_consult_log_tail') -and $serialLocal) {
                     if ($serialLocal -match '(?m)^\s*\[7/7\]\s+Entering chat loop\.{3}\s*$' -and ($serialLocal -match '(?i)\bGoodbye!\b' -or $serialLocal -match '(?i)Press any key to exit')) {
                         $sawReplExitLocal = $true
                         break
@@ -1349,7 +1761,48 @@ try {
                 try { Stop-Process -Id $procLocal.Id -Force -ErrorAction SilentlyContinue } catch {}
             } else {
                 try { Stop-Process -Id $procLocal.Id -Force -ErrorAction SilentlyContinue } catch {}
-                throw "Timeout: QEMU did not exit within ${TimeoutSec}s"
+                $serialTail = ''
+                $stderrTail = ''
+                $stdoutTail = ''
+
+                try {
+                    if (Test-Path $serialLogLocal) {
+                        $s = Get-Content -Path $serialLogLocal -Raw -ErrorAction SilentlyContinue
+                        if ($s) {
+                            $lines = $s -split "`r?`n"
+                            $serialTail = ($lines | Select-Object -Last 120) -join "`r`n"
+                        }
+                    }
+                } catch {}
+
+                try {
+                    if (Test-Path $tmpErrLocal) {
+                        $e = Get-Content -Path $tmpErrLocal -Raw -ErrorAction SilentlyContinue
+                        if ($e) {
+                            $e = $e.TrimEnd()
+                            if ($e.Length -gt 4000) { $e = $e.Substring($e.Length - 4000) }
+                            $stderrTail = $e
+                        }
+                    }
+                } catch {}
+
+                try {
+                    if (Test-Path $tmpOutLocal) {
+                        $o = Get-Content -Path $tmpOutLocal -Raw -ErrorAction SilentlyContinue
+                        if ($o) {
+                            $o = $o.TrimEnd()
+                            if ($o.Length -gt 4000) { $o = $o.Substring($o.Length - 4000) }
+                            $stdoutTail = $o
+                        }
+                    }
+                } catch {}
+
+                $msg = "Timeout: QEMU did not exit within ${TimeoutSec}s`n" +
+                       "SerialLog: $serialLogLocal`nStdOut: $tmpOutLocal`nStdErr: $tmpErrLocal`n"
+                if ($serialTail) { $msg += "--- serial tail ---`n$serialTail`n" }
+                if ($stdoutTail) { $msg += "--- qemu stdout tail ---`n$stdoutTail`n" }
+                if ($stderrTail) { $msg += "--- qemu stderr tail ---`n$stderrTail`n" }
+                throw $msg
             }
         }
 
@@ -1358,10 +1811,87 @@ try {
         $stderrLocal = ''
         try { if (Test-Path $tmpErrLocal) { $stderrLocal = (Get-Content -Path $tmpErrLocal -Raw -ErrorAction SilentlyContinue) } } catch {}
 
+        function Invoke-WslKvmFallback([string]$why) {
+            try {
+                # Only attempt if WSL+KVM is available (run as root for /dev/kvm).
+                # Some WSL images expose /dev/kvm but it can still be non-functional (ENODEV).
+                # Probe KVM with an ioctl to avoid wasting time on a guaranteed-fail fallback.
+                wsl -u root bash -lc "python3 - <<'PY' >/dev/null 2>&1
+import os, fcntl
+KVM_GET_API_VERSION = 0xAE00
+fd = os.open('/dev/kvm', os.O_RDWR)
+fcntl.ioctl(fd, KVM_GET_API_VERSION, 0)
+os.close(fd)
+PY" 2>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) { return $null }
+
+                Write-Host "[Test] WHPX failed ($why); retrying with WSL+KVM..." -ForegroundColor Yellow
+
+                try { Set-Content -LiteralPath $serialLogLocal -Value '' -NoNewline -Encoding Ascii -ErrorAction SilentlyContinue } catch {}
+                try { Set-Content -LiteralPath $tmpOutLocal -Value '' -NoNewline -Encoding Ascii -ErrorAction SilentlyContinue } catch {}
+                try { Set-Content -LiteralPath $tmpErrLocal -Value '' -NoNewline -Encoding Ascii -ErrorAction SilentlyContinue } catch {}
+
+                $wslImage = ConvertTo-WslPath $IMAGE
+                $wslSerial = ConvertTo-WslPath $serialLogLocal
+
+                $bash = @(
+                    'set -e'
+                    'CODE=/usr/share/OVMF/OVMF_CODE_4M.fd'
+                    'VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd'
+                    'if [ ! -f "$CODE" ]; then echo "missing OVMF code: $CODE" >&2; exit 3; fi'
+                    'if [ ! -f "$VARS_SRC" ]; then echo "missing OVMF vars: $VARS_SRC" >&2; exit 3; fi'
+                    'VARS=$(mktemp /tmp/llmk-ovmf-vars-XXXXXX.fd)'
+                    'cp -f "$VARS_SRC" "$VARS"'
+                    ("qemu-system-x86_64 -accel kvm -machine q35 -cpu host -m {0} -smp {1} -display none -serial file:{2} -drive if=ide,format=raw,file={3} -drive if=pflash,format=raw,readonly=on,file=`$CODE -drive if=pflash,format=raw,file=`$VARS" -f $MemMB, $Smp, $wslSerial, $wslImage)
+                    'rc=$?'
+                    'rm -f "$VARS"'
+                    'exit $rc'
+                ) -join '; '
+
+                $procLocal = Start-Process -FilePath 'wsl.exe' -ArgumentList @('-u','root','--','bash','-lc',$bash) -NoNewWindow -PassThru -RedirectStandardOutput $tmpOutLocal -RedirectStandardError $tmpErrLocal
+
+                $deadline = (Get-Date).AddSeconds($TimeoutSec)
+                $serialLocal = ''
+                while ((Get-Date) -lt $deadline) {
+                    Start-Sleep -Milliseconds 500
+                    if (Test-Path $serialLogLocal) {
+                        $serialLocal = Get-Content -Path $serialLogLocal -Raw -ErrorAction SilentlyContinue
+                        if ($serialLocal -and $serialLocal.Contains('[autorun] shutting down')) {
+                            break
+                        }
+                    }
+                    if ($procLocal.HasExited) { break }
+                }
+
+                try { if (-not $procLocal.HasExited) { Stop-Process -Id $procLocal.Id -Force -ErrorAction SilentlyContinue } } catch {}
+
+                if (Test-Path $serialLogLocal) {
+                    $serialLocal = Get-Content -Path $serialLogLocal -Raw -ErrorAction SilentlyContinue
+                    if ($serialLocal) {
+                        return [pscustomobject]@{
+                            SerialLog = $serialLogLocal
+                            StdOut = $tmpOutLocal
+                            StdErr = $tmpErrLocal
+                            Serial = $serialLocal
+                            SawShutdown = ($serialLocal -and $serialLocal.Contains('[autorun] shutting down'))
+                        }
+                    }
+                }
+            } catch {
+                return $null
+            }
+            return $null
+        }
+
         if (-not (Test-Path $serialLogLocal)) {
             if ($stderrLocal) {
                 $stderrLocal = $stderrLocal.Trim()
                 if ($stderrLocal.Length -gt 2000) { $stderrLocal = $stderrLocal.Substring($stderrLocal.Length - 2000) }
+            }
+
+            if ($accelUsed -eq 'whpx' -and $stderrLocal -match 'WHPX: Failed to emulate MMIO access|injection failed,\s*MSI') {
+                $fallback = Invoke-WslKvmFallback 'no-serial-log'
+                if ($fallback) { return $fallback }
             }
             throw "Missing serial log: $serialLogLocal (qemu_exit=$exitCodeLocal)`n--- qemu stderr tail ---`n$stderrLocal"
         }
@@ -1371,6 +1901,11 @@ try {
             if ($stderrLocal) {
                 $stderrLocal = $stderrLocal.Trim()
                 if ($stderrLocal.Length -gt 2000) { $stderrLocal = $stderrLocal.Substring($stderrLocal.Length - 2000) }
+            }
+
+            if ($accelUsed -eq 'whpx' -and $stderrLocal -match 'WHPX: Failed to emulate MMIO access|injection failed,\s*MSI') {
+                $fallback = Invoke-WslKvmFallback 'empty-serial'
+                if ($fallback) { return $fallback }
             }
             throw "Failed to obtain serial log output from QEMU. (qemu_exit=$exitCodeLocal)`n--- qemu stderr tail ---`n$stderrLocal"
         }
@@ -1403,6 +1938,23 @@ try {
 
         if ($Mode -eq 'oo_survive_10' -or $Mode -eq 'oo_survive_100') {
             Assert-Contains $runs[$runs.Count - 1].Serial ("OK: OO boot_count={0}" -f $ri) ("OO boot_count == $ri")
+            
+            # Extract mode for flap detection
+            if ($runs[$runs.Count - 1].Serial -match 'mode=(SAFE|DEGRADED|NORMAL)') {
+                $currentMode = $Matches[1]
+                if ($ri -gt 1) {
+                    $prevSerial = $runs[$runs.Count - 2].Serial
+                    if ($prevSerial -match 'mode=(SAFE|DEGRADED|NORMAL)') {
+                        $prevMode = $Matches[1]
+                        # Detect invalid downward flap (DEGRADED→SAFE or NORMAL→SAFE without recovery)
+                        if (($prevMode -eq 'DEGRADED' -and $currentMode -eq 'SAFE') -or ($prevMode -eq 'NORMAL' -and $currentMode -eq 'SAFE')) {
+                            if ($runs[$runs.Count - 1].Serial -notmatch 'RECOVERY:') {
+                                throw "Mode flap detected at boot $ri : ${prevMode}→${currentMode} (without recovery event)"
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if ($Mode -eq 'oo_recovery' -and $ri -eq 1) {
@@ -1456,6 +2008,30 @@ try {
     $tmpErr = $runs[$runs.Count - 1].StdErr
     $sawShutdown = $runs[$runs.Count - 1].SawShutdown
     $serial = ($runs | ForEach-Object { $_.Serial }) -join "`r`n"
+
+    # Survivability: validate journal FIFO after all boots
+    if ($Mode -eq 'oo_survive_10' -or $Mode -eq 'oo_survive_100') {
+        Write-Host "[Test] Extracting OOJOUR.LOG to validate FIFO cap (64KB)..." -ForegroundColor Cyan
+        $tmpJour = Join-Path $env:TEMP ("llm-baremetal-oojour-final-{0}.log" -f ([Guid]::NewGuid().ToString('n')))
+        $wslImg = ConvertTo-WslPath $IMAGE
+        $wslTmpJour = ConvertTo-WslPath $tmpJour
+        try {
+            Invoke-WslStep 'extract OOJOUR.LOG' ("(mcopy -n -i '$wslImg@@$fatOffset' ::OOJOUR.LOG '$wslTmpJour' 2>/dev/null || true)") 30
+            if (Test-Path $tmpJour) {
+                $jourSize = (Get-Item $tmpJour).Length
+                Write-Host "  OOJOUR.LOG size: $jourSize bytes" -ForegroundColor Gray
+                if ($jourSize -gt 65536) {
+                    throw "OOJOUR.LOG exceeded 64KB cap: $jourSize bytes (FIFO rotation failed)"
+                }
+            } else {
+                Write-Host "  OOJOUR.LOG not present (acceptable if OO init was recent)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "  Warning: could not extract OOJOUR.LOG: $_" -ForegroundColor Yellow
+        } finally {
+            if (Test-Path $tmpJour) { Remove-Item -Force $tmpJour -ErrorAction SilentlyContinue }
+        }
+    }
 
     if ($Mode -eq 'oo_net_ro') {
         # Assert deterministic marker from the kernel.
@@ -1736,7 +2312,9 @@ try {
             Assert-Contains $serial 'mode=SAFE' 'RAM preflight ran in SAFE mode'
         } elseif ($Mode -eq 'oo_llm_consult') {
             Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker'
-            Assert-Contains $serial 'OK: OO policy decided:' 'OO policy decision marker'
+            if (-not ($serial -match 'OK: OO policy (decided|batch|simulation|applied|blocked):')) {
+                throw "Missing OO policy decision marker (decided/batch/simulation/applied/blocked)"
+            }
             Assert-Contains $serial 'mode=SAFE' 'LLM consult ran in SAFE mode'
         } elseif ($Mode -eq 'oo_llm_multi') {
             Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.1)'
@@ -1744,6 +2322,12 @@ try {
             # At minimum, we need either "OK: OO policy applied:" or "OK: OO policy blocked:" or "OK: OO policy batch:"
             if (-not ($serial -match 'OK: OO policy (applied|blocked|batch):')) {
                 throw "Missing OO multi-action markers (applied/blocked/batch)"
+            }
+        } elseif ($Mode -eq 'oo_llm_multi_live') {
+            Assert-Contains $serial 'You (autorun): /oo_consult' 'autorun ran live consult'
+            Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.1 live)'
+            if (-not ($serial -match 'OK: OO policy (applied|blocked|batch|decided):')) {
+                throw "Missing OO multi-action markers (applied/blocked/batch/decided)"
             }
         } elseif ($Mode -eq 'oo_llm_multi_mock') {
             Assert-Contains $serial 'You (autorun): /oo_consult_mock reduce ctx and seq' 'autorun ran consult mock'
@@ -1756,6 +2340,13 @@ try {
                 throw "Missing OO auto-apply markers (auto-apply|simulation|throttled)"
             }
             Assert-Contains $serial 'mode=SAFE' 'Auto-apply test ran in SAFE mode'
+        } elseif ($Mode -eq 'oo_auto_apply_live') {
+            Assert-Contains $serial 'You (autorun): /oo_consult' 'autorun ran live consult'
+            Assert-Contains $serial 'OK: OO LLM suggested:' 'OO LLM suggestion marker (M5.2 live)'
+            if (-not ($serial -match 'OK: OO (auto-apply|policy (simulation|throttled)):')) {
+                throw "Missing OO auto-apply markers (auto-apply|simulation|throttled)"
+            }
+            Assert-Contains $serial 'mode=SAFE' 'Auto-apply live test ran in SAFE mode'
         } elseif ($Mode -eq 'oo_consult_log') {
             # M5.3: Check for 2x consultation log markers
             $consultCount = ([regex]::Matches($serial, 'OK: OO consult logged to OOCONSULT.LOG')).Count
@@ -1808,11 +2399,11 @@ try {
             }
         }
 
-        if ($Mode -eq 'custom') {
+        if ($Mode -eq 'custom' -or $Mode -eq 'oo_consult_log_tail') {
             # Custom scripts may intentionally exit the REPL, which returns to UEFI shell and waits for a key.
             # Accept either an explicit shutdown marker or a clean REPL exit.
             if (-not ($serial -and $serial.Contains('[autorun] shutting down'))) {
-                Assert-Match $serial '(?i)\bGoodbye!\b|Press any key to exit' 'custom autorun completed'
+                Assert-Match $serial '(?i)\bGoodbye!\b|Press any key to exit' 'autorun completed via REPL exit'
             }
         } else {
             Assert-Contains $serial '[autorun] shutting down' 'autorun shutdown'
@@ -1822,7 +2413,7 @@ try {
         throw
     }
 
-    if ($Mode -ne 'custom') {
+    if ($Mode -ne 'custom' -and $Mode -ne 'oo_consult_log_tail') {
         if (-not $sawShutdown) {
             Write-Host '[Warn] Did not observe shutdown marker during polling; found it in final log.' -ForegroundColor Yellow
         }

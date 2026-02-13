@@ -2,7 +2,7 @@
  * DjibLAS - Optimized Matrix Multiplication for Bare Metal
  * High-performance SGEMM kernels for x86 AVX2/AVX512 and ARM NEON
  * 
- * Created by Djiby Diop - Made in Senegal 🇸🇳
+ * Created by Djiby Diop
  * December 2025
  */
 

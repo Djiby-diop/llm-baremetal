@@ -34,7 +34,7 @@
 #include "calibrion-engine/core/calibrion.h"
 #include "compatibilion-engine/core/compatibilion.h"
 
-// DjibMark - Omnipresent execution tracing (Made in Senegal 🇸🇳)
+// DjibMark - Omnipresent execution tracing
 #include "djibmark.h"
 #include "interface.h"      // Simple loading overlay (off by default)
 
@@ -8707,7 +8707,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     compatibilion_probe_cpu(&g_compatibilion);
     compatibilion_set_platform(&g_compatibilion, COMPAT_PLAT_UEFI | COMPAT_PLAT_FAT32);
 
-    // Initialize DjibMark tracing system (Made in Senegal 🇸🇳)
+    // Initialize DjibMark tracing system
     djibmark_init();
     DJIBMARK_BOOT();
 

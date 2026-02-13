@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 // Orchestrion: workflow runner engine (sequences, macros, pipelines)
-// Made in Senegal 🇸🇳
+
 
 typedef enum {
     ORCHESTRION_MODE_OFF     = 0,

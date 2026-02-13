@@ -7,7 +7,7 @@
  * - CPU feature detection (AVX2/AVX-512)
  * - Loop unrolling
  * 
- * Made in Senegal by Djiby Diop - December 2025
+ * By Djiby Diop - December 2025
  */
 
 #ifndef MATMUL_OPTIMIZED_H

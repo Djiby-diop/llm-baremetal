@@ -1,5 +1,5 @@
 /* DjibMark - Omnipresent execution tracing system
- * Made in Senegal 🇸🇳 by Djiby Diop
+ * By Djiby Diop
  * 
  * A lightweight, zero-overhead tracing system that marks every critical
  * execution path with a unique signature. Useful for performance analysis,

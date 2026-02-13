@@ -1,5 +1,5 @@
 // safe_avx2.h - AVX2 with automatic SSE2 fallback
-// Made in Senegal by Djiby Diop - December 20, 2025
+// By Djiby Diop - December 20, 2025
 
 #ifndef SAFE_AVX2_H
 #define SAFE_AVX2_H

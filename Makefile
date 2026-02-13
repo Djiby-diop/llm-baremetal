@@ -1,5 +1,5 @@
 # Makefile for Llama2 Bare-Metal UEFI (stable REPL build)
-# Made in Senegal 🇸🇳
+
 
 ARCH = x86_64
 CC = gcc

@@ -2,7 +2,7 @@
  * DjibLAS - Implementation
  * Optimized matmul kernels for bare-metal UEFI
  * 
- * Created by Djiby Diop - Made in Senegal 🇸🇳
+ * Created by Djiby Diop
  * December 2025
  */
 

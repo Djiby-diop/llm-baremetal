@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 // Calibrion: auto-tuning sampling engine (adaptive temp/top_k/top_p)
-// Made in Senegal 🇸🇳
+
 
 typedef enum {
     CALIBRION_MODE_OFF     = 0,

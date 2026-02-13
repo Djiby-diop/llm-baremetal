@@ -2,7 +2,7 @@
 
 UEFI x86_64 bare-metal LLM chat REPL (GNU-EFI). Boots from USB.
 
-Made in Senegal 🇸🇳 by Djiby Diop
+By Djiby Diop
 
 ## Build (Windows + WSL)
 

@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 // Compatibilion: platform detection + capability reporting engine
-// Made in Senegal 🇸🇳
+
 
 typedef enum {
     COMPATIBILION_MODE_OFF = 0,
