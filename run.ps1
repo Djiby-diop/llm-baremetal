@@ -1,6 +1,8 @@
 param(
   [switch]$NewWindow,
   [switch]$Gui,
+  # If set, run host preflight before launching QEMU.
+  [switch]$Preflight,
   # If set, returns QEMU's raw exit code instead of normalizing.
   [switch]$PassThroughExitCode,
 
@@ -34,6 +36,19 @@ param(
 
 # Run QEMU (single entrypoint)
 $ErrorActionPreference = 'Stop'
+
+if ($Preflight) {
+  $preflightScript = Join-Path $PSScriptRoot 'preflight-host.ps1'
+  if (-not (Test-Path $preflightScript)) {
+    throw "Preflight script not found: $preflightScript"
+  }
+
+  Write-Host "[Run] Preflight requested" -ForegroundColor Cyan
+  & $preflightScript
+  if ($LASTEXITCODE -ne 0) {
+    throw "Preflight failed with exit code $LASTEXITCODE"
+  }
+}
 
 # Best-effort: when using WHPX (or auto which tries WHPX first), request AVX2/FMA exposure.
 # IMPORTANT: only do this when the caller didn't explicitly choose ForceAvx2, and add a retry

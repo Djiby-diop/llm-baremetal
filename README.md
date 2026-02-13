@@ -105,66 +105,23 @@ Useful REPL commands:
 ## Run (QEMU)
 
 ```powershell
-./run.ps1 -Gui
+./run.ps1 -Preflight -Gui
 ```
 
-### QEMU autorun tests
+### M6 workflow (release-ready)
 
-Tip: you can also run autorun tests from the repo root using the wrapper `./test-qemu-autorun.ps1 ...` (so you don’t need `cd .\\llm-baremetal`, which can be noisy if you’re already in that folder).
-
-OO M1 smoke (persistence: writes `OOSTATE.BIN` + appends `OOJOUR.LOG`, validates across 2 boots):
+Use this sequence as the default operator path:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\test-qemu-autorun.ps1 -Mode oo_smoke -Accel tcg -TimeoutSec 600 -SkipInspect
+./preflight-host.ps1
+./build.ps1 -ModelBin stories110M.bin
+./run.ps1 -Preflight -Gui
 ```
 
-OO M2 recovery (corrupts `OOSTATE.BIN` between boots, asserts SAFE rollback + `event=recover`):
+For headless runs:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_recovery -Accel tcg -TimeoutSec 600 -SkipInspect
-```
-
-OO M3 homeostasis proof (clamps effective context length in SAFE/DEGRADED, checks for serial marker):
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_ctx_clamp -Accel tcg -TimeoutSec 600 -SkipInspect -SkipBuild
-```
-
-OO M3 homeostasis proof (reach DEGRADED then clamp with DEGRADED cap; 3 boots without snapshot):
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_ctx_clamp_degraded -Accel tcg -TimeoutSec 900 -SkipInspect -SkipBuild
-```
-
-OO M3 policy proof (invalid model in repl.cfg triggers fallback + OO marker):
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_model_fallback -Accel tcg -TimeoutSec 600 -SkipInspect -SkipBuild
-```
-
-OO M3 policy proof (RAM budget preflight: low-RAM SAFE zone minimum marker; defaults to `-MemMB 640` unless overridden):
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_ram_preflight -Accel tcg -TimeoutSec 600 -SkipInspect -SkipBuild
-```
-
-OO M3 policy proof (RAM preflight reduces seq_len under tight RAM; uses `oo_min_total_mb=0` and defaults to `-MemMB 620`):
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_ram_preflight_seq -Accel tcg -TimeoutSec 600 -SkipInspect -SkipBuild
-```
-OO M5 LLM advisor proof (LLM suggests system adaptations, policy engine decides; runs in SAFE mode with 640MB RAM):
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\\test-qemu-autorun.ps1 -Mode oo_llm_consult -Accel tcg -TimeoutSec 600 -SkipInspect -SkipBuild
-```
-Note (VS Code → PowerShell): if VS Code formats a path into a Markdown-ish link like `.[test-qemu-autorun.ps1](http://...)`, don’t paste that into the terminal. Use a normal path like `.\test-qemu-autorun.ps1 ...`.
-
-Optional (bootstrap pinned tool wrappers before a build/test run):
-
-```powershell
-./test-qemu-autorun.ps1 -BootstrapToolchains
-./bench-matrix.ps1 -BootstrapToolchains
+./run.ps1 -Preflight
 ```
 
 ## Notes
