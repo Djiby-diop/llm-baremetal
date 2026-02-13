@@ -144,6 +144,20 @@ Release checklist:
 - Build produces a fresh boot image.
 - QEMU starts from `run.ps1 -Preflight` (GUI or headless).
 
+### M6.2 release package check
+
+Validate release artifacts and SHA256 integrity:
+
+```powershell
+./m6-package-check.ps1
+```
+
+Rebuild artifacts before checking:
+
+```powershell
+./m6-package-check.ps1 -Rebuild
+```
+
 ## Notes
 
 - Model weights are intentionally not tracked in git; use GitHub Releases or your own files.
