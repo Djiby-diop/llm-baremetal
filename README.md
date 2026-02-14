@@ -221,6 +221,13 @@ Outputs:
 - quarantine state: `artifacts/m10/quarantine-state.json`
 - optional quarantine action on config: `oo_auto_apply=0` (+ `oo_conf_gate=1`)
 
+M10.1 adaptive thresholds are enabled by default:
+
+- model class inference from runtime log (`tiny`, `medium`, `large`)
+- RAM tier inference (`low`, `mid`, `high`) from runtime memory / Zone B
+- dynamic effective thresholds for harmful ratio, failure streak, and min samples
+- disable if needed with `-NoAdaptiveThresholds`
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`

@@ -62,6 +62,14 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - applique auto-quarantine optionnelle (`oo_auto_apply=0`) si seuils dépassés,
   - écrit l'état de quarantaine dans `artifacts/m10/quarantine-state.json`.
 
+## M10.1 - Seuils adaptatifs qualité
+
+- Ajuste automatiquement les seuils M10 selon:
+  - la classe de modèle détectée (`tiny`, `medium`, `large`),
+  - le tier RAM (`low`, `mid`, `high`).
+- Persiste les seuils effectifs appliqués dans `artifacts/m10/quarantine-state.json`.
+- Permet désactivation explicite via `-NoAdaptiveThresholds`.
+
 ## Résultat global
 
 - Pipeline plus sûr, plus observable, et mieux automatisé.

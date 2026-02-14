@@ -15,7 +15,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M9 baseline implemented: `m9-guardrails.ps1` parses M8 runtime logs and enforces startup marker + latency budgets (`model_select_ms`, `model_prepare_ms`) with optional OO marker requirements.
 - ✅ M9.1 baseline implemented: M9 now persists run history in `artifacts/m9/history.jsonl` and performs drift checks versus recent runs (configurable window and drift thresholds).
 - ✅ M10 baseline implemented: `m10-quality-guardrails.ps1` enforces harmful-ratio + failure-streak thresholds and supports auto-quarantine (`oo_auto_apply=0`) with persisted quarantine state.
-- ▶️ Next coding target: M10.1 adaptive thresholds (context-aware dynamic budgets by model class and RAM tier).
+- ✅ M10.1 baseline implemented: M10 now adapts quality thresholds by detected model class (`tiny|medium|large`) and RAM tier (`low|mid|high`) with persisted effective thresholds in quarantine state.
+- ▶️ Next coding target: M11 self-healing quarantine release (auto-unquarantine after stable streak + canary mode).
 
 ## Track A — llm-baremetal core
 
