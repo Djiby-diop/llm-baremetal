@@ -64,7 +64,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Set-Location -LiteralPath $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+Set-Location -LiteralPath $repoRoot
 
 function Write-Step([string]$msg) {
   Write-Host "[M8] $msg" -ForegroundColor Cyan
@@ -87,9 +88,9 @@ function Assert-Pattern([string]$text, [string]$pattern, [string]$label) {
   return $false
 }
 
-$preflightScript = Join-Path $PSScriptRoot 'preflight-host.ps1'
-$buildScript = Join-Path $PSScriptRoot 'build.ps1'
-$runScript = Join-Path $PSScriptRoot 'run.ps1'
+$preflightScript = Join-Path $repoRoot 'preflight-host.ps1'
+$buildScript = Join-Path $repoRoot 'build.ps1'
+$runScript = Join-Path $repoRoot 'run.ps1'
 $m9Script = Join-Path $PSScriptRoot 'm9-guardrails.ps1'
 $m10Script = Join-Path $PSScriptRoot 'm10-quality-guardrails.ps1'
 $m11Script = Join-Path $PSScriptRoot 'm11-self-heal.ps1'
@@ -99,12 +100,12 @@ $m14Script = Join-Path $PSScriptRoot 'm14-explainability-coverage.ps1'
 $m141ExtractScript = Join-Path $PSScriptRoot 'm14-extract-oojournal.ps1'
 $m15Script = Join-Path $PSScriptRoot 'm15-reasonid-drift.ps1'
 $m151Script = Join-Path $PSScriptRoot 'm15-slo-dashboard.ps1'
-$cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
-$autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
-$tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
+$cfgPath = Join-Path $repoRoot 'repl.cfg'
+$autorunPath = Join-Path $repoRoot 'llmk-autorun.txt'
+$tmpDir = Join-Path $repoRoot 'artifacts\m8'
 $logPath = Join-Path $tmpDir 'm8-qemu-serial.log'
 $errLogPath = Join-Path $tmpDir 'm8-qemu-serial.err.log'
-$m14JournalPath = Join-Path $PSScriptRoot 'artifacts/m14/OOJOUR.LOG'
+$m14JournalPath = Join-Path $repoRoot 'artifacts/m14/OOJOUR.LOG'
 
 New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
@@ -128,7 +129,7 @@ if (-not $SkipBuild) {
   }
 }
 
-$sourceText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'llama2_efi_final.c') -Raw
+$sourceText = Get-Content -LiteralPath (Join-Path $repoRoot 'llama2_efi_final.c') -Raw
 Write-Step 'Static marker checks for A1/A3/B1/B2/B3'
 
 $staticChecks = @(
@@ -225,7 +226,7 @@ try {
     '-MemMB', "$MemMB"
   )
 
-  $proc = Start-Process -FilePath 'pwsh' -ArgumentList $argList -WorkingDirectory $PSScriptRoot `
+  $proc = Start-Process -FilePath 'pwsh' -ArgumentList $argList -WorkingDirectory $repoRoot `
     -RedirectStandardOutput $logPath -RedirectStandardError $errLogPath -PassThru
 
   $finished = $proc.WaitForExit($TimeoutSec * 1000)
@@ -309,9 +310,9 @@ try {
 
   Write-Step 'Running M11 self-healing quarantine release'
   & $m11Script -LogPath $logPath `
-    -QuarantineStatePath (Join-Path $PSScriptRoot 'artifacts/m10/quarantine-state.json') `
-    -M9HistoryPath (Join-Path $PSScriptRoot 'artifacts/m9/history.jsonl') `
-    -M10HistoryPath (Join-Path $PSScriptRoot 'artifacts/m10/history.jsonl') `
+    -QuarantineStatePath (Join-Path $repoRoot 'artifacts/m10/quarantine-state.json') `
+    -M9HistoryPath (Join-Path $repoRoot 'artifacts/m9/history.jsonl') `
+    -M10HistoryPath (Join-Path $repoRoot 'artifacts/m10/history.jsonl') `
     -ConfigPath $cfgPath `
     -StableStreakNeeded $M11StableStreakNeeded `
     -CanaryBoots $M11CanaryBoots `
@@ -330,8 +331,8 @@ try {
 
   Write-Step 'Running M12 policy curriculum'
   & $m12Script -LogPath $logPath `
-    -M9HistoryPath (Join-Path $PSScriptRoot 'artifacts/m9/history.jsonl') `
-    -M10HistoryPath (Join-Path $PSScriptRoot 'artifacts/m10/history.jsonl') `
+    -M9HistoryPath (Join-Path $repoRoot 'artifacts/m9/history.jsonl') `
+    -M10HistoryPath (Join-Path $repoRoot 'artifacts/m10/history.jsonl') `
     -ConfigPath $cfgPath `
     -EarlyThreshold $M12EarlyThreshold `
     -WarmThreshold $M12WarmThreshold `
@@ -351,9 +352,9 @@ try {
 
   Write-Step 'Running M13 explainability pack'
   & $m13Script -LogPath $logPath `
-    -M10StatePath (Join-Path $PSScriptRoot 'artifacts/m10/quarantine-state.json') `
-    -M11StatePath (Join-Path $PSScriptRoot 'artifacts/m11/release-state.json') `
-    -M12StatePath (Join-Path $PSScriptRoot 'artifacts/m12/curriculum-state.json')
+    -M10StatePath (Join-Path $repoRoot 'artifacts/m10/quarantine-state.json') `
+    -M11StatePath (Join-Path $repoRoot 'artifacts/m11/release-state.json') `
+    -M12StatePath (Join-Path $repoRoot 'artifacts/m12/curriculum-state.json')
   if ($LASTEXITCODE -ne 0) {
     throw "M13 explainability failed with exit code $LASTEXITCODE"
   }
@@ -407,7 +408,7 @@ try {
 
   Write-Step 'Running M15 reason_id drift guardrails'
   & $m15Script -LogPath $logPath `
-    -HistoryPath (Join-Path $PSScriptRoot 'artifacts/m13/history.jsonl') `
+    -HistoryPath (Join-Path $repoRoot 'artifacts/m13/history.jsonl') `
     -BaselineWindow $M15BaselineWindow `
     -MinSamplesForDrift $M15MinSamplesForDrift `
     -MaxShareDriftPct $M15MaxShareDriftPct `
@@ -422,8 +423,8 @@ try {
   }
 
   Write-Step 'Running M15.1 reason_id SLO dashboard export'
-  & $m151Script -DriftHistoryPath (Join-Path $PSScriptRoot 'artifacts/m15/history.jsonl') `
-    -ExplainabilityHistoryPath (Join-Path $PSScriptRoot 'artifacts/m13/history.jsonl') `
+  & $m151Script -DriftHistoryPath (Join-Path $repoRoot 'artifacts/m15/history.jsonl') `
+    -ExplainabilityHistoryPath (Join-Path $repoRoot 'artifacts/m13/history.jsonl') `
     -WindowRuns $M151WindowRuns `
     -WeeklyWindowDays $M151WeeklyWindowDays `
     -TopReasonIds $M151TopReasonIds

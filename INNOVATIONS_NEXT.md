@@ -26,7 +26,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M14.1 baseline implemented: `m14-extract-oojournal.ps1` exports `OOJOUR.LOG` from runtime image to artifacts and M8/CI now supports strict parity gating (`-M14RequireJournalParity`).
 - ✅ M15 baseline implemented: `m15-reasonid-drift.ps1` now monitors reason_id distribution drift against recent explainability history and raises anomaly alerts/gates on breach.
 - ✅ M15.1 baseline implemented: `m15-slo-dashboard.ps1` now exports compact weekly reason_id trend snapshots and SLO metrics for regression review (`dashboard-state.json`, `dashboard.md`, history).
-- ▶️ Next coding target: M16 candidate definition (post-M15.1 hardening track).
+- ✅ M16 baseline implemented: `reliability.ps1` unified public interface hides granular milestone scripts (M8-M15.1) in `.ops/milestones/` for cleaner repo surface and simpler operator workflow.
+- ▶️ Next coding target: M16.1 candidate definition (extended observability/adaptation capabilities).
 
 ## Track A — llm-baremetal core
 

@@ -172,188 +172,35 @@ Optional: include raw `.img` in the upload bundle:
 ./m6-release-prep.ps1 -Rebuild -IncludeRawImage
 ```
 
-### M8 reliability pass (A1/A3/B1/B2/B3)
+### Reliability checks (M16 unified interface)
 
 Static checks only (fast):
 
 ```powershell
-./m8-reliability.ps1 -SkipPreflight -SkipBuild
+./reliability.ps1 -SkipPreflight -SkipBuild
 ```
 
 End-to-end runtime checks (build + QEMU autorun scenario):
 
 ```powershell
-./m8-reliability.ps1 -RunQemu -Accel tcg -TimeoutSec 150
+./reliability.ps1 -RunQemu -Accel tcg -TimeoutSec 150
 ```
 
-Runtime checks with explicit startup latency budgets:
+Runtime checks with explicit guardrail budgets:
 
 ```powershell
-./m8-reliability.ps1 -RunQemu -Accel tcg -TimeoutSec 150 -MaxModelSelectMs 5000 -MaxModelPrepareMs 30000
+./reliability.ps1 -RunQemu -Accel tcg -TimeoutSec 150 -MaxModelSelectMs 5000 -MaxModelPrepareMs 30000
 ```
 
 The runtime log is written to `artifacts/m8/m8-qemu-serial.log`.
 
-### M9 regression guardrails
+**Advanced usage**: For granular milestone script invocation (M9, M10, M11, M12, M13, M14, M15), see `.ops/milestones/` directory. The `reliability.ps1` wrapper orchestrates the full pipeline automatically.
 
-Parse an M8 runtime log and enforce marker/latency budgets:
-
-```powershell
-./m9-guardrails.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -MaxModelSelectMs 2000 -MaxModelPrepareMs 12000 -RequireOoMarkers
-```
-
-M9.1 trend tracking is enabled by default:
-
-- appends run history to `artifacts/m9/history.jsonl`
-- checks drift versus recent runs (`-DriftWindow`, `-MaxSelectDriftPct`, `-MaxPrepareDriftPct`)
-- can be disabled with `-NoDriftCheck` and/or `-NoHistoryWrite`
-
-### M10 policy quality guardrails
-
-Evaluate OO adaptation quality and trigger auto-quarantine when harmful behavior is detected:
-
-```powershell
-./m10-quality-guardrails.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -MaxHarmfulRatioPct 40 -MaxConsecutiveFailures 2 -MinAutoApplySamples 2 -ApplyQuarantine
-```
-
-Outputs:
-
-- quarantine state: `artifacts/m10/quarantine-state.json`
-- M10 history: `artifacts/m10/history.jsonl`
-- optional quarantine action on config: `oo_auto_apply=0` (+ `oo_conf_gate=1`)
-
-M10.1 adaptive thresholds are enabled by default:
-
-- model class inference from runtime log (`tiny`, `medium`, `large`)
-- RAM tier inference (`low`, `mid`, `high`) from runtime memory / Zone B
-- dynamic effective thresholds for harmful ratio, failure streak, and min samples
-- disable if needed with `-NoAdaptiveThresholds`
-
-### M11 self-healing quarantine release
-
-Evaluate quarantine release readiness and drive canary recovery:
-
-```powershell
-./m11-self-heal.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -ApplyRelease
-```
-
-Behavior:
-
-- requires configurable stable release streak (`-StableStreakNeeded`)
-- starts canary mode (`-CanaryBoots`) with stricter confidence gate (`-CanaryConfThreshold`)
-- auto-rolls back to quarantine if canary quality degrades
-- writes state/history to `artifacts/m11/release-state.json` and `artifacts/m11/release-history.jsonl`
-
-M11.1 coupling (enabled by default):
-
-- release/canary progression requires a stable M9 window (`artifacts/m9/history.jsonl`, `-M9StableWindow`)
-- and a stable M10 quality window (`artifacts/m10/history.jsonl`, `-M10StableWindow`)
-- both windows must be green in addition to current-run quality checks
-
-### M12 policy curriculum (phase + workload)
-
-Apply staged confidence thresholds from boot phase and workload class:
-
-```powershell
-./m12-policy-curriculum.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -ApplyConfig
-```
-
-Behavior:
-
-- infers boot phase from M9 run maturity (`early|warm|steady`)
-- infers workload class from consult intents (`latency_optimization|context_expansion|mixed|unknown`)
-- computes effective `oo_conf_threshold` from base phase threshold + workload adjustment
-- writes state/history to `artifacts/m12/curriculum-state.json` and `artifacts/m12/history.jsonl`
-
-M12.1 outcome feedback (enabled by default):
-
-- reads recent M10 outcomes from `artifacts/m10/history.jsonl`
-- computes helpful/harmful window score (`-OutcomeAdaptWindow`, `-OutcomeAdaptStep`)
-- auto-tunes phase thresholds and active workload cell before final threshold computation
-- can be disabled with `-NoOutcomeAdaptation`
-
-### M13 explainability pack (reason codes + provenance)
-
-Generate explainability artifacts for OO policy decisions:
-
-```powershell
-./m13-explainability.ps1 -LogPath artifacts/m8/m8-qemu-serial.log
-```
-
-Behavior:
-
-- extracts per-run auto-apply events (`success`/`failed`) with reason codes
-- aggregates reason-code context from M10/M11/M12 state outputs
-- persists threshold provenance across guardrails/curriculum layers
-- writes state/history to `artifacts/m13/explainability-state.json` and `artifacts/m13/history.jsonl`
-
-M13.1 native reason IDs:
-
-- runtime OO core now emits explicit `reason_id=...` tokens in policy/auto-apply markers
-- `m13-explainability.ps1` consumes these native IDs as primary `reason_code` values (fallback kept for older logs)
-
-### M14 explainability coverage (reason_id + parity)
-
-Check runtime marker coverage and optional journal parity:
-
-```powershell
-./m14-explainability-coverage.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -FailOnCoverageGap
-```
-
-Behavior:
-
-- verifies `reason_id` coverage for `OO confidence`, `OO plan`, and `OO auto-apply` markers
-- optionally checks parity against `OOJOUR.LOG` when available (`-RequireJournalParity`)
-- writes state/history to `artifacts/m14/coverage-state.json` and `artifacts/m14/history.jsonl`
-
-### M14.1 runtime journal extraction pipeline
-
-Extract `OOJOUR.LOG` from the runtime image for parity checks:
-
-```powershell
-./m14-extract-oojournal.ps1
-```
-
-Behavior:
-
-- extracts `OOJOUR.LOG` from the latest `llm-baremetal-boot*.img` using WSL `mtools`
-- persists extraction state/history in `artifacts/m14/extract-state.json` and `artifacts/m14/extract-history.jsonl`
-- M8 runtime supports strict mode with `-M14RequireJournalParity` (fails if extract/parity fails)
-
-### M15 reason_id drift guardrails
-
-Detect drift and anomalies in reason_id distribution:
-
-```powershell
-./m15-reasonid-drift.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -FailOnDrift
-```
-
-Behavior:
-
-- compares current reason_id distribution to recent M13 history window
-- detects strong share drift and anomaly signals (new/unknown-heavy reason IDs)
-- writes state/history to `artifacts/m15/drift-state.json` and `artifacts/m15/history.jsonl`
-
-### M15.1 reason_id SLO dashboard export
-
-Generate compact weekly trend snapshots for regression review:
-
-```powershell
-./m15-slo-dashboard.ps1
-```
-
-Behavior:
-
-- summarizes recent M15 drift SLO metrics (pass rate, unknown share)
-- computes week-over-week top `reason_id` deltas from M13 explainability history
-- exports compact snapshots for reporting/review
-- writes artifacts to `artifacts/m15/dashboard-state.json`, `artifacts/m15/dashboard.md`, and `artifacts/m15/dashboard-history.jsonl`
-
-### M8.1 CI workflow
+### CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
 
-- On push/PR: runs M8 static pass (`m8-reliability.ps1 -SkipPreflight -SkipBuild`) on `windows-latest`.
+- On push/PR: runs static reliability pass (`reliability.ps1 -SkipPreflight -SkipBuild`) on `windows-latest`.
 - Manual dispatch: optional runtime pass on `self-hosted` Windows runner with QEMU/WSL.
 
 Runtime dispatch inputs:
@@ -363,7 +210,7 @@ Runtime dispatch inputs:
 
 ### Synthese des ameliorations
 
-Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M15.1).
+Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M16).
 
 ## Notes
 

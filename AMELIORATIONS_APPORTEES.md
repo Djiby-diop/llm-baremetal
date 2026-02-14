@@ -1,4 +1,4 @@
-# Ameliorations apportees (M6 -> M15.1)
+# Ameliorations apportees (M6 -> M16)
 
 Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant la phase d'industrialisation.
 
@@ -163,8 +163,21 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - `artifacts/m15/dashboard-history.jsonl`.
 - Intégration dans `m8-reliability.ps1` après M15 et publication CI des artefacts dashboard.
 
+## M16 - Interface publique unifiée pour les guardrails
+
+- Nouveau script public `reliability.ps1`:
+  - point d'entrée unique pour tous les checks de fiabilité (statique + runtime),
+  - délègue à l'orchestrateur interne (M8-M15.1) masqué dans `.ops/milestones/`,
+  - réduit la surface visible du repo en cachant la granularité milestone interne.
+- Refactor des scripts M8-M15.1:
+  - déplacés dans `.ops/milestones/`,
+  - chemins corrigés pour fonctionner depuis le sous-dossier,
+  - workflow CI mis à jour pour utiliser `reliability.ps1`.
+- Résultat: repo plus discret, interface opérateur simplifiée, maintenance pipeline conservée.
+
 ## Résultat global
 
 - Pipeline plus sûr, plus observable, et mieux automatisé.
 - Détection plus rapide des régressions fonctionnelles et de performance.
 - Mécanismes OO plus robustes face aux comportements dégradés.
+- Interface publique simplifiée (M16) avec complexité interne masquée.
