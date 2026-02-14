@@ -272,6 +272,21 @@ M12.1 outcome feedback (enabled by default):
 - auto-tunes phase thresholds and active workload cell before final threshold computation
 - can be disabled with `-NoOutcomeAdaptation`
 
+### M13 explainability pack (reason codes + provenance)
+
+Generate explainability artifacts for OO policy decisions:
+
+```powershell
+./m13-explainability.ps1 -LogPath artifacts/m8/m8-qemu-serial.log
+```
+
+Behavior:
+
+- extracts per-run auto-apply events (`success`/`failed`) with reason codes
+- aggregates reason-code context from M10/M11/M12 state outputs
+- persists threshold provenance across guardrails/curriculum layers
+- writes state/history to `artifacts/m13/explainability-state.json` and `artifacts/m13/history.jsonl`
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
@@ -286,7 +301,7 @@ Runtime dispatch inputs:
 
 ### Synthese des ameliorations
 
-Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M12).
+Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M13).
 
 ## Notes
 

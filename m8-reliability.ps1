@@ -77,6 +77,7 @@ $m9Script = Join-Path $PSScriptRoot 'm9-guardrails.ps1'
 $m10Script = Join-Path $PSScriptRoot 'm10-quality-guardrails.ps1'
 $m11Script = Join-Path $PSScriptRoot 'm11-self-heal.ps1'
 $m12Script = Join-Path $PSScriptRoot 'm12-policy-curriculum.ps1'
+$m13Script = Join-Path $PSScriptRoot 'm13-explainability.ps1'
 $cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
 $autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
@@ -320,6 +321,19 @@ try {
     -ApplyConfig
   if ($LASTEXITCODE -ne 0) {
     throw "M12 curriculum failed with exit code $LASTEXITCODE"
+  }
+
+  if (-not (Test-Path -LiteralPath $m13Script)) {
+    throw "M13 script not found: $m13Script"
+  }
+
+  Write-Step 'Running M13 explainability pack'
+  & $m13Script -LogPath $logPath `
+    -M10StatePath (Join-Path $PSScriptRoot 'artifacts/m10/quarantine-state.json') `
+    -M11StatePath (Join-Path $PSScriptRoot 'artifacts/m11/release-state.json') `
+    -M12StatePath (Join-Path $PSScriptRoot 'artifacts/m12/curriculum-state.json')
+  if ($LASTEXITCODE -ne 0) {
+    throw "M13 explainability failed with exit code $LASTEXITCODE"
   }
 
   Write-Ok "M8 runtime reliability pass complete (log: $logPath)"

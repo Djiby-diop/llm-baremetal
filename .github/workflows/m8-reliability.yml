@@ -121,3 +121,19 @@ jobs:
           name: m12-curriculum-history
           path: artifacts/m12/history.jsonl
           if-no-files-found: warn
+
+      - name: Upload M13 explainability state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m13-explainability-state
+          path: artifacts/m13/explainability-state.json
+          if-no-files-found: warn
+
+      - name: Upload M13 explainability history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m13-explainability-history
+          path: artifacts/m13/history.jsonl
+          if-no-files-found: warn

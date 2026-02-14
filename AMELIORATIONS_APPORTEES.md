@@ -1,4 +1,4 @@
-# Ameliorations apportees (M6 -> M12.1)
+# Ameliorations apportees (M6 -> M13)
 
 Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant la phase d'industrialisation.
 
@@ -106,6 +106,16 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - seuils de phase (`early/warm/steady`),
   - cellule workload active (`latency_optimization|context_expansion|mixed|unknown`).
 - Les métadonnées d'adaptation (fenêtre, score, direction, delta) sont persistées dans l'état/historique M12.
+
+## M13 - Pack d'explicabilité policy
+
+- Nouveau script `m13-explainability.ps1`:
+  - extrait les événements auto-apply (`success`/`failed`) et leur reason code,
+  - agrège des reason codes de synthèse multi-couches (M10/M11/M12),
+  - persiste la provenance des seuils effectifs (qualité, self-heal, curriculum).
+- Artefacts produits:
+  - `artifacts/m13/explainability-state.json`,
+  - `artifacts/m13/history.jsonl`.
 
 ## Résultat global
 
