@@ -172,6 +172,22 @@ Optional: include raw `.img` in the upload bundle:
 ./m6-release-prep.ps1 -Rebuild -IncludeRawImage
 ```
 
+### M8 reliability pass (A1/A3/B1/B2/B3)
+
+Static checks only (fast):
+
+```powershell
+./m8-reliability.ps1 -SkipPreflight -SkipBuild
+```
+
+End-to-end runtime checks (build + QEMU autorun scenario):
+
+```powershell
+./m8-reliability.ps1 -RunQemu -Accel tcg -TimeoutSec 150
+```
+
+The runtime log is written to `artifacts/m8/m8-qemu-serial.log`.
+
 ## Notes
 
 - Model weights are intentionally not tracked in git; use GitHub Releases or your own files.

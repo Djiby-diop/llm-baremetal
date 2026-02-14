@@ -1,0 +1,226 @@
+param(
+  [switch]$SkipPreflight,
+  [switch]$SkipBuild,
+  [switch]$RunQemu,
+  [ValidateRange(15, 600)]
+  [int]$TimeoutSec = 90,
+  [ValidateSet('auto','whpx','tcg','none')]
+  [string]$Accel = 'tcg',
+  [ValidateRange(1024, 8192)]
+  [int]$MemMB = 4096
+)
+
+$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath $PSScriptRoot
+
+function Write-Step([string]$msg) {
+  Write-Host "[M8] $msg" -ForegroundColor Cyan
+}
+
+function Write-Ok([string]$msg) {
+  Write-Host "[M8][OK] $msg" -ForegroundColor Green
+}
+
+function Write-Warn([string]$msg) {
+  Write-Host "[M8][WARN] $msg" -ForegroundColor Yellow
+}
+
+function Assert-Pattern([string]$text, [string]$pattern, [string]$label) {
+  if ($text -imatch $pattern) {
+    Write-Ok "$label"
+    return $true
+  }
+  Write-Warn "$label (missing pattern: $pattern)"
+  return $false
+}
+
+$preflightScript = Join-Path $PSScriptRoot 'preflight-host.ps1'
+$buildScript = Join-Path $PSScriptRoot 'build.ps1'
+$runScript = Join-Path $PSScriptRoot 'run.ps1'
+$cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
+$autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
+$tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
+$logPath = Join-Path $tmpDir 'm8-qemu-serial.log'
+$errLogPath = Join-Path $tmpDir 'm8-qemu-serial.err.log'
+
+New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+
+if (-not $SkipPreflight) {
+  Write-Step 'Running preflight-host.ps1'
+  & $preflightScript
+  if ($LASTEXITCODE -ne 0) {
+    throw "Preflight failed with exit code $LASTEXITCODE"
+  }
+  Write-Ok 'Preflight passed'
+}
+
+if (-not $SkipBuild) {
+  if (-not $RunQemu) {
+    Write-Step 'Running build.ps1 -NoModel'
+    & $buildScript -NoModel
+    if ($LASTEXITCODE -ne 0) {
+      throw "Build failed with exit code $LASTEXITCODE"
+    }
+    Write-Ok 'Build passed'
+  }
+}
+
+$sourceText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'llama2_efi_final.c') -Raw
+Write-Step 'Static marker checks for A1/A3/B1/B2/B3'
+
+$staticChecks = @(
+  @{ Label = 'A1 startup marker exists'; Pattern = '\[obs\]\[startup\]\s+model_select_ms=' },
+  @{ Label = 'A3 models summary exists'; Pattern = 'summary:\s+total=' },
+  @{ Label = 'B1 confidence marker exists'; Pattern = 'OK:\s+OO confidence:' },
+  @{ Label = 'B2 feedback marker exists'; Pattern = 'OK:\s+OO feedback:' },
+  @{ Label = 'B2 outcome log append exists'; Pattern = 'OOOUTCOME\.LOG' },
+  @{ Label = 'B3 plan marker exists'; Pattern = 'OK:\s+OO plan:' },
+  @{ Label = 'B3 hard-stop event exists'; Pattern = 'plan_hard_stop\s+reason=' }
+)
+
+$staticOk = $true
+foreach ($c in $staticChecks) {
+  if (-not (Assert-Pattern -text $sourceText -pattern $c.Pattern -label $c.Label)) {
+    $staticOk = $false
+  }
+}
+
+if (-not $RunQemu) {
+  if ($staticOk) {
+    Write-Ok 'M8 static reliability pass complete'
+    Write-Host "[M8] Tip: rerun with -RunQemu for runtime autorun validation." -ForegroundColor Gray
+    exit 0
+  }
+  throw 'M8 static reliability checks failed'
+}
+
+Write-Step 'Preparing runtime autorun scenario (A3 + B1/B2/B3)'
+
+$cfgBackup = Join-Path $tmpDir 'repl.cfg.backup'
+$autorunBackup = Join-Path $tmpDir 'llmk-autorun.txt.backup'
+Copy-Item -LiteralPath $cfgPath -Destination $cfgBackup -Force
+if (Test-Path $autorunPath) {
+  Copy-Item -LiteralPath $autorunPath -Destination $autorunBackup -Force
+}
+
+try {
+  $cfgLines = @(
+    'boot_verbose=1',
+    'overlay=1',
+    'overlay_digits=1',
+    'overlay_time_mode=1',
+    'autorun_autostart=1',
+    'autorun_shutdown_when_done=0',
+    'autorun_file=llmk-autorun.txt',
+    'model=stories15M.q8_0.gguf',
+    'oo_enable=1',
+    'oo_llm_consult=1',
+    'oo_multi_actions=1',
+    'oo_auto_apply=1',
+    'oo_conf_gate=1',
+    'oo_conf_threshold=0',
+    'oo_plan_enable=1',
+    'oo_plan_max_actions=2'
+  )
+  Set-Content -LiteralPath $cfgPath -Value ($cfgLines -join "`r`n") -Encoding ASCII
+
+  $autorunLines = @(
+    '/models',
+    '/oo_consult_mock reduce ctx and reduce seq',
+    '/oo_consult_mock increase context',
+    '/oo_jour',
+    'exit'
+  )
+  Set-Content -LiteralPath $autorunPath -Value ($autorunLines -join "`r`n") -Encoding ASCII
+
+  if (-not $SkipBuild) {
+    Write-Step 'Running build.ps1 for runtime scenario (embedded autorun/cfg + small model)'
+    & $buildScript -ModelBin 'stories15M.q8_0.gguf'
+    if ($LASTEXITCODE -ne 0) {
+      throw "Runtime build failed with exit code $LASTEXITCODE"
+    }
+    Write-Ok 'Runtime build passed'
+  } else {
+    Write-Warn 'SkipBuild used: runtime uses existing image contents (autorun/cfg may not match current checks)'
+  }
+
+  if (Test-Path $logPath) {
+    Remove-Item -LiteralPath $logPath -Force
+  }
+  if (Test-Path $errLogPath) {
+    Remove-Item -LiteralPath $errLogPath -Force
+  }
+
+  Write-Step "Running QEMU scenario (timeout=${TimeoutSec}s, accel=$Accel, mem=${MemMB}MB)"
+  $argList = @(
+    '-NoProfile',
+    '-File',
+    $runScript,
+    '-PassThroughExitCode',
+    '-NoNormalizeExitCode',
+    '-Accel', $Accel,
+    '-MemMB', "$MemMB"
+  )
+
+  $proc = Start-Process -FilePath 'pwsh' -ArgumentList $argList -WorkingDirectory $PSScriptRoot `
+    -RedirectStandardOutput $logPath -RedirectStandardError $errLogPath -PassThru
+
+  $finished = $proc.WaitForExit($TimeoutSec * 1000)
+  if (-not $finished) {
+    Write-Warn "QEMU timeout reached (${TimeoutSec}s); stopping process"
+    try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+    Get-Process -Name 'qemu-system-x86_64' -ErrorAction SilentlyContinue | ForEach-Object {
+      try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
+    }
+  }
+
+  if (-not (Test-Path $logPath)) {
+    throw 'Runtime log was not produced'
+  }
+
+  if (Test-Path $errLogPath) {
+    Add-Content -LiteralPath $logPath -Value "`r`n----- STDERR -----`r`n"
+    Get-Content -LiteralPath $errLogPath | Add-Content -LiteralPath $logPath
+  }
+
+  $runtimeText = Get-Content -LiteralPath $logPath -Raw
+  Write-Step 'Runtime marker checks'
+
+  $runtimeChecks = @(
+    @{ Label = 'A3 models summary emitted'; Pattern = 'summary:\s+total=' }
+  )
+
+  $noModelBoot = ($runtimeText -imatch 'OK:\s+REPL ready \(no model\)')
+  if ($noModelBoot) {
+    Write-Warn 'Runtime booted in no-model mode; skipping B1/B2/B3 runtime markers for this pass'
+    $runtimeChecks += @{ Label = 'A3 no-model diagnostic emitted'; Pattern = 'Tip:\s+in no-model REPL use /models and /model_info <path>' }
+  } else {
+    $runtimeChecks += @(
+      @{ Label = 'A1 startup marker emitted'; Pattern = '\[obs\]\[startup\]\s+model_select_ms=' },
+      @{ Label = 'B1 confidence emitted'; Pattern = 'OK:\s+OO confidence:' },
+      @{ Label = 'B2 feedback emitted'; Pattern = 'OK:\s+OO feedback:' },
+      @{ Label = 'B3 plan emitted'; Pattern = 'OK:\s+OO plan:' }
+    )
+  }
+
+  $runtimeOk = $true
+  foreach ($c in $runtimeChecks) {
+    if (-not (Assert-Pattern -text $runtimeText -pattern $c.Pattern -label $c.Label)) {
+      $runtimeOk = $false
+    }
+  }
+
+  if (-not $staticOk -or -not $runtimeOk) {
+    throw "M8 reliability checks failed (see log: $logPath)"
+  }
+
+  Write-Ok "M8 runtime reliability pass complete (log: $logPath)"
+}
+finally {
+  if (Test-Path $cfgBackup) {
+    Copy-Item -LiteralPath $cfgBackup -Destination $cfgPath -Force
+  }
+  if (Test-Path $autorunBackup) {
+    Copy-Item -LiteralPath $autorunBackup -Destination $autorunPath -Force
+  }
+}

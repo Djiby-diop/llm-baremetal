@@ -10,7 +10,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ B2 baseline implemented: `OOOUTCOME.LOG` now persists `(action, expected, observed)` with pending/observed entries and confidence scoring now includes recent outcome feedback bias.
 - ✅ B3 baseline implemented: bounded per-boot multi-step plan (`oo_plan_enable`, `oo_plan_max_actions`), explicit rollback checkpoint markers before auto-apply, and hard-stop on verify failures.
 - ✅ A3 baseline implemented: `/models` now reports size+type+summary and startup `model=` path failures now emit explicit fallback diagnostics and recovery hints.
-- ▶️ Next coding target: M8 reliability/CI pass (targeted autorun scenarios for A1/A3/B1/B2/B3).
+- ✅ M8 baseline implemented: `m8-reliability.ps1` now executes static + runtime reliability checks with targeted autorun scenarios for A1/A3/B1/B2/B3 and emits pass/fail markers.
+- ▶️ Next coding target: M8.1 CI wiring (GitHub Action job for static pass + optional runtime gate on self-hosted runner).
 
 ## Track A — llm-baremetal core
 
