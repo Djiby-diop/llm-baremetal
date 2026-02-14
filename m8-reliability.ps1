@@ -29,7 +29,21 @@ param(
   [ValidateRange(1, 50)]
   [int]$M11M10StableWindow = 3,
   [ValidateRange(0, 100)]
-  [int]$M11CanaryConfThreshold = 20
+  [int]$M11CanaryConfThreshold = 20,
+  [ValidateRange(0, 100)]
+  [int]$M12EarlyThreshold = 35,
+  [ValidateRange(0, 100)]
+  [int]$M12WarmThreshold = 25,
+  [ValidateRange(0, 100)]
+  [int]$M12SteadyThreshold = 15,
+  [ValidateRange(-100, 100)]
+  [int]$M12AdjLatencyOptimization = -5,
+  [ValidateRange(-100, 100)]
+  [int]$M12AdjContextExpansion = 10,
+  [ValidateRange(-100, 100)]
+  [int]$M12AdjMixed = 3,
+  [ValidateRange(-100, 100)]
+  [int]$M12AdjUnknown = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,6 +76,7 @@ $runScript = Join-Path $PSScriptRoot 'run.ps1'
 $m9Script = Join-Path $PSScriptRoot 'm9-guardrails.ps1'
 $m10Script = Join-Path $PSScriptRoot 'm10-quality-guardrails.ps1'
 $m11Script = Join-Path $PSScriptRoot 'm11-self-heal.ps1'
+$m12Script = Join-Path $PSScriptRoot 'm12-policy-curriculum.ps1'
 $cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
 $autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
@@ -284,6 +299,26 @@ try {
     -ApplyRelease
   if ($LASTEXITCODE -ne 0) {
     throw "M11 self-heal failed with exit code $LASTEXITCODE"
+  }
+
+  if (-not (Test-Path -LiteralPath $m12Script)) {
+    throw "M12 script not found: $m12Script"
+  }
+
+  Write-Step 'Running M12 policy curriculum'
+  & $m12Script -LogPath $logPath `
+    -M9HistoryPath (Join-Path $PSScriptRoot 'artifacts/m9/history.jsonl') `
+    -ConfigPath $cfgPath `
+    -EarlyThreshold $M12EarlyThreshold `
+    -WarmThreshold $M12WarmThreshold `
+    -SteadyThreshold $M12SteadyThreshold `
+    -AdjLatencyOptimization $M12AdjLatencyOptimization `
+    -AdjContextExpansion $M12AdjContextExpansion `
+    -AdjMixed $M12AdjMixed `
+    -AdjUnknown $M12AdjUnknown `
+    -ApplyConfig
+  if ($LASTEXITCODE -ne 0) {
+    throw "M12 curriculum failed with exit code $LASTEXITCODE"
   }
 
   Write-Ok "M8 runtime reliability pass complete (log: $logPath)"

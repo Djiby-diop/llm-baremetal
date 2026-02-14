@@ -89,6 +89,16 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
 - Ajout de l'historique M10 (`artifacts/m10/history.jsonl`) pour permettre la décision multi-run.
 - Le streak M11 ne progresse que si la qualité courante + fenêtres M9/M10 sont simultanément stables.
 
+## M12 - Curriculum de politique OO (phase + workload)
+
+- Nouveau script `m12-policy-curriculum.ps1` qui ajuste `oo_conf_threshold` par:
+  - phase de boot (`early`, `warm`, `steady`),
+  - classe de workload (`latency_optimization`, `context_expansion`, `mixed`, `unknown`).
+- Calcul du seuil effectif via base de phase + ajustement workload (borné), puis application dans `repl.cfg`.
+- Persistance d'état et historique:
+  - `artifacts/m12/curriculum-state.json`,
+  - `artifacts/m12/history.jsonl`.
+
 ## Résultat global
 
 - Pipeline plus sûr, plus observable, et mieux automatisé.

@@ -250,6 +250,21 @@ M11.1 coupling (enabled by default):
 - and a stable M10 quality window (`artifacts/m10/history.jsonl`, `-M10StableWindow`)
 - both windows must be green in addition to current-run quality checks
 
+### M12 policy curriculum (phase + workload)
+
+Apply staged confidence thresholds from boot phase and workload class:
+
+```powershell
+./m12-policy-curriculum.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -ApplyConfig
+```
+
+Behavior:
+
+- infers boot phase from M9 run maturity (`early|warm|steady`)
+- infers workload class from consult intents (`latency_optimization|context_expansion|mixed|unknown`)
+- computes effective `oo_conf_threshold` from base phase threshold + workload adjustment
+- writes state/history to `artifacts/m12/curriculum-state.json` and `artifacts/m12/history.jsonl`
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
@@ -264,7 +279,7 @@ Runtime dispatch inputs:
 
 ### Synthese des ameliorations
 
-Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M11).
+Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M12).
 
 ## Notes
 

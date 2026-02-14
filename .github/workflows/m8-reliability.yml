@@ -105,3 +105,19 @@ jobs:
           name: m11-release-history
           path: artifacts/m11/release-history.jsonl
           if-no-files-found: warn
+
+      - name: Upload M12 curriculum state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m12-curriculum-state
+          path: artifacts/m12/curriculum-state.json
+          if-no-files-found: warn
+
+      - name: Upload M12 curriculum history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m12-curriculum-history
+          path: artifacts/m12/history.jsonl
+          if-no-files-found: warn

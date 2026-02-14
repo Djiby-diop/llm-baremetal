@@ -18,7 +18,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M10.1 baseline implemented: M10 now adapts quality thresholds by detected model class (`tiny|medium|large`) and RAM tier (`low|mid|high`) with persisted effective thresholds in quarantine state.
 - ✅ M11 baseline implemented: `m11-self-heal.ps1` now auto-releases quarantine after configurable stable streak, drives canary re-enable windows, and rolls back to quarantine on canary failure.
 - ✅ M11.1 baseline implemented: M11 release/canary path now requires coupled stable windows from M9 (`pass` window) and M10 (`quality_ok` window) histories before progression.
-- ▶️ Next coding target: M12 policy curriculum (staged confidence thresholds by boot phase + workload class).
+- ✅ M12 baseline implemented: `m12-policy-curriculum.ps1` now applies staged confidence thresholds by inferred boot phase (`early|warm|steady`) and workload class (`latency_optimization|context_expansion|mixed|unknown`).
+- ▶️ Next coding target: M12.1 curriculum outcome feedback (tune phase/workload threshold matrix from recent harmful/helpful outcomes).
 
 ## Track A — llm-baremetal core
 
