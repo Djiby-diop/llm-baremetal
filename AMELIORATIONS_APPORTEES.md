@@ -81,6 +81,14 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - `artifacts/m11/release-history.jsonl`.
 - Intégration runtime dans `m8-reliability.ps1` après M10.
 
+## M11.1 - Couplage drift/qualité pour release
+
+- Le release/canary M11 est désormais conditionné par deux fenêtres stables:
+  - fenêtre M9 (`artifacts/m9/history.jsonl`, champ `pass`),
+  - fenêtre M10 (`artifacts/m10/history.jsonl`, champ `quality_ok`).
+- Ajout de l'historique M10 (`artifacts/m10/history.jsonl`) pour permettre la décision multi-run.
+- Le streak M11 ne progresse que si la qualité courante + fenêtres M9/M10 sont simultanément stables.
+
 ## Résultat global
 
 - Pipeline plus sûr, plus observable, et mieux automatisé.

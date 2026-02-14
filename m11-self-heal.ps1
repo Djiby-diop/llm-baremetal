@@ -1,6 +1,8 @@
 param(
   [string]$LogPath = "artifacts/m8/m8-qemu-serial.log",
   [string]$QuarantineStatePath = "artifacts/m10/quarantine-state.json",
+  [string]$M9HistoryPath = "artifacts/m9/history.jsonl",
+  [string]$M10HistoryPath = "artifacts/m10/history.jsonl",
   [string]$ConfigPath = "repl.cfg",
   [string]$ReleaseHistoryPath = "artifacts/m11/release-history.jsonl",
   [string]$ReleaseStatePath = "artifacts/m11/release-state.json",
@@ -10,6 +12,10 @@ param(
   [int]$CanaryBoots = 2,
   [ValidateRange(1, 1000)]
   [int]$MinSamplesForRelease = 2,
+  [ValidateRange(1, 50)]
+  [int]$M9StableWindow = 3,
+  [ValidateRange(1, 50)]
+  [int]$M10StableWindow = 3,
   [ValidateRange(0, 100)]
   [int]$CanaryConfThreshold = 20,
   [switch]$ApplyRelease,
@@ -95,6 +101,21 @@ function Get-StableStreak([object[]]$history) {
   return $streak
 }
 
+function Test-RecentWindowAllTrue([object[]]$history, [string]$propertyName, [int]$window) {
+  if (-not $history -or $history.Count -lt $window) {
+    return $false
+  }
+
+  $tail = @($history | Select-Object -Last $window)
+  foreach ($item in $tail) {
+    if ($null -eq $item) { return $false }
+    $prop = $item.PSObject.Properties[$propertyName]
+    if ($null -eq $prop) { return $false }
+    if (-not [bool]$prop.Value) { return $false }
+  }
+  return $true
+}
+
 if (-not (Test-Path -LiteralPath $LogPath)) {
   throw "M11 log not found: $LogPath"
 }
@@ -167,6 +188,14 @@ if ($totalSamples -ge $MinSamplesForRelease -and
   $releaseCandidate = $true
 }
 
+$m9History = Read-History -path $M9HistoryPath
+$m10History = Read-History -path $M10HistoryPath
+
+$m9WindowStable = Test-RecentWindowAllTrue -history $m9History -propertyName 'pass' -window $M9StableWindow
+$m10WindowStable = Test-RecentWindowAllTrue -history $m10History -propertyName 'quality_ok' -window $M10StableWindow
+
+$releaseCandidateCoupled = ($releaseCandidate -and $m9WindowStable -and $m10WindowStable)
+
 $historyDir = Split-Path -Parent $ReleaseHistoryPath
 if ($historyDir -and -not (Test-Path -LiteralPath $historyDir)) {
   New-Item -ItemType Directory -Path $historyDir -Force | Out-Null
@@ -192,14 +221,20 @@ $newEntry = [ordered]@{
   effective_max_harmful_ratio_pct = $effectiveMaxHarmfulRatioPct
   effective_max_consecutive_failures = $effectiveMaxConsecutiveFailures
   min_samples_for_release = $MinSamplesForRelease
-  release_candidate = $releaseCandidate
+  release_candidate_raw = $releaseCandidate
+  m9_window_stable = $m9WindowStable
+  m10_window_stable = $m10WindowStable
+  m9_stable_window = $M9StableWindow
+  m10_stable_window = $M10StableWindow
+  release_candidate = $releaseCandidateCoupled
   stable_streak_needed = $StableStreakNeeded
 }
 
 $combinedHistory = @($history)
 $combinedHistory += $newEntry
 $stableStreak = Get-StableStreak -history $combinedHistory
-Write-Step "release_candidate=$releaseCandidate stable_streak=$stableStreak/$StableStreakNeeded quarantined=$quarantined canary_active=$($releaseState.canary_active)"
+Write-Step "release_candidate_raw=$releaseCandidate m9_window_stable=$m9WindowStable m10_window_stable=$m10WindowStable"
+Write-Step "release_candidate_coupled=$releaseCandidateCoupled stable_streak=$stableStreak/$StableStreakNeeded quarantined=$quarantined canary_active=$($releaseState.canary_active)"
 
 $action = 'none'
 
@@ -225,7 +260,7 @@ if ($quarantined -and -not [bool]$releaseState.canary_active) {
     Write-Ok 'Quarantine kept: stable streak not reached'
   }
 } elseif ([bool]$releaseState.canary_active) {
-  if ($releaseCandidate) {
+  if ($releaseCandidateCoupled) {
     $remaining = [int]$releaseState.canary_runs_left - 1
     if ($remaining -le 0) {
       if ($ApplyRelease) {
@@ -273,7 +308,12 @@ $releaseStateObj = [ordered]@{
   canary_runs_left = [int]$releaseState.canary_runs_left
   stable_streak = $stableStreak
   stable_streak_needed = $StableStreakNeeded
-  release_candidate = $releaseCandidate
+  release_candidate_raw = $releaseCandidate
+  m9_window_stable = $m9WindowStable
+  m10_window_stable = $m10WindowStable
+  m9_stable_window = $M9StableWindow
+  m10_stable_window = $M10StableWindow
+  release_candidate = $releaseCandidateCoupled
   canary_boots = $CanaryBoots
   min_samples_for_release = $MinSamplesForRelease
   canary_conf_threshold = $CanaryConfThreshold

@@ -219,6 +219,7 @@ Evaluate OO adaptation quality and trigger auto-quarantine when harmful behavior
 Outputs:
 
 - quarantine state: `artifacts/m10/quarantine-state.json`
+- M10 history: `artifacts/m10/history.jsonl`
 - optional quarantine action on config: `oo_auto_apply=0` (+ `oo_conf_gate=1`)
 
 M10.1 adaptive thresholds are enabled by default:
@@ -242,6 +243,12 @@ Behavior:
 - starts canary mode (`-CanaryBoots`) with stricter confidence gate (`-CanaryConfThreshold`)
 - auto-rolls back to quarantine if canary quality degrades
 - writes state/history to `artifacts/m11/release-state.json` and `artifacts/m11/release-history.jsonl`
+
+M11.1 coupling (enabled by default):
+
+- release/canary progression requires a stable M9 window (`artifacts/m9/history.jsonl`, `-M9StableWindow`)
+- and a stable M10 quality window (`artifacts/m10/history.jsonl`, `-M10StableWindow`)
+- both windows must be green in addition to current-run quality checks
 
 ### M8.1 CI workflow
 

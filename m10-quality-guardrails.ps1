@@ -11,7 +11,9 @@ param(
   [switch]$NoAdaptiveThresholds,
   [switch]$ApplyQuarantine,
   [string]$ConfigPath = "repl.cfg",
-  [string]$QuarantineStatePath = "artifacts/m10/quarantine-state.json"
+  [string]$QuarantineStatePath = "artifacts/m10/quarantine-state.json",
+  [string]$HistoryPath = "artifacts/m10/history.jsonl",
+  [switch]$NoHistoryWrite
 )
 
 $ErrorActionPreference = 'Stop'
@@ -164,8 +166,8 @@ if (-not $NoAdaptiveThresholds) {
 
 # Parse action outcomes from policy markers.
 $events = New-Object System.Collections.Generic.List[string]
-$matches = [regex]::Matches($log, 'OK:\s+OO auto-apply:|ERROR:\s+OO auto-apply verification failed:')
-foreach ($m in $matches) {
+$eventTokens = [regex]::Matches($log, 'OK:\s+OO auto-apply:|ERROR:\s+OO auto-apply verification failed:')
+foreach ($m in $eventTokens) {
   $token = $m.Value
   if ($token -like 'OK:*') {
     $events.Add('success')
@@ -246,6 +248,7 @@ $state = [ordered]@{
   model_layers = $profile.layers
   ram_mb = $ramInfo.ram_mb
   ram_tier = $ramInfo.ram_tier
+  quality_ok = $qualityOk
   quarantine_needed = $quarantineNeeded
   quarantine_applied = $false
   config_path = $ConfigPath
@@ -266,6 +269,36 @@ if ($quarantineNeeded -and $ApplyQuarantine) {
 
 $state | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $QuarantineStatePath -Encoding UTF8
 Write-Ok "Quarantine state written: $QuarantineStatePath"
+
+if (-not $NoHistoryWrite) {
+  $historyDir = Split-Path -Parent $HistoryPath
+  if ($historyDir -and -not (Test-Path -LiteralPath $historyDir)) {
+    New-Item -ItemType Directory -Path $historyDir -Force | Out-Null
+  }
+
+  $entry = [ordered]@{
+    ts_utc = (Get-Date).ToUniversalTime().ToString('o')
+    log_path = $LogPath
+    samples = $totalSamples
+    success = $successCount
+    failed = $failedCount
+    harmful_ratio_pct = [math]::Round($harmfulRatioPct, 2)
+    max_failed_streak = $maxConsecutiveFailedSeen
+    effective_max_harmful_ratio_pct = $effectiveMaxHarmfulRatioPct
+    effective_max_consecutive_failures = $effectiveMaxConsecutiveFailures
+    effective_min_samples = $effectiveMinAutoApplySamples
+    model_class = $profile.model_class
+    model_dim = $profile.dim
+    model_layers = $profile.layers
+    ram_mb = $ramInfo.ram_mb
+    ram_tier = $ramInfo.ram_tier
+    quality_ok = $qualityOk
+    quarantine_needed = $quarantineNeeded
+  }
+
+  ($entry | ConvertTo-Json -Compress) | Add-Content -LiteralPath $HistoryPath
+  Write-Ok "History appended: $HistoryPath"
+}
 
 if (-not $qualityOk) {
   throw "M10 quality guardrails failed"

@@ -82,6 +82,14 @@ jobs:
           path: artifacts/m10/quarantine-state.json
           if-no-files-found: warn
 
+      - name: Upload M10 history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m10-history
+          path: artifacts/m10/history.jsonl
+          if-no-files-found: warn
+
       - name: Upload M11 release state
         if: always()
         uses: actions/upload-artifact@v4

@@ -24,6 +24,10 @@ param(
   [int]$M11CanaryBoots = 2,
   [ValidateRange(1, 1000)]
   [int]$M11MinSamplesForRelease = 2,
+  [ValidateRange(1, 50)]
+  [int]$M11M9StableWindow = 3,
+  [ValidateRange(1, 50)]
+  [int]$M11M10StableWindow = 3,
   [ValidateRange(0, 100)]
   [int]$M11CanaryConfThreshold = 20
 )
@@ -268,10 +272,14 @@ try {
   Write-Step 'Running M11 self-healing quarantine release'
   & $m11Script -LogPath $logPath `
     -QuarantineStatePath (Join-Path $PSScriptRoot 'artifacts/m10/quarantine-state.json') `
+    -M9HistoryPath (Join-Path $PSScriptRoot 'artifacts/m9/history.jsonl') `
+    -M10HistoryPath (Join-Path $PSScriptRoot 'artifacts/m10/history.jsonl') `
     -ConfigPath $cfgPath `
     -StableStreakNeeded $M11StableStreakNeeded `
     -CanaryBoots $M11CanaryBoots `
     -MinSamplesForRelease $M11MinSamplesForRelease `
+    -M9StableWindow $M11M9StableWindow `
+    -M10StableWindow $M11M10StableWindow `
     -CanaryConfThreshold $M11CanaryConfThreshold `
     -ApplyRelease
   if ($LASTEXITCODE -ne 0) {
