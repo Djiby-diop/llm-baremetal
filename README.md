@@ -202,6 +202,12 @@ Parse an M8 runtime log and enforce marker/latency budgets:
 ./m9-guardrails.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -MaxModelSelectMs 2000 -MaxModelPrepareMs 12000 -RequireOoMarkers
 ```
 
+M9.1 trend tracking is enabled by default:
+
+- appends run history to `artifacts/m9/history.jsonl`
+- checks drift versus recent runs (`-DriftWindow`, `-MaxSelectDriftPct`, `-MaxPrepareDriftPct`)
+- can be disabled with `-NoDriftCheck` and/or `-NoHistoryWrite`
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
