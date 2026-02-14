@@ -11,7 +11,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ B3 baseline implemented: bounded per-boot multi-step plan (`oo_plan_enable`, `oo_plan_max_actions`), explicit rollback checkpoint markers before auto-apply, and hard-stop on verify failures.
 - ✅ A3 baseline implemented: `/models` now reports size+type+summary and startup `model=` path failures now emit explicit fallback diagnostics and recovery hints.
 - ✅ M8 baseline implemented: `m8-reliability.ps1` now executes static + runtime reliability checks with targeted autorun scenarios for A1/A3/B1/B2/B3 and emits pass/fail markers.
-- ▶️ Next coding target: M8.1 CI wiring (GitHub Action job for static pass + optional runtime gate on self-hosted runner).
+- ✅ M8.1 CI wiring implemented: GitHub Actions workflow runs M8 static pass on push/PR and exposes optional runtime pass via manual dispatch on self-hosted Windows runner.
+- ▶️ Next coding target: M9 regression guardrails (parse M8 logs and enforce marker/latency budgets).
 
 ## Track A — llm-baremetal core
 

@@ -188,6 +188,18 @@ End-to-end runtime checks (build + QEMU autorun scenario):
 
 The runtime log is written to `artifacts/m8/m8-qemu-serial.log`.
 
+### M8.1 CI workflow
+
+GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
+
+- On push/PR: runs M8 static pass (`m8-reliability.ps1 -SkipPreflight -SkipBuild`) on `windows-latest`.
+- Manual dispatch: optional runtime pass on `self-hosted` Windows runner with QEMU/WSL.
+
+Runtime dispatch inputs:
+
+- `run_runtime=true`
+- `timeout_sec` (default `180`)
+
 ## Notes
 
 - Model weights are intentionally not tracked in git; use GitHub Releases or your own files.
