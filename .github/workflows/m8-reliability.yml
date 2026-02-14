@@ -1,0 +1,58 @@
+name: M8 Reliability
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_runtime:
+        description: "Run runtime QEMU scenario on self-hosted runner"
+        required: false
+        default: false
+        type: boolean
+      timeout_sec:
+        description: "Runtime timeout in seconds"
+        required: false
+        default: "180"
+        type: string
+
+jobs:
+  m8-static:
+    name: M8 static pass
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run static reliability pass
+        shell: pwsh
+        run: |
+          ./m8-reliability.ps1 -SkipPreflight -SkipBuild
+
+  m8-runtime:
+    name: M8 runtime pass (self-hosted)
+    needs: m8-static
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_runtime == true }}
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run runtime reliability scenario
+        shell: pwsh
+        run: |
+          $timeout = 180
+          if ('${{ inputs.timeout_sec }}' -match '^[0-9]+$') {
+            $timeout = [int]'${{ inputs.timeout_sec }}'
+          }
+          ./m8-reliability.ps1 -RunQemu -TimeoutSec $timeout -Accel tcg -MemMB 3072
+
+      - name: Upload runtime log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m8-runtime-log
+          path: artifacts/m8/m8-qemu-serial.log
+          if-no-files-found: warn
