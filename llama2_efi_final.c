@@ -283,6 +283,12 @@ static int g_cfg_oo_multi_actions = -1;
 static int g_cfg_oo_auto_apply = 0;
 // OO M5.2: Throttling flag (1 auto-apply per boot).
 static int g_oo_auto_applied_this_boot = 0;
+// OO M7.2: bounded multi-step plan (0=off, 1=on).
+static int g_cfg_oo_plan_enable = 0;
+// OO M7.2: max auto-applies per boot window.
+static int g_cfg_oo_plan_max_actions = 2;
+// OO M7.2: count of auto-applies already performed this boot.
+static int g_oo_auto_applied_count_this_boot = 0;
 // OO M5.3: Log consultations to OOCONSULT.LOG (default=1 if oo_llm_consult=1).
 static int g_cfg_oo_consult_log = -1;
 // OO M7: Confidence gate (0=off/log-only, 1=enforced for auto-apply).
@@ -4681,6 +4687,8 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
     //   fat83_force=0/1 (test/diag: prefer FAT 8.3 alias opens)
     //   oo_enable=0/1 (OO v0: write oostate.bin + append oojour.log)
     //   oo_min_total_mb=<int> (OO M3: override Zone-B total minimum, in MB; 0 disables floor)
+    //   oo_plan_enable=0/1 (OO M7.2: enable bounded multi-step auto-plan)
+    //   oo_plan_max_actions=1..3 (OO M7.2: max auto-applies per boot window)
     //   oo_net=0/1 (OO M4: network read-only tick placeholder; never required)
     //   oo_manifest_url=<string> (OO M4: URL hint for a signed manifest fetch; placeholder)
     EFI_FILE_HANDLE f = NULL;
@@ -4817,6 +4825,18 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
                 if (v < 0) v = 0;
                 if (v > 2) v = 2;
                 g_cfg_oo_auto_apply = v;
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_plan_enable") || llmk_cfg_streq_ci(key, "oo_plan") || llmk_cfg_streq_ci(key, "oo_multi_plan")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_cfg_oo_plan_enable = (b != 0);
+            }
+        } else if (llmk_cfg_streq_ci(key, "oo_plan_max_actions") || llmk_cfg_streq_ci(key, "oo_plan_max") || llmk_cfg_streq_ci(key, "oo_max_actions")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > 3) v = 3;
+                g_cfg_oo_plan_max_actions = v;
             }
         } else if (llmk_cfg_streq_ci(key, "oo_consult_log") || llmk_cfg_streq_ci(key, "oo_log")) {
             int b;
@@ -5714,6 +5734,29 @@ static void llmk_oo_journal_event_load_state_best_effort(const char *event) {
     if (!g_root || !event) return;
     LlmkOoState s;
     if (!llmk_oo_load_state_best_effort(&s)) return;
+    llmk_oo_journal_append_best_effort(&s, event);
+}
+
+static void llmk_oo_plan_checkpoint_best_effort(const char *tag) {
+    if (!g_root) return;
+
+    LlmkOoState s;
+    if (!llmk_oo_load_state_best_effort(&s)) return;
+
+    s.magic = LLMK_OO_STATE_MAGIC;
+    s.version = LLMK_OO_STATE_VER;
+    s.size = (UINT32)sizeof(LlmkOoState);
+    s.checksum = llmk_oo_state_checksum(&s);
+
+    (void)llmk_oo_write_recovery_best_effort(&s);
+
+    char event[96];
+    int p = 0;
+    event[0] = 0;
+    llmk_ascii_append_str(event, (int)sizeof(event), &p, "plan_checkpoint tag=");
+    llmk_ascii_append_str(event, (int)sizeof(event), &p, tag ? tag : "default");
+    event[p] = 0;
+
     llmk_oo_journal_append_best_effort(&s, event);
 }
 
@@ -8317,6 +8360,19 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                     action_model, action_stable,
                                                     &feedback_bias, &feedback_good, &feedback_bad);
         int confidence_gate_pass = (confidence_score >= confidence_threshold);
+        int plan_hard_stop = (confidence_gate_enabled && !confidence_gate_pass) ? 1 : 0;
+
+        int plan_enabled = ((g_cfg_oo_plan_enable != 0) && multi_enabled) ? 1 : 0;
+        int plan_max_actions = g_cfg_oo_plan_max_actions;
+        if (plan_max_actions < 1) plan_max_actions = 1;
+        if (plan_max_actions > 3) plan_max_actions = 3;
+        if (!plan_enabled) plan_max_actions = 1;
+
+        int plan_remaining_budget = plan_max_actions - g_oo_auto_applied_count_this_boot;
+        if (plan_remaining_budget < 0) plan_remaining_budget = 0;
+        int plan_applied_now = 0;
+        int plan_checkpoint_done = 0;
+
         Print(L"OK: OO confidence: score=%d threshold=%d gate=%a pass=%a\r\n",
             confidence_score,
             confidence_threshold,
@@ -8324,6 +8380,12 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
             confidence_gate_pass ? "yes" : "no");
         Print(L"OK: OO feedback: good=%d bad=%d bias=%d\r\n",
             feedback_good, feedback_bad, feedback_bias);
+        Print(L"OK: OO plan: enabled=%a max=%d used=%d remain=%d hard_stop=%a\r\n",
+            plan_enabled ? "yes" : "no",
+            plan_max_actions,
+            g_oo_auto_applied_count_this_boot,
+            plan_remaining_budget,
+            plan_hard_stop ? "yes" : "no");
 
     // 6. Policy decision (M5.1: apply ALL valid actions when multi_enabled)
     int actions_applied = 0;
@@ -8355,7 +8417,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                 if (new_ctx < 128) new_ctx = 128;
                 if (new_ctx != ctx) {
                     // M5.2: Check auto-apply config and throttling
-                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot) &&
+                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!plan_hard_stop) &&
+                                         (plan_applied_now < plan_remaining_budget) &&
                                          (!confidence_gate_enabled || confidence_gate_pass);
                     int is_reduction = 1; // reduce_ctx is always a reduction
 
@@ -8366,8 +8429,10 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                   confidence_score, confidence_threshold);
                         } else if (g_cfg_oo_auto_apply == 0) {
                             Print(L"OK: OO policy simulation: reduce_ctx (would_apply_if_enabled, new=%d)\r\n", new_ctx);
+                        } else if (plan_hard_stop) {
+                            Print(L"OK: OO policy blocked: reduce_ctx (reason=hard_stop_active, new=%d)\r\n", new_ctx);
                         } else {
-                            Print(L"OK: OO policy throttled: reduce_ctx (limit=1_per_boot, new=%d)\r\n", new_ctx);
+                            Print(L"OK: OO policy throttled: reduce_ctx (reason=plan_budget_exhausted, new=%d)\r\n", new_ctx);
                         }
                         actions_blocked++;
                     } else if (g_cfg_oo_auto_apply == 1 && !is_reduction) {
@@ -8375,6 +8440,10 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                         Print(L"OK: OO policy blocked: reduce_ctx (reason=conservative_mode)\r\n");
                         actions_blocked++;
                     } else {
+                        if (!plan_checkpoint_done) {
+                            llmk_oo_plan_checkpoint_best_effort("pre_auto_apply");
+                            plan_checkpoint_done = 1;
+                        }
                         // Auto-apply enabled: write + verify per M5.2
                         int ok = llmk_oo_auto_apply_write_verify_best_effort("reduce_ctx",
                                                                             "ctx_len",
@@ -8388,7 +8457,9 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=success");
                             llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_CTX);
                             actions_applied++;
-                            g_oo_auto_applied_this_boot = 1; // Throttle further applications
+                            plan_applied_now++;
+                            g_oo_auto_applied_count_this_boot++;
+                            g_oo_auto_applied_this_boot = (g_oo_auto_applied_count_this_boot > 0) ? 1 : 0;
                             if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
                             llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reduce_ctx");
                         } else {
@@ -8400,6 +8471,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
                             Print(L"ERROR: OO auto-apply verification failed: reduce_ctx (reason=verify_failed, reverting)\r\n");
                             llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=failed reason=verify_failed");
+                            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=reduce_ctx");
+                            plan_hard_stop = 1;
                             actions_blocked++;
                         }
                     }
@@ -8420,7 +8493,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                 if (new_seq < 128) new_seq = 128;
                 if (new_seq != seq) {
                     // M5.2: Check auto-apply config and throttling
-                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot) &&
+                    int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!plan_hard_stop) &&
+                                         (plan_applied_now < plan_remaining_budget) &&
                                          (!confidence_gate_enabled || confidence_gate_pass);
 
                     if (!can_auto_apply) {
@@ -8429,11 +8503,17 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                   confidence_score, confidence_threshold);
                         } else if (g_cfg_oo_auto_apply == 0) {
                             Print(L"OK: OO policy simulation: reduce_seq (would_apply_if_enabled, new=%d)\r\n", new_seq);
+                        } else if (plan_hard_stop) {
+                            Print(L"OK: OO policy blocked: reduce_seq (reason=hard_stop_active, new=%d)\r\n", new_seq);
                         } else {
-                            Print(L"OK: OO policy throttled: reduce_seq (limit=1_per_boot, new=%d)\r\n", new_seq);
+                            Print(L"OK: OO policy throttled: reduce_seq (reason=plan_budget_exhausted, new=%d)\r\n", new_seq);
                         }
                         actions_blocked++;
                     } else {
+                        if (!plan_checkpoint_done) {
+                            llmk_oo_plan_checkpoint_best_effort("pre_auto_apply");
+                            plan_checkpoint_done = 1;
+                        }
                         int ok = llmk_oo_auto_apply_write_verify_best_effort("reduce_seq",
                                                                             "seq_len",
                                                                             ctx,
@@ -8446,7 +8526,9 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=success");
                             llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_SEQ);
                             actions_applied++;
-                            g_oo_auto_applied_this_boot = 1; // Throttle further applications
+                            plan_applied_now++;
+                            g_oo_auto_applied_count_this_boot++;
+                            g_oo_auto_applied_this_boot = (g_oo_auto_applied_count_this_boot > 0) ? 1 : 0;
                             if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
                             llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reduce_seq");
                         } else {
@@ -8457,6 +8539,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             llmk_repl_cfg_set_kv_best_effort("seq_len", oval);
                             Print(L"ERROR: OO auto-apply verification failed: reduce_seq (reason=verify_failed, reverting)\r\n");
                             llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=failed reason=verify_failed");
+                            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=reduce_seq");
+                            plan_hard_stop = 1;
                             actions_blocked++;
                         }
                     }
@@ -8477,7 +8561,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
         if (action_increase) {
             // M5.2: Aggressive mode can apply increases if RAM>=1GB and mode=NORMAL
             int can_increase = (g_cfg_oo_auto_apply == 2) && (mode == LLMK_OO_MODE_NORMAL) && (ram_mb >= 1024ULL);
-            int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!g_oo_auto_applied_this_boot) &&
+            int can_auto_apply = (g_cfg_oo_auto_apply > 0) && (!plan_hard_stop) &&
+                                 (plan_applied_now < plan_remaining_budget) &&
                                  (!confidence_gate_enabled || confidence_gate_pass);
 
             if (can_increase && can_auto_apply) {
@@ -8485,6 +8570,10 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                 int new_ctx = ctx * 2;
                 if (new_ctx > 2048) new_ctx = 2048;
                 if (new_ctx != ctx) {
+                    if (!plan_checkpoint_done) {
+                        llmk_oo_plan_checkpoint_best_effort("pre_auto_apply");
+                        plan_checkpoint_done = 1;
+                    }
                     int ok = llmk_oo_auto_apply_write_verify_best_effort("increase_ctx",
                                                                         "ctx_len",
                                                                         ctx,
@@ -8497,7 +8586,9 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                         llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=success");
                         llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_INCREASE_CTX);
                         actions_applied++;
-                        g_oo_auto_applied_this_boot = 1;
+                        plan_applied_now++;
+                        g_oo_auto_applied_count_this_boot++;
+                        g_oo_auto_applied_this_boot = (g_oo_auto_applied_count_this_boot > 0) ? 1 : 0;
                         if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
                         llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "increase_ctx");
                     } else {
@@ -8508,6 +8599,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                         llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
                         Print(L"ERROR: OO auto-apply verification failed: increase_ctx (reason=verify_failed, reverting)\r\n");
                         llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=failed reason=verify_failed");
+                        llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=increase_ctx");
+                        plan_hard_stop = 1;
                         actions_blocked++;
                     }
                 } else {
@@ -8517,7 +8610,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
             } else {
                 const char *block_reason = (!can_auto_apply && confidence_gate_enabled && !confidence_gate_pass) ? "confidence_below_threshold" :
                                            (!can_auto_apply && g_cfg_oo_auto_apply == 0) ? "auto_apply_disabled" :
-                                           (!can_auto_apply) ? "throttled_1_per_boot" :
+                                           (!can_auto_apply && plan_hard_stop) ? "hard_stop_active" :
+                                           (!can_auto_apply) ? "plan_budget_exhausted" :
                                            (mode == LLMK_OO_MODE_SAFE) ? "safe_mode_no_increase" :
                                            (ram_mb < 1024ULL) ? "low_ram_no_increase" :
                                            (g_cfg_oo_auto_apply < 2) ? "conservative_mode_no_increase" :

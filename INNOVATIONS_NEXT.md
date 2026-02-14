@@ -8,7 +8,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ B1 threshold gating implemented behind config flags (`oo_conf_gate`, `oo_conf_threshold`), off by default.
 - ✅ A1 baseline implemented: startup model path now avoids eager GGUF summary parse, adds startup timing markers, and caches GGUF summary once per session for `/model_info`.
 - ✅ B2 baseline implemented: `OOOUTCOME.LOG` now persists `(action, expected, observed)` with pending/observed entries and confidence scoring now includes recent outcome feedback bias.
-- ▶️ Next coding target: B3 safe multi-step adaptation plan.
+- ✅ B3 baseline implemented: bounded per-boot multi-step plan (`oo_plan_enable`, `oo_plan_max_actions`), explicit rollback checkpoint markers before auto-apply, and hard-stop on verify failures.
+- ▶️ Next coding target: A3 model selection UX hardening.
 
 ## Track A — llm-baremetal core
 
