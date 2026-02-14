@@ -1,4 +1,4 @@
-# Ameliorations apportees (M6 -> M11)
+# Ameliorations apportees (M6 -> M12.1)
 
 Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant la phase d'industrialisation.
 
@@ -98,6 +98,14 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
 - Persistance d'état et historique:
   - `artifacts/m12/curriculum-state.json`,
   - `artifacts/m12/history.jsonl`.
+
+## M12.1 - Feedback outcomes sur la matrice curriculum
+
+- M12 lit désormais les outcomes récents M10 (`artifacts/m10/history.jsonl`) pour dériver un score helpful/harmful.
+- Ce score ajuste automatiquement la matrice avant calcul final:
+  - seuils de phase (`early/warm/steady`),
+  - cellule workload active (`latency_optimization|context_expansion|mixed|unknown`).
+- Les métadonnées d'adaptation (fenêtre, score, direction, delta) sont persistées dans l'état/historique M12.
 
 ## Résultat global
 

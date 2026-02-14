@@ -308,6 +308,7 @@ try {
   Write-Step 'Running M12 policy curriculum'
   & $m12Script -LogPath $logPath `
     -M9HistoryPath (Join-Path $PSScriptRoot 'artifacts/m9/history.jsonl') `
+    -M10HistoryPath (Join-Path $PSScriptRoot 'artifacts/m10/history.jsonl') `
     -ConfigPath $cfgPath `
     -EarlyThreshold $M12EarlyThreshold `
     -WarmThreshold $M12WarmThreshold `

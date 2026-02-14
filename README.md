@@ -265,6 +265,13 @@ Behavior:
 - computes effective `oo_conf_threshold` from base phase threshold + workload adjustment
 - writes state/history to `artifacts/m12/curriculum-state.json` and `artifacts/m12/history.jsonl`
 
+M12.1 outcome feedback (enabled by default):
+
+- reads recent M10 outcomes from `artifacts/m10/history.jsonl`
+- computes helpful/harmful window score (`-OutcomeAdaptWindow`, `-OutcomeAdaptStep`)
+- auto-tunes phase thresholds and active workload cell before final threshold computation
+- can be disabled with `-NoOutcomeAdaptation`
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
