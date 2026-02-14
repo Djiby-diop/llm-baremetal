@@ -21,7 +21,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M12 baseline implemented: `m12-policy-curriculum.ps1` now applies staged confidence thresholds by inferred boot phase (`early|warm|steady`) and workload class (`latency_optimization|context_expansion|mixed|unknown`).
 - ✅ M12.1 baseline implemented: M12 now auto-tunes phase/workload threshold matrix from recent M10 outcomes (`helpful/harmful` window) before applying effective curriculum threshold.
 - ✅ M13 baseline implemented: `m13-explainability.ps1` now persists reason codes and threshold provenance (M10/M11/M12) alongside per-run auto-apply outcome events.
-- ▶️ Next coding target: M13.1 reason-code enrichment in runtime core (emit explicit reason IDs directly from OO decision engine).
+- ✅ M13.1 baseline implemented: runtime OO decision logs now emit explicit `reason_id=...` markers directly from the core engine, consumed by M13 explainability as primary decision reason codes.
+- ▶️ Next coding target: M14 explainability coverage expansion (attach reason_id to confidence/plan markers and journal parity checks).
 
 ## Track A — llm-baremetal core
 

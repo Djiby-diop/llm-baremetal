@@ -105,6 +105,7 @@ foreach ($line in $decisionLines) {
   $idx++
   $outcome = 'unknown'
   $reason = 'AUTO_APPLY_UNKNOWN'
+  $nativeReasonId = ''
   if ($line -like 'OK:*') {
     $outcome = 'success'
     $reason = 'AUTO_APPLY_OK'
@@ -113,10 +114,17 @@ foreach ($line in $decisionLines) {
     $reason = 'AUTO_APPLY_VERIFY_FAILED'
   }
 
+  $rid = [regex]::Match($line, 'reason_id=([A-Za-z0-9_\-]+)')
+  if ($rid.Success) {
+    $nativeReasonId = $rid.Groups[1].Value
+    $reason = $nativeReasonId
+  }
+
   $decisionEvents.Add([ordered]@{
     idx = $idx
     outcome = $outcome
     reason_code = $reason
+    reason_code_native = $nativeReasonId
     raw = $line
   })
 }

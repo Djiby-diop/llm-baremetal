@@ -1,4 +1,4 @@
-# Ameliorations apportees (M6 -> M13)
+# Ameliorations apportees (M6 -> M13.1)
 
 Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant la phase d'industrialisation.
 
@@ -116,6 +116,12 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
 - Artefacts produits:
   - `artifacts/m13/explainability-state.json`,
   - `artifacts/m13/history.jsonl`.
+
+## M13.1 - Reason IDs natifs depuis le runtime OO
+
+- Le moteur OO (`llama2_efi_final.c`) émet maintenant des `reason_id=...` explicites dans les marqueurs policy/auto-apply.
+- `m13-explainability.ps1` priorise ces reason IDs natifs pour `reason_code` (avec fallback rétrocompatible).
+- Résultat: traçabilité plus fiable entre décision runtime et artefacts d'explicabilité.
 
 ## Résultat global
 

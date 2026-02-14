@@ -8430,13 +8430,13 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
     // Priority filtering: stable cancels all, reboot primes others
     if (action_stable) {
         // Stable signal: no action needed
-        Print(L"OK: OO policy decided: system_stable (reason=llm_reports_ok)\r\n");
+        Print(L"OK: OO policy decided: system_stable (reason=llm_reports_ok reason_id=OO_STABLE_OK)\r\n");
         actions_applied = 0;
         actions_blocked = (action_reduce_ctx + action_reduce_seq + action_increase + action_reboot + action_model - 1);
         llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "stable");
     } else if (action_reboot) {
         // Reboot primes others: log but don't auto-apply (v0)
-        Print(L"OK: OO policy decided: logged_only (reason=reboot_not_auto)\r\n");
+        Print(L"OK: OO policy decided: logged_only (reason=reboot_not_auto reason_id=OO_REBOOT_LOG_ONLY)\r\n");
         actions_applied = 0;
         actions_blocked = (action_reduce_ctx + action_reduce_seq + action_increase + action_model);
         llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reboot_logged");
@@ -8458,14 +8458,14 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                     if (!can_auto_apply) {
                         // Auto-apply disabled or throttled
                         if (confidence_gate_enabled && !confidence_gate_pass) {
-                            Print(L"OK: OO policy blocked: reduce_ctx (reason=confidence_below_threshold score=%d threshold=%d)\r\n",
+                                Print(L"OK: OO policy blocked: reduce_ctx (reason=confidence_below_threshold reason_id=OO_BLOCK_CONFIDENCE score=%d threshold=%d)\r\n",
                                   confidence_score, confidence_threshold);
                         } else if (g_cfg_oo_auto_apply == 0) {
                             Print(L"OK: OO policy simulation: reduce_ctx (would_apply_if_enabled, new=%d)\r\n", new_ctx);
                         } else if (plan_hard_stop) {
-                            Print(L"OK: OO policy blocked: reduce_ctx (reason=hard_stop_active, new=%d)\r\n", new_ctx);
+                            Print(L"OK: OO policy blocked: reduce_ctx (reason=hard_stop_active reason_id=OO_BLOCK_HARD_STOP, new=%d)\r\n", new_ctx);
                         } else {
-                            Print(L"OK: OO policy throttled: reduce_ctx (reason=plan_budget_exhausted, new=%d)\r\n", new_ctx);
+                            Print(L"OK: OO policy throttled: reduce_ctx (reason=plan_budget_exhausted reason_id=OO_BLOCK_PLAN_BUDGET, new=%d)\r\n", new_ctx);
                         }
                         actions_blocked++;
                     } else if (g_cfg_oo_auto_apply == 1 && !is_reduction) {
@@ -8486,7 +8486,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                             seq,
                                                                             ram_mb);
                         if (ok) {
-                            Print(L"OK: OO auto-apply: reduce_ctx (old=%d new=%d check=pass)\r\n", ctx, new_ctx);
+                            Print(L"OK: OO auto-apply: reduce_ctx (old=%d new=%d check=pass reason_id=OO_APPLY_OK)\r\n", ctx, new_ctx);
                             llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=success");
                             llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_CTX);
                             actions_applied++;
@@ -8502,7 +8502,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)ctx);
                             oval[op] = 0;
                             llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
-                            Print(L"ERROR: OO auto-apply verification failed: reduce_ctx (reason=verify_failed, reverting)\r\n");
+                            Print(L"ERROR: OO auto-apply verification failed: reduce_ctx (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
                             llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=failed reason=verify_failed");
                             llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=reduce_ctx");
                             plan_hard_stop = 1;
@@ -8532,14 +8532,14 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
 
                     if (!can_auto_apply) {
                         if (confidence_gate_enabled && !confidence_gate_pass) {
-                            Print(L"OK: OO policy blocked: reduce_seq (reason=confidence_below_threshold score=%d threshold=%d)\r\n",
+                                Print(L"OK: OO policy blocked: reduce_seq (reason=confidence_below_threshold reason_id=OO_BLOCK_CONFIDENCE score=%d threshold=%d)\r\n",
                                   confidence_score, confidence_threshold);
                         } else if (g_cfg_oo_auto_apply == 0) {
                             Print(L"OK: OO policy simulation: reduce_seq (would_apply_if_enabled, new=%d)\r\n", new_seq);
                         } else if (plan_hard_stop) {
-                            Print(L"OK: OO policy blocked: reduce_seq (reason=hard_stop_active, new=%d)\r\n", new_seq);
+                            Print(L"OK: OO policy blocked: reduce_seq (reason=hard_stop_active reason_id=OO_BLOCK_HARD_STOP, new=%d)\r\n", new_seq);
                         } else {
-                            Print(L"OK: OO policy throttled: reduce_seq (reason=plan_budget_exhausted, new=%d)\r\n", new_seq);
+                            Print(L"OK: OO policy throttled: reduce_seq (reason=plan_budget_exhausted reason_id=OO_BLOCK_PLAN_BUDGET, new=%d)\r\n", new_seq);
                         }
                         actions_blocked++;
                     } else {
@@ -8555,7 +8555,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                             new_seq,
                                                                             ram_mb);
                         if (ok) {
-                            Print(L"OK: OO auto-apply: reduce_seq (old=%d new=%d check=pass)\r\n", seq, new_seq);
+                            Print(L"OK: OO auto-apply: reduce_seq (old=%d new=%d check=pass reason_id=OO_APPLY_OK)\r\n", seq, new_seq);
                             llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=success");
                             llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_SEQ);
                             actions_applied++;
@@ -8570,7 +8570,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)seq);
                             oval[op] = 0;
                             llmk_repl_cfg_set_kv_best_effort("seq_len", oval);
-                            Print(L"ERROR: OO auto-apply verification failed: reduce_seq (reason=verify_failed, reverting)\r\n");
+                            Print(L"ERROR: OO auto-apply verification failed: reduce_seq (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
                             llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=failed reason=verify_failed");
                             llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=reduce_seq");
                             plan_hard_stop = 1;
@@ -8615,7 +8615,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                         seq,
                                                                         ram_mb);
                     if (ok) {
-                        Print(L"OK: OO auto-apply: increase_ctx (old=%d new=%d check=pass mode=aggressive)\r\n", ctx, new_ctx);
+                        Print(L"OK: OO auto-apply: increase_ctx (old=%d new=%d check=pass mode=aggressive reason_id=OO_APPLY_OK)\r\n", ctx, new_ctx);
                         llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=success");
                         llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_INCREASE_CTX);
                         actions_applied++;
@@ -8630,7 +8630,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                         llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)ctx);
                         oval[op] = 0;
                         llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
-                        Print(L"ERROR: OO auto-apply verification failed: increase_ctx (reason=verify_failed, reverting)\r\n");
+                        Print(L"ERROR: OO auto-apply verification failed: increase_ctx (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
                         llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=failed reason=verify_failed");
                         llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=increase_ctx");
                         plan_hard_stop = 1;
@@ -8649,20 +8649,20 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                            (ram_mb < 1024ULL) ? "low_ram_no_increase" :
                                            (g_cfg_oo_auto_apply < 2) ? "conservative_mode_no_increase" :
                                            "increase_blocked";
-                Print(L"OK: OO policy blocked: increase (reason=%a)\r\n", block_reason);
+                Print(L"OK: OO policy blocked: increase (reason=%a reason_id=OO_BLOCK_DYNAMIC)\r\n", block_reason);
                 actions_blocked++;
             }
         }
 
         // 6.4: Log model change (not auto-applied in v0)
         if (action_model) {
-            Print(L"OK: OO policy decided: logged_only (reason=model_change_not_auto)\r\n");
+            Print(L"OK: OO policy decided: logged_only (reason=model_change_not_auto reason_id=OO_MODEL_LOG_ONLY)\r\n");
             actions_blocked++;
         }
 
         // If no actions applied/blocked, mark as no actionable keywords
         if (actions_applied == 0 && actions_blocked == 0) {
-            Print(L"OK: OO policy decided: ignored (reason=no_actionable_keyword)\r\n");
+            Print(L"OK: OO policy decided: ignored (reason=no_actionable_keyword reason_id=OO_NO_ACTIONABLE_KEYWORD)\r\n");
         }
     }
 

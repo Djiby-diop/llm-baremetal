@@ -287,6 +287,11 @@ Behavior:
 - persists threshold provenance across guardrails/curriculum layers
 - writes state/history to `artifacts/m13/explainability-state.json` and `artifacts/m13/history.jsonl`
 
+M13.1 native reason IDs:
+
+- runtime OO core now emits explicit `reason_id=...` tokens in policy/auto-apply markers
+- `m13-explainability.ps1` consumes these native IDs as primary `reason_code` values (fallback kept for older logs)
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
@@ -301,7 +306,7 @@ Runtime dispatch inputs:
 
 ### Synthese des ameliorations
 
-Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M13).
+Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M13.1).
 
 ## Notes
 
