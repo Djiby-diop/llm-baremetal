@@ -228,6 +228,21 @@ M10.1 adaptive thresholds are enabled by default:
 - dynamic effective thresholds for harmful ratio, failure streak, and min samples
 - disable if needed with `-NoAdaptiveThresholds`
 
+### M11 self-healing quarantine release
+
+Evaluate quarantine release readiness and drive canary recovery:
+
+```powershell
+./m11-self-heal.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -ApplyRelease
+```
+
+Behavior:
+
+- requires configurable stable release streak (`-StableStreakNeeded`)
+- starts canary mode (`-CanaryBoots`) with stricter confidence gate (`-CanaryConfThreshold`)
+- auto-rolls back to quarantine if canary quality degrades
+- writes state/history to `artifacts/m11/release-state.json` and `artifacts/m11/release-history.jsonl`
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
@@ -242,7 +257,7 @@ Runtime dispatch inputs:
 
 ### Synthese des ameliorations
 
-Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M10).
+Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M11).
 
 ## Notes
 

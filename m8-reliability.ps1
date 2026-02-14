@@ -17,7 +17,15 @@ param(
   [ValidateRange(1, 100)]
   [int]$MaxConsecutiveFailures = 2,
   [ValidateRange(1, 1000)]
-  [int]$MinAutoApplySamples = 2
+  [int]$MinAutoApplySamples = 2,
+  [ValidateRange(1, 100)]
+  [int]$M11StableStreakNeeded = 3,
+  [ValidateRange(1, 20)]
+  [int]$M11CanaryBoots = 2,
+  [ValidateRange(1, 1000)]
+  [int]$M11MinSamplesForRelease = 2,
+  [ValidateRange(0, 100)]
+  [int]$M11CanaryConfThreshold = 20
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,6 +57,7 @@ $buildScript = Join-Path $PSScriptRoot 'build.ps1'
 $runScript = Join-Path $PSScriptRoot 'run.ps1'
 $m9Script = Join-Path $PSScriptRoot 'm9-guardrails.ps1'
 $m10Script = Join-Path $PSScriptRoot 'm10-quality-guardrails.ps1'
+$m11Script = Join-Path $PSScriptRoot 'm11-self-heal.ps1'
 $cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
 $autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
@@ -245,10 +254,28 @@ try {
     -MaxHarmfulRatioPct $MaxHarmfulRatioPct `
     -MaxConsecutiveFailures $MaxConsecutiveFailures `
     -MinAutoApplySamples $MinAutoApplySamples `
+    -RuntimeMemMB $MemMB `
     -ApplyQuarantine `
     -ConfigPath $cfgPath
   if ($LASTEXITCODE -ne 0) {
     throw "M10 guardrails failed with exit code $LASTEXITCODE"
+  }
+
+  if (-not (Test-Path -LiteralPath $m11Script)) {
+    throw "M11 script not found: $m11Script"
+  }
+
+  Write-Step 'Running M11 self-healing quarantine release'
+  & $m11Script -LogPath $logPath `
+    -QuarantineStatePath (Join-Path $PSScriptRoot 'artifacts/m10/quarantine-state.json') `
+    -ConfigPath $cfgPath `
+    -StableStreakNeeded $M11StableStreakNeeded `
+    -CanaryBoots $M11CanaryBoots `
+    -MinSamplesForRelease $M11MinSamplesForRelease `
+    -CanaryConfThreshold $M11CanaryConfThreshold `
+    -ApplyRelease
+  if ($LASTEXITCODE -ne 0) {
+    throw "M11 self-heal failed with exit code $LASTEXITCODE"
   }
 
   Write-Ok "M8 runtime reliability pass complete (log: $logPath)"

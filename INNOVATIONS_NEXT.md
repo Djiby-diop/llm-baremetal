@@ -16,7 +16,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M9.1 baseline implemented: M9 now persists run history in `artifacts/m9/history.jsonl` and performs drift checks versus recent runs (configurable window and drift thresholds).
 - ✅ M10 baseline implemented: `m10-quality-guardrails.ps1` enforces harmful-ratio + failure-streak thresholds and supports auto-quarantine (`oo_auto_apply=0`) with persisted quarantine state.
 - ✅ M10.1 baseline implemented: M10 now adapts quality thresholds by detected model class (`tiny|medium|large`) and RAM tier (`low|mid|high`) with persisted effective thresholds in quarantine state.
-- ▶️ Next coding target: M11 self-healing quarantine release (auto-unquarantine after stable streak + canary mode).
+- ✅ M11 baseline implemented: `m11-self-heal.ps1` now auto-releases quarantine after configurable stable streak, drives canary re-enable windows, and rolls back to quarantine on canary failure.
+- ▶️ Next coding target: M11.1 self-heal drift coupling (release only when M9 drift + M10 quality are both stable windows).
 
 ## Track A — llm-baremetal core
 

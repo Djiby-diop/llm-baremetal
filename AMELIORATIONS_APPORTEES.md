@@ -1,4 +1,4 @@
-# Ameliorations apportees (M6 -> M10)
+# Ameliorations apportees (M6 -> M11)
 
 Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant la phase d'industrialisation.
 
@@ -69,6 +69,17 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - le tier RAM (`low`, `mid`, `high`).
 - Persiste les seuils effectifs appliqués dans `artifacts/m10/quarantine-state.json`.
 - Permet désactivation explicite via `-NoAdaptiveThresholds`.
+
+## M11 - Self-healing de quarantaine (release + canary)
+
+- Nouveau script `m11-self-heal.ps1`:
+  - déclenche auto-unquarantine après un streak stable configurable,
+  - active un mode canary borné (`CanaryBoots`) avec seuil de confiance renforcé,
+  - rollback automatique vers quarantaine si régression en canary.
+- Persistance d'état et historique:
+  - `artifacts/m11/release-state.json`,
+  - `artifacts/m11/release-history.jsonl`.
+- Intégration runtime dans `m8-reliability.ps1` après M10.
 
 ## Résultat global
 
