@@ -1,4 +1,4 @@
-# Ameliorations apportees (M6 -> M15)
+# Ameliorations apportees (M6 -> M15.1)
 
 Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant la phase d'industrialisation.
 
@@ -150,6 +150,18 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
 - Artefacts produits:
   - `artifacts/m15/drift-state.json`,
   - `artifacts/m15/history.jsonl`.
+
+## M15.1 - Export dashboard SLO reason_id
+
+- Nouveau script `m15-slo-dashboard.ps1`:
+  - agrège les runs M15 récents pour un snapshot SLO compact (pass rate drift, part moyenne `AUTO_APPLY_UNKNOWN`),
+  - construit un comparatif week-over-week des `reason_id` à partir de l'historique M13,
+  - produit des snapshots hebdomadaires compacts pour revue de régression.
+- Artefacts produits:
+  - `artifacts/m15/dashboard-state.json`,
+  - `artifacts/m15/dashboard.md`,
+  - `artifacts/m15/dashboard-history.jsonl`.
+- Intégration dans `m8-reliability.ps1` après M15 et publication CI des artefacts dashboard.
 
 ## Résultat global
 

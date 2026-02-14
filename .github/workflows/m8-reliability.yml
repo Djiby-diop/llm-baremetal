@@ -193,3 +193,27 @@ jobs:
           name: m15-drift-history
           path: artifacts/m15/history.jsonl
           if-no-files-found: warn
+
+      - name: Upload M15.1 dashboard state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m151-dashboard-state
+          path: artifacts/m15/dashboard-state.json
+          if-no-files-found: warn
+
+      - name: Upload M15.1 dashboard markdown
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m151-dashboard-markdown
+          path: artifacts/m15/dashboard.md
+          if-no-files-found: warn
+
+      - name: Upload M15.1 dashboard history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m151-dashboard-history
+          path: artifacts/m15/dashboard-history.jsonl
+          if-no-files-found: warn

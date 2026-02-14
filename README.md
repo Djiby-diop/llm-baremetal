@@ -334,6 +334,21 @@ Behavior:
 - detects strong share drift and anomaly signals (new/unknown-heavy reason IDs)
 - writes state/history to `artifacts/m15/drift-state.json` and `artifacts/m15/history.jsonl`
 
+### M15.1 reason_id SLO dashboard export
+
+Generate compact weekly trend snapshots for regression review:
+
+```powershell
+./m15-slo-dashboard.ps1
+```
+
+Behavior:
+
+- summarizes recent M15 drift SLO metrics (pass rate, unknown share)
+- computes week-over-week top `reason_id` deltas from M13 explainability history
+- exports compact snapshots for reporting/review
+- writes artifacts to `artifacts/m15/dashboard-state.json`, `artifacts/m15/dashboard.md`, and `artifacts/m15/dashboard-history.jsonl`
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
@@ -348,7 +363,7 @@ Runtime dispatch inputs:
 
 ### Synthese des ameliorations
 
-Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M15).
+Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M15.1).
 
 ## Notes
 

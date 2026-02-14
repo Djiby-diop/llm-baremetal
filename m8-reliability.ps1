@@ -54,7 +54,13 @@ param(
   [ValidateRange(1, 200)]
   [int]$M15MaxShareDriftPct = 80,
   [ValidateRange(1, 100)]
-  [int]$M15MaxUnknownSharePct = 30
+  [int]$M15MaxUnknownSharePct = 30,
+  [ValidateRange(5, 500)]
+  [int]$M151WindowRuns = 20,
+  [ValidateRange(7, 365)]
+  [int]$M151WeeklyWindowDays = 28,
+  [ValidateRange(1, 20)]
+  [int]$M151TopReasonIds = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -92,6 +98,7 @@ $m13Script = Join-Path $PSScriptRoot 'm13-explainability.ps1'
 $m14Script = Join-Path $PSScriptRoot 'm14-explainability-coverage.ps1'
 $m141ExtractScript = Join-Path $PSScriptRoot 'm14-extract-oojournal.ps1'
 $m15Script = Join-Path $PSScriptRoot 'm15-reasonid-drift.ps1'
+$m151Script = Join-Path $PSScriptRoot 'm15-slo-dashboard.ps1'
 $cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
 $autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
@@ -408,6 +415,20 @@ try {
     -FailOnDrift
   if ($LASTEXITCODE -ne 0) {
     throw "M15 drift guardrails failed with exit code $LASTEXITCODE"
+  }
+
+  if (-not (Test-Path -LiteralPath $m151Script)) {
+    throw "M15.1 script not found: $m151Script"
+  }
+
+  Write-Step 'Running M15.1 reason_id SLO dashboard export'
+  & $m151Script -DriftHistoryPath (Join-Path $PSScriptRoot 'artifacts/m15/history.jsonl') `
+    -ExplainabilityHistoryPath (Join-Path $PSScriptRoot 'artifacts/m13/history.jsonl') `
+    -WindowRuns $M151WindowRuns `
+    -WeeklyWindowDays $M151WeeklyWindowDays `
+    -TopReasonIds $M151TopReasonIds
+  if ($LASTEXITCODE -ne 0) {
+    throw "M15.1 dashboard export failed with exit code $LASTEXITCODE"
   }
 
   Write-Ok "M8 runtime reliability pass complete (log: $logPath)"

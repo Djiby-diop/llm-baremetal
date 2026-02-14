@@ -25,7 +25,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M14 baseline implemented: runtime now emits `reason_id` on confidence/plan markers and `m14-explainability-coverage.ps1` checks marker coverage plus optional log/journal parity.
 - ✅ M14.1 baseline implemented: `m14-extract-oojournal.ps1` exports `OOJOUR.LOG` from runtime image to artifacts and M8/CI now supports strict parity gating (`-M14RequireJournalParity`).
 - ✅ M15 baseline implemented: `m15-reasonid-drift.ps1` now monitors reason_id distribution drift against recent explainability history and raises anomaly alerts/gates on breach.
-- ▶️ Next coding target: M15.1 reason_id SLO dashboard export (compact trend snapshots for weekly regression review).
+- ✅ M15.1 baseline implemented: `m15-slo-dashboard.ps1` now exports compact weekly reason_id trend snapshots and SLO metrics for regression review (`dashboard-state.json`, `dashboard.md`, history).
+- ▶️ Next coding target: M16 candidate definition (post-M15.1 hardening track).
 
 ## Track A — llm-baremetal core
 
