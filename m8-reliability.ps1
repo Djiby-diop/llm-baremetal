@@ -11,7 +11,13 @@ param(
   [ValidateRange(0, 120000)]
   [int]$MaxModelSelectMs = 2000,
   [ValidateRange(0, 120000)]
-  [int]$MaxModelPrepareMs = 12000
+  [int]$MaxModelPrepareMs = 12000,
+  [ValidateRange(0, 100)]
+  [int]$MaxHarmfulRatioPct = 40,
+  [ValidateRange(1, 100)]
+  [int]$MaxConsecutiveFailures = 2,
+  [ValidateRange(1, 1000)]
+  [int]$MinAutoApplySamples = 2
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,6 +48,7 @@ $preflightScript = Join-Path $PSScriptRoot 'preflight-host.ps1'
 $buildScript = Join-Path $PSScriptRoot 'build.ps1'
 $runScript = Join-Path $PSScriptRoot 'run.ps1'
 $m9Script = Join-Path $PSScriptRoot 'm9-guardrails.ps1'
+$m10Script = Join-Path $PSScriptRoot 'm10-quality-guardrails.ps1'
 $cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
 $autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
@@ -227,6 +234,21 @@ try {
   & $m9Script -LogPath $logPath -MaxModelSelectMs $MaxModelSelectMs -MaxModelPrepareMs $MaxModelPrepareMs -RequireOoMarkers
   if ($LASTEXITCODE -ne 0) {
     throw "M9 guardrails failed with exit code $LASTEXITCODE"
+  }
+
+  if (-not (Test-Path -LiteralPath $m10Script)) {
+    throw "M10 script not found: $m10Script"
+  }
+
+  Write-Step 'Running M10 policy quality guardrails'
+  & $m10Script -LogPath $logPath `
+    -MaxHarmfulRatioPct $MaxHarmfulRatioPct `
+    -MaxConsecutiveFailures $MaxConsecutiveFailures `
+    -MinAutoApplySamples $MinAutoApplySamples `
+    -ApplyQuarantine `
+    -ConfigPath $cfgPath
+  if ($LASTEXITCODE -ne 0) {
+    throw "M10 guardrails failed with exit code $LASTEXITCODE"
   }
 
   Write-Ok "M8 runtime reliability pass complete (log: $logPath)"

@@ -1,0 +1,69 @@
+# Ameliorations apportees (M6 -> M10)
+
+Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant la phase d'industrialisation.
+
+## M6 - Durcissement opérateur/release
+
+- Flux opérateur unifié: `preflight-host.ps1` -> `build.ps1` -> `run.ps1 -Preflight`.
+- Vérification one-shot: `m6-verify.ps1`.
+- Contrôle package release + checksums: `m6-package-check.ps1`.
+- Préparation bundle release: `m6-release-prep.ps1`.
+
+## A1 - Startup path
+
+- Marqueurs timing startup: `[obs][startup] model_select_ms=... model_prepare_ms=...`.
+- Réduction des opérations redondantes au démarrage (GGUF).
+- Cache résumé modèle pour `/model_info`.
+
+## A2 - Observabilité runtime
+
+- Marqueurs structurés pour le diagnostic runtime et OO.
+- Signaux plus déterministes dans les logs série.
+
+## A3 - UX modèle / diagnostics
+
+- `/models` amélioré: `size + type + name + summary`.
+- Diagnostics `model=` plus explicites (cause + hint + fallback).
+- Meilleure lisibilité en mode no-model.
+
+## B1 - Confiance OO
+
+- Score de confiance OO avec seuil configurable.
+- Mode log-only puis gate enforceable (`oo_conf_gate`, `oo_conf_threshold`).
+
+## B2 - Boucle outcome
+
+- Persistance des outcomes OO (`OOOUTCOME.LOG`) avec expected/observed.
+- Réinjection du feedback historique dans le score OO.
+
+## B3 - Plan multi-etapes borne
+
+- Plan OO borné par boot (`oo_plan_enable`, `oo_plan_max_actions`).
+- Checkpoint rollback explicite avant auto-apply.
+- Hard-stop sur échec de vérification auto-apply.
+
+## M8 / M8.1 - Fiabilité et CI
+
+- Script de fiabilité end-to-end: `m8-reliability.ps1` (statique + runtime autorun).
+- Workflow GitHub Actions: `.github/workflows/m8-reliability.yml`.
+- Job statique sur push/PR + runtime optionnel sur runner self-hosted.
+
+## M9 / M9.1 - Guardrails de régression
+
+- `m9-guardrails.ps1`: validation marqueurs + budgets latence startup.
+- Historique de runs: `artifacts/m9/history.jsonl`.
+- Drift check configurable (fenêtre + seuils pour `model_select_ms` / `model_prepare_ms`).
+
+## M10 - Guardrails qualité OO
+
+- `m10-quality-guardrails.ps1`:
+  - calcule ratio d'actions harmful (échecs auto-apply),
+  - détecte streak d'échecs consécutifs,
+  - applique auto-quarantine optionnelle (`oo_auto_apply=0`) si seuils dépassés,
+  - écrit l'état de quarantaine dans `artifacts/m10/quarantine-state.json`.
+
+## Résultat global
+
+- Pipeline plus sûr, plus observable, et mieux automatisé.
+- Détection plus rapide des régressions fonctionnelles et de performance.
+- Mécanismes OO plus robustes face aux comportements dégradés.

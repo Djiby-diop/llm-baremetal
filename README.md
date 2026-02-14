@@ -208,6 +208,19 @@ M9.1 trend tracking is enabled by default:
 - checks drift versus recent runs (`-DriftWindow`, `-MaxSelectDriftPct`, `-MaxPrepareDriftPct`)
 - can be disabled with `-NoDriftCheck` and/or `-NoHistoryWrite`
 
+### M10 policy quality guardrails
+
+Evaluate OO adaptation quality and trigger auto-quarantine when harmful behavior is detected:
+
+```powershell
+./m10-quality-guardrails.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -MaxHarmfulRatioPct 40 -MaxConsecutiveFailures 2 -MinAutoApplySamples 2 -ApplyQuarantine
+```
+
+Outputs:
+
+- quarantine state: `artifacts/m10/quarantine-state.json`
+- optional quarantine action on config: `oo_auto_apply=0` (+ `oo_conf_gate=1`)
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
@@ -219,6 +232,10 @@ Runtime dispatch inputs:
 
 - `run_runtime=true`
 - `timeout_sec` (default `180`)
+
+### Synthese des ameliorations
+
+Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M10).
 
 ## Notes
 

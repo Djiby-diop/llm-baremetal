@@ -56,7 +56,7 @@ jobs:
           if ('${{ inputs.timeout_sec }}' -match '^[0-9]+$') {
             $timeout = [int]'${{ inputs.timeout_sec }}'
           }
-          ./m8-reliability.ps1 -RunQemu -TimeoutSec $timeout -Accel tcg -MemMB 3072 -MaxModelSelectMs 5000 -MaxModelPrepareMs 30000
+          ./m8-reliability.ps1 -RunQemu -TimeoutSec $timeout -Accel tcg -MemMB 3072 -MaxModelSelectMs 5000 -MaxModelPrepareMs 30000 -MaxHarmfulRatioPct 50 -MaxConsecutiveFailures 3 -MinAutoApplySamples 1
 
       - name: Upload runtime log
         if: always()
@@ -72,4 +72,12 @@ jobs:
         with:
           name: m9-history
           path: artifacts/m9/history.jsonl
+          if-no-files-found: warn
+
+      - name: Upload M10 quarantine state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m10-quarantine-state
+          path: artifacts/m10/quarantine-state.json
           if-no-files-found: warn
