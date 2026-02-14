@@ -2788,6 +2788,17 @@ static const char *llmk_oo_action_name(UINT32 action_id) {
     }
 }
 
+static int llmk_oo_action_is_reduction(UINT32 action_id) {
+    return (action_id == LLMK_OO_ACTION_REDUCE_CTX || action_id == LLMK_OO_ACTION_REDUCE_SEQ) ? 1 : 0;
+}
+
+static int llmk_oo_action_is_increase(UINT32 action_id) {
+    return (action_id == LLMK_OO_ACTION_INCREASE_CTX) ? 1 : 0;
+}
+
+// Forward decl (defined later in file).
+static char *my_strstr(const char* haystack, const char* needle);
+
 typedef struct {
     UINT32 magic;
     UINT32 version;
@@ -2935,6 +2946,167 @@ static EFI_STATUS llmk_oo_write_recovery_best_effort(const LlmkOoState *s) {
 
 static void llmk_oo_jour_log_rotate_best_effort(void);
 
+static void llmk_oo_outcome_log_rotate_best_effort(void) {
+    if (!g_root) return;
+
+    const UINTN max_bytes = 256 * 1024;
+    const UINTN keep_bytes = 128 * 1024;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOOUTCOME.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        return;
+    }
+
+    if (len <= max_bytes) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        return;
+    }
+
+    UINTN keep = keep_bytes;
+    if (keep >= len) keep = len;
+    UINTN start = len - keep;
+
+    char *cbuf = (char *)buf;
+    for (UINTN i = start; i < len; i++) {
+        if (cbuf[i] == '\n') {
+            start = i + 1;
+            break;
+        }
+    }
+    if (start >= len) start = 0;
+
+    EFI_FILE_HANDLE f = NULL;
+    st = llmk_open_binary_file(&f, L"OOOUTCOME.LOG");
+    if (!EFI_ERROR(st) && f) {
+        UINTN nb = len - start;
+        (void)llmk_file_write_bytes(f, (const void *)(cbuf + start), nb);
+        (void)uefi_call_wrapper(f->Flush, 1, f);
+        uefi_call_wrapper(f->Close, 1, f);
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
+static void llmk_oo_outcome_append_best_effort(UINT64 boot_count,
+                                                UINT32 action_id,
+                                                const char *expected_effect,
+                                                const char *observed_effect,
+                                                int improved) {
+    if (!g_root) return;
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_binary_file_append(&f, L"OOOUTCOME.LOG");
+    if (EFI_ERROR(st) || !f) return;
+
+    char line[256];
+    int p = 0;
+    line[0] = 0;
+
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, "[boot=");
+    llmk_ascii_append_u64(line, (int)sizeof(line), &p, boot_count);
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, "] action=");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, llmk_oo_action_name(action_id));
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " expected=");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, expected_effect ? expected_effect : "na");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " observed=");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, observed_effect ? observed_effect : "na");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " improved=");
+    if (improved < 0) {
+        llmk_ascii_append_str(line, (int)sizeof(line), &p, "-1");
+    } else {
+        llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)improved);
+    }
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, "\r\n");
+
+    UINTN nb = (UINTN)p;
+    if (nb > 0) {
+        uefi_call_wrapper(f->Write, 3, f, &nb, (void *)line);
+        uefi_call_wrapper(f->Flush, 1, f);
+    }
+    uefi_call_wrapper(f->Close, 1, f);
+
+    llmk_oo_outcome_log_rotate_best_effort();
+}
+
+static void llmk_oo_outcome_feedback_recent_best_effort(int *out_reduction_good,
+                                                        int *out_reduction_bad,
+                                                        int *out_increase_good,
+                                                        int *out_increase_bad) {
+    if (out_reduction_good) *out_reduction_good = 0;
+    if (out_reduction_bad) *out_reduction_bad = 0;
+    if (out_increase_good) *out_increase_good = 0;
+    if (out_increase_bad) *out_increase_bad = 0;
+    if (!g_root) return;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOOUTCOME.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        return;
+    }
+
+    char *cbuf = (char *)buf;
+    UINTN start = (len > 8192) ? (len - 8192) : 0;
+    for (UINTN i = start; i < len; i++) {
+        if (cbuf[i] == '\n') {
+            start = i + 1;
+            break;
+        }
+    }
+    if (start >= len) start = 0;
+
+    int considered = 0;
+    char *p = cbuf + start;
+    char *end = cbuf + len;
+    while (p < end && considered < 16) {
+        char *line = p;
+        while (p < end && *p != '\n') p++;
+        if (p < end && *p == '\n') {
+            *p = 0;
+            p++;
+        }
+
+        char *action = my_strstr(line, "action=");
+        char *imp = my_strstr(line, "improved=");
+        if (!action || !imp) continue;
+
+        action += 7;
+        imp += 9;
+        if (*imp == '-') continue;
+        int improved = (*imp == '1') ? 1 : 0;
+
+        int is_reduce = 0;
+        int is_increase = 0;
+        if (my_strstr(action, "reduce_ctx") || my_strstr(action, "reduce_seq")) {
+            is_reduce = 1;
+        } else if (my_strstr(action, "increase_ctx")) {
+            is_increase = 1;
+        }
+        if (!is_reduce && !is_increase) continue;
+
+        considered++;
+        if (is_reduce) {
+            if (improved) {
+                if (out_reduction_good) (*out_reduction_good)++;
+            } else {
+                if (out_reduction_bad) (*out_reduction_bad)++;
+            }
+        } else if (is_increase) {
+            if (improved) {
+                if (out_increase_good) (*out_increase_good)++;
+            } else {
+                if (out_increase_bad) (*out_increase_bad)++;
+            }
+        }
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
 static void llmk_oo_journal_append_best_effort(const LlmkOoState *s, const char *event) {
     if (!g_root || !s) return;
 
@@ -2987,6 +3159,15 @@ static int llmk_oo_consult_metrics_tick_best_effort(LlmkOoState *s, char *out_ev
     // Improvement: mode numerically decreases (SAFE=2 -> DEGRADED=1 -> NORMAL=0)
     int improved = ((UINT32)s->mode < apply_mode) ? 1 : 0;
     Print(L"OK: OO consult metric: action=%a improved=%d\r\n", llmk_oo_action_name(action_id), improved);
+
+    {
+        const char *observed = improved ? "mode_improved" : "mode_not_improved";
+        llmk_oo_outcome_append_best_effort((UINT64)s->boot_count,
+                                           action_id,
+                                           "mode_drop",
+                                           observed,
+                                           improved);
+    }
 
     if (out_event && out_cap > 0) {
         int p = 0;
@@ -5556,6 +5737,16 @@ static void llmk_oo_record_last_auto_apply_best_effort(UINT64 boot_count, UINT32
     if (!EFI_ERROR(wst)) {
         llmk_oo_write_recovery_best_effort(&s);
     }
+
+    {
+        const char *expected = llmk_oo_action_is_increase(action_id) ? "mode_stable" : "mode_drop";
+        (void)apply_mode;
+        llmk_oo_outcome_append_best_effort(boot_count,
+                                           action_id,
+                                           expected,
+                                           "pending_next_boot",
+                                           -1);
+    }
 }
 
 static int llmk_oo_auto_apply_write_verify_best_effort(const char *action,
@@ -7977,8 +8168,16 @@ static int llmk_oo_confidence_score(UINT32 mode, UINT64 ram_mb, int ctx, int seq
                                     int llm_len,
                                     int action_reduce_ctx, int action_reduce_seq,
                                     int action_increase, int action_reboot,
-                                    int action_model, int action_stable) {
+                                    int action_model, int action_stable,
+                                    int *out_feedback_bias,
+                                    int *out_feedback_good,
+                                    int *out_feedback_bad) {
     int score = 50;
+    int feedback_bias = 0;
+
+    if (out_feedback_bias) *out_feedback_bias = 0;
+    if (out_feedback_good) *out_feedback_good = 0;
+    if (out_feedback_bad) *out_feedback_bad = 0;
 
     if (mode == LLMK_OO_MODE_NORMAL) score += 20;
     else if (mode == LLMK_OO_MODE_DEGRADED) score += 10;
@@ -7999,6 +8198,33 @@ static int llmk_oo_confidence_score(UINT32 mode, UINT64 ram_mb, int ctx, int seq
     if (action_reduce_ctx || action_reduce_seq) score += 5;
     if (action_increase && mode != LLMK_OO_MODE_NORMAL) score -= 10;
     if (action_reboot || action_model) score -= 5;
+
+    {
+        int rg = 0, rb = 0, ig = 0, ib = 0;
+        llmk_oo_outcome_feedback_recent_best_effort(&rg, &rb, &ig, &ib);
+
+        int wants_reduce = (action_reduce_ctx || action_reduce_seq) ? 1 : 0;
+        int wants_increase = action_increase ? 1 : 0;
+
+        if (wants_reduce) {
+            int delta = rg - rb;
+            if (delta > 0) feedback_bias += (delta >= 3) ? 8 : 4;
+            else if (delta < 0) feedback_bias -= ((-delta) >= 3) ? 10 : 5;
+            if (out_feedback_good) *out_feedback_good += rg;
+            if (out_feedback_bad) *out_feedback_bad += rb;
+        }
+
+        if (wants_increase) {
+            int delta = ig - ib;
+            if (delta > 0) feedback_bias += (delta >= 2) ? 6 : 3;
+            else if (delta < 0) feedback_bias -= ((-delta) >= 2) ? 8 : 4;
+            if (out_feedback_good) *out_feedback_good += ig;
+            if (out_feedback_bad) *out_feedback_bad += ib;
+        }
+    }
+
+    score += feedback_bias;
+    if (out_feedback_bias) *out_feedback_bias = feedback_bias;
 
     if (score < 0) score = 0;
     if (score > 100) score = 100;
@@ -8082,16 +8308,22 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
         if (confidence_threshold < 0) confidence_threshold = 0;
         if (confidence_threshold > 100) confidence_threshold = 100;
         int confidence_gate_enabled = (g_cfg_oo_conf_gate != 0);
+    int feedback_bias = 0;
+    int feedback_good = 0;
+    int feedback_bad = 0;
     int confidence_score = llmk_oo_confidence_score(mode, ram_mb, ctx, seq, llm_len,
                                                     action_reduce_ctx, action_reduce_seq,
                                                     action_increase, action_reboot,
-                                                    action_model, action_stable);
+                                                    action_model, action_stable,
+                                                    &feedback_bias, &feedback_good, &feedback_bad);
         int confidence_gate_pass = (confidence_score >= confidence_threshold);
         Print(L"OK: OO confidence: score=%d threshold=%d gate=%a pass=%a\r\n",
             confidence_score,
             confidence_threshold,
             confidence_gate_enabled ? "enforced" : "log_only",
             confidence_gate_pass ? "yes" : "no");
+        Print(L"OK: OO feedback: good=%d bad=%d bias=%d\r\n",
+            feedback_good, feedback_bad, feedback_bias);
 
     // 6. Policy decision (M5.1: apply ALL valid actions when multi_enabled)
     int actions_applied = 0;

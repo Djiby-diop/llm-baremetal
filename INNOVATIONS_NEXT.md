@@ -7,7 +7,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ B1 baseline implemented in log-only mode (confidence score + threshold logged).
 - ✅ B1 threshold gating implemented behind config flags (`oo_conf_gate`, `oo_conf_threshold`), off by default.
 - ✅ A1 baseline implemented: startup model path now avoids eager GGUF summary parse, adds startup timing markers, and caches GGUF summary once per session for `/model_info`.
-- ▶️ Next coding target: B2 outcome feedback loop (persist `action -> observed_effect` for policy ranking).
+- ✅ B2 baseline implemented: `OOOUTCOME.LOG` now persists `(action, expected, observed)` with pending/observed entries and confidence scoring now includes recent outcome feedback bias.
+- ▶️ Next coding target: B3 safe multi-step adaptation plan.
 
 ## Track A — llm-baremetal core
 
