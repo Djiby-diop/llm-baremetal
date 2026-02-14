@@ -292,6 +292,20 @@ M13.1 native reason IDs:
 - runtime OO core now emits explicit `reason_id=...` tokens in policy/auto-apply markers
 - `m13-explainability.ps1` consumes these native IDs as primary `reason_code` values (fallback kept for older logs)
 
+### M14 explainability coverage (reason_id + parity)
+
+Check runtime marker coverage and optional journal parity:
+
+```powershell
+./m14-explainability-coverage.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -FailOnCoverageGap
+```
+
+Behavior:
+
+- verifies `reason_id` coverage for `OO confidence`, `OO plan`, and `OO auto-apply` markers
+- optionally checks parity against `OOJOUR.LOG` when available (`-RequireJournalParity`)
+- writes state/history to `artifacts/m14/coverage-state.json` and `artifacts/m14/history.jsonl`
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
@@ -306,7 +320,7 @@ Runtime dispatch inputs:
 
 ### Synthese des ameliorations
 
-Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M13.1).
+Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M14).
 
 ## Notes
 

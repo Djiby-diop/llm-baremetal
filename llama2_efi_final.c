@@ -8394,6 +8394,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                     &feedback_bias, &feedback_good, &feedback_bad);
         int confidence_gate_pass = (confidence_score >= confidence_threshold);
         int plan_hard_stop = (confidence_gate_enabled && !confidence_gate_pass) ? 1 : 0;
+        const char *confidence_reason_id = (!confidence_gate_enabled) ? "OO_CONF_LOG_ONLY" :
+                           (confidence_gate_pass ? "OO_CONF_GATE_PASS" : "OO_CONF_GATE_FAIL");
 
         int plan_enabled = ((g_cfg_oo_plan_enable != 0) && multi_enabled) ? 1 : 0;
         int plan_max_actions = g_cfg_oo_plan_max_actions;
@@ -8406,19 +8408,35 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
         int plan_applied_now = 0;
         int plan_checkpoint_done = 0;
 
-        Print(L"OK: OO confidence: score=%d threshold=%d gate=%a pass=%a\r\n",
+        Print(L"OK: OO confidence: score=%d threshold=%d gate=%a pass=%a reason_id=%a\r\n",
             confidence_score,
             confidence_threshold,
             confidence_gate_enabled ? "enforced" : "log_only",
-            confidence_gate_pass ? "yes" : "no");
+            confidence_gate_pass ? "yes" : "no",
+            confidence_reason_id);
         Print(L"OK: OO feedback: good=%d bad=%d bias=%d\r\n",
             feedback_good, feedback_bad, feedback_bias);
-        Print(L"OK: OO plan: enabled=%a max=%d used=%d remain=%d hard_stop=%a\r\n",
+        Print(L"OK: OO plan: enabled=%a max=%d used=%d remain=%d hard_stop=%a reason_id=%a\r\n",
             plan_enabled ? "yes" : "no",
             plan_max_actions,
             g_oo_auto_applied_count_this_boot,
             plan_remaining_budget,
-            plan_hard_stop ? "yes" : "no");
+            plan_hard_stop ? "yes" : "no",
+            plan_hard_stop ? "OO_PLAN_HARD_STOP" : "OO_PLAN_ACTIVE");
+
+        if (!confidence_gate_enabled) {
+            llmk_oo_journal_event_load_state_best_effort("confidence gate=log_only pass=yes reason_id=OO_CONF_LOG_ONLY");
+        } else if (confidence_gate_pass) {
+            llmk_oo_journal_event_load_state_best_effort("confidence gate=enforced pass=yes reason_id=OO_CONF_GATE_PASS");
+        } else {
+            llmk_oo_journal_event_load_state_best_effort("confidence gate=enforced pass=no reason_id=OO_CONF_GATE_FAIL");
+        }
+
+        if (plan_hard_stop) {
+            llmk_oo_journal_event_load_state_best_effort("plan status=hard_stop reason_id=OO_PLAN_HARD_STOP");
+        } else {
+            llmk_oo_journal_event_load_state_best_effort("plan status=active reason_id=OO_PLAN_ACTIVE");
+        }
 
     // 6. Policy decision (M5.1: apply ALL valid actions when multi_enabled)
     int actions_applied = 0;
@@ -8487,7 +8505,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                             ram_mb);
                         if (ok) {
                             Print(L"OK: OO auto-apply: reduce_ctx (old=%d new=%d check=pass reason_id=OO_APPLY_OK)\r\n", ctx, new_ctx);
-                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=success");
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=success reason_id=OO_APPLY_OK");
                             llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_CTX);
                             actions_applied++;
                             plan_applied_now++;
@@ -8503,8 +8521,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             oval[op] = 0;
                             llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
                             Print(L"ERROR: OO auto-apply verification failed: reduce_ctx (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
-                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=failed reason=verify_failed");
-                            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=reduce_ctx");
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=failed reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED");
+                            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=reduce_ctx reason_id=OO_PLAN_HARD_STOP");
                             plan_hard_stop = 1;
                             actions_blocked++;
                         }
@@ -8556,7 +8574,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                             ram_mb);
                         if (ok) {
                             Print(L"OK: OO auto-apply: reduce_seq (old=%d new=%d check=pass reason_id=OO_APPLY_OK)\r\n", seq, new_seq);
-                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=success");
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=success reason_id=OO_APPLY_OK");
                             llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_SEQ);
                             actions_applied++;
                             plan_applied_now++;
@@ -8571,8 +8589,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             oval[op] = 0;
                             llmk_repl_cfg_set_kv_best_effort("seq_len", oval);
                             Print(L"ERROR: OO auto-apply verification failed: reduce_seq (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
-                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=failed reason=verify_failed");
-                            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=reduce_seq");
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=failed reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED");
+                            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=reduce_seq reason_id=OO_PLAN_HARD_STOP");
                             plan_hard_stop = 1;
                             actions_blocked++;
                         }
@@ -8616,7 +8634,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                         ram_mb);
                     if (ok) {
                         Print(L"OK: OO auto-apply: increase_ctx (old=%d new=%d check=pass mode=aggressive reason_id=OO_APPLY_OK)\r\n", ctx, new_ctx);
-                        llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=success");
+                        llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=success reason_id=OO_APPLY_OK");
                         llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_INCREASE_CTX);
                         actions_applied++;
                         plan_applied_now++;
@@ -8631,8 +8649,8 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                         oval[op] = 0;
                         llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
                         Print(L"ERROR: OO auto-apply verification failed: increase_ctx (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
-                        llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=failed reason=verify_failed");
-                        llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=increase_ctx");
+                        llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=failed reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED");
+                        llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=increase_ctx reason_id=OO_PLAN_HARD_STOP");
                         plan_hard_stop = 1;
                         actions_blocked++;
                     }

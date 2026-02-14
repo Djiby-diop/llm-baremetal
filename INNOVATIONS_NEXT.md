@@ -22,7 +22,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M12.1 baseline implemented: M12 now auto-tunes phase/workload threshold matrix from recent M10 outcomes (`helpful/harmful` window) before applying effective curriculum threshold.
 - ✅ M13 baseline implemented: `m13-explainability.ps1` now persists reason codes and threshold provenance (M10/M11/M12) alongside per-run auto-apply outcome events.
 - ✅ M13.1 baseline implemented: runtime OO decision logs now emit explicit `reason_id=...` markers directly from the core engine, consumed by M13 explainability as primary decision reason codes.
-- ▶️ Next coding target: M14 explainability coverage expansion (attach reason_id to confidence/plan markers and journal parity checks).
+- ✅ M14 baseline implemented: runtime now emits `reason_id` on confidence/plan markers and `m14-explainability-coverage.ps1` checks marker coverage plus optional log/journal parity.
+- ▶️ Next coding target: M14.1 runtime journal extraction pipeline (export OOJOUR from runtime image to artifacts for strict parity gating in CI).
 
 ## Track A — llm-baremetal core
 

@@ -78,6 +78,7 @@ $m10Script = Join-Path $PSScriptRoot 'm10-quality-guardrails.ps1'
 $m11Script = Join-Path $PSScriptRoot 'm11-self-heal.ps1'
 $m12Script = Join-Path $PSScriptRoot 'm12-policy-curriculum.ps1'
 $m13Script = Join-Path $PSScriptRoot 'm13-explainability.ps1'
+$m14Script = Join-Path $PSScriptRoot 'm14-explainability-coverage.ps1'
 $cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
 $autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
@@ -334,6 +335,18 @@ try {
     -M12StatePath (Join-Path $PSScriptRoot 'artifacts/m12/curriculum-state.json')
   if ($LASTEXITCODE -ne 0) {
     throw "M13 explainability failed with exit code $LASTEXITCODE"
+  }
+
+  if (-not (Test-Path -LiteralPath $m14Script)) {
+    throw "M14 script not found: $m14Script"
+  }
+
+  Write-Step 'Running M14 explainability coverage check'
+  & $m14Script -LogPath $logPath `
+    -JournalLogPath (Join-Path $PSScriptRoot 'artifacts/m14/OOJOUR.LOG') `
+    -FailOnCoverageGap
+  if ($LASTEXITCODE -ne 0) {
+    throw "M14 coverage failed with exit code $LASTEXITCODE"
   }
 
   Write-Ok "M8 runtime reliability pass complete (log: $logPath)"

@@ -1,4 +1,4 @@
-# Ameliorations apportees (M6 -> M13.1)
+# Ameliorations apportees (M6 -> M14)
 
 Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant la phase d'industrialisation.
 
@@ -122,6 +122,15 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
 - Le moteur OO (`llama2_efi_final.c`) émet maintenant des `reason_id=...` explicites dans les marqueurs policy/auto-apply.
 - `m13-explainability.ps1` priorise ces reason IDs natifs pour `reason_code` (avec fallback rétrocompatible).
 - Résultat: traçabilité plus fiable entre décision runtime et artefacts d'explicabilité.
+
+## M14 - Couverture reason_id et parité log/journal
+
+- Le runtime enrichit les marqueurs `OO confidence` et `OO plan` avec `reason_id=...`.
+- Le journal OO embarque aussi des `reason_id` sur événements confidence/plan/auto-apply.
+- Nouveau script `m14-explainability-coverage.ps1`:
+  - vérifie la couverture `reason_id` dans les marqueurs runtime,
+  - vérifie la parité optionnelle log/journal quand `OOJOUR.LOG` est disponible,
+  - persiste `artifacts/m14/coverage-state.json` et `artifacts/m14/history.jsonl`.
 
 ## Résultat global
 
