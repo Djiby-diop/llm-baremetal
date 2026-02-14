@@ -43,7 +43,10 @@ param(
   [ValidateRange(-100, 100)]
   [int]$M12AdjMixed = 3,
   [ValidateRange(-100, 100)]
-  [int]$M12AdjUnknown = 0
+  [int]$M12AdjUnknown = 0,
+  [switch]$M14RequireJournalParity,
+  [switch]$M14SkipJournalExtract,
+  [string]$M14ImagePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,11 +82,13 @@ $m11Script = Join-Path $PSScriptRoot 'm11-self-heal.ps1'
 $m12Script = Join-Path $PSScriptRoot 'm12-policy-curriculum.ps1'
 $m13Script = Join-Path $PSScriptRoot 'm13-explainability.ps1'
 $m14Script = Join-Path $PSScriptRoot 'm14-explainability-coverage.ps1'
+$m141ExtractScript = Join-Path $PSScriptRoot 'm14-extract-oojournal.ps1'
 $cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
 $autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
 $logPath = Join-Path $tmpDir 'm8-qemu-serial.log'
 $errLogPath = Join-Path $tmpDir 'm8-qemu-serial.err.log'
+$m14JournalPath = Join-Path $PSScriptRoot 'artifacts/m14/OOJOUR.LOG'
 
 New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
@@ -341,10 +346,41 @@ try {
     throw "M14 script not found: $m14Script"
   }
 
+  if (-not $M14SkipJournalExtract) {
+    if (-not (Test-Path -LiteralPath $m141ExtractScript)) {
+      throw "M14.1 extract script not found: $m141ExtractScript"
+    }
+
+    Write-Step 'Running M14.1 OOJOUR extraction'
+    $extractArgs = @(
+      '-OutputPath', $m14JournalPath
+    )
+    if ($M14ImagePath) {
+      $extractArgs += @('-ImagePath', $M14ImagePath)
+    }
+    if ($M14RequireJournalParity) {
+      $extractArgs += '-FailIfMissing'
+    }
+
+    & $m141ExtractScript @extractArgs
+    if ($LASTEXITCODE -ne 0) {
+      throw "M14.1 OOJOUR extraction failed with exit code $LASTEXITCODE"
+    }
+  } else {
+    Write-Warn 'M14.1 journal extraction skipped by flag'
+  }
+
   Write-Step 'Running M14 explainability coverage check'
-  & $m14Script -LogPath $logPath `
-    -JournalLogPath (Join-Path $PSScriptRoot 'artifacts/m14/OOJOUR.LOG') `
-    -FailOnCoverageGap
+  $m14Args = @(
+    '-LogPath', $logPath,
+    '-JournalLogPath', $m14JournalPath,
+    '-FailOnCoverageGap'
+  )
+  if ($M14RequireJournalParity) {
+    $m14Args += '-RequireJournalParity'
+  }
+
+  & $m14Script @m14Args
   if ($LASTEXITCODE -ne 0) {
     throw "M14 coverage failed with exit code $LASTEXITCODE"
   }

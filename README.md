@@ -306,6 +306,20 @@ Behavior:
 - optionally checks parity against `OOJOUR.LOG` when available (`-RequireJournalParity`)
 - writes state/history to `artifacts/m14/coverage-state.json` and `artifacts/m14/history.jsonl`
 
+### M14.1 runtime journal extraction pipeline
+
+Extract `OOJOUR.LOG` from the runtime image for parity checks:
+
+```powershell
+./m14-extract-oojournal.ps1
+```
+
+Behavior:
+
+- extracts `OOJOUR.LOG` from the latest `llm-baremetal-boot*.img` using WSL `mtools`
+- persists extraction state/history in `artifacts/m14/extract-state.json` and `artifacts/m14/extract-history.jsonl`
+- M8 runtime supports strict mode with `-M14RequireJournalParity` (fails if extract/parity fails)
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
@@ -320,7 +334,7 @@ Runtime dispatch inputs:
 
 ### Synthese des ameliorations
 
-Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M14).
+Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M14.1).
 
 ## Notes
 

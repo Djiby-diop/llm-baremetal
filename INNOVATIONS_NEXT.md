@@ -23,7 +23,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M13 baseline implemented: `m13-explainability.ps1` now persists reason codes and threshold provenance (M10/M11/M12) alongside per-run auto-apply outcome events.
 - ✅ M13.1 baseline implemented: runtime OO decision logs now emit explicit `reason_id=...` markers directly from the core engine, consumed by M13 explainability as primary decision reason codes.
 - ✅ M14 baseline implemented: runtime now emits `reason_id` on confidence/plan markers and `m14-explainability-coverage.ps1` checks marker coverage plus optional log/journal parity.
-- ▶️ Next coding target: M14.1 runtime journal extraction pipeline (export OOJOUR from runtime image to artifacts for strict parity gating in CI).
+- ✅ M14.1 baseline implemented: `m14-extract-oojournal.ps1` exports `OOJOUR.LOG` from runtime image to artifacts and M8/CI now supports strict parity gating (`-M14RequireJournalParity`).
+- ▶️ Next coding target: M15 explainability drift guardrails (reason_id distribution drift + anomaly alerts).
 
 ## Track A — llm-baremetal core
 

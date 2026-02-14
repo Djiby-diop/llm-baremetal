@@ -56,7 +56,7 @@ jobs:
           if ('${{ inputs.timeout_sec }}' -match '^[0-9]+$') {
             $timeout = [int]'${{ inputs.timeout_sec }}'
           }
-          ./m8-reliability.ps1 -RunQemu -TimeoutSec $timeout -Accel tcg -MemMB 3072 -MaxModelSelectMs 5000 -MaxModelPrepareMs 30000 -MaxHarmfulRatioPct 50 -MaxConsecutiveFailures 3 -MinAutoApplySamples 1
+          ./m8-reliability.ps1 -RunQemu -TimeoutSec $timeout -Accel tcg -MemMB 3072 -MaxModelSelectMs 5000 -MaxModelPrepareMs 30000 -MaxHarmfulRatioPct 50 -MaxConsecutiveFailures 3 -MinAutoApplySamples 1 -M14RequireJournalParity
 
       - name: Upload runtime log
         if: always()
@@ -152,4 +152,28 @@ jobs:
         with:
           name: m14-coverage-history
           path: artifacts/m14/history.jsonl
+          if-no-files-found: warn
+
+      - name: Upload M14.1 extract state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m14-extract-state
+          path: artifacts/m14/extract-state.json
+          if-no-files-found: warn
+
+      - name: Upload M14.1 extract history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m14-extract-history
+          path: artifacts/m14/extract-history.jsonl
+          if-no-files-found: warn
+
+      - name: Upload extracted OOJOUR
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oojour-log
+          path: artifacts/m14/OOJOUR.LOG
           if-no-files-found: warn

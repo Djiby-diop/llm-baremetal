@@ -1,4 +1,4 @@
-# Ameliorations apportees (M6 -> M14)
+# Ameliorations apportees (M6 -> M14.1)
 
 Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant la phase d'industrialisation.
 
@@ -131,6 +131,14 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - vérifie la couverture `reason_id` dans les marqueurs runtime,
   - vérifie la parité optionnelle log/journal quand `OOJOUR.LOG` est disponible,
   - persiste `artifacts/m14/coverage-state.json` et `artifacts/m14/history.jsonl`.
+
+## M14.1 - Extraction runtime de OOJOUR pour parité stricte
+
+- Nouveau script `m14-extract-oojournal.ps1`:
+  - extrait `OOJOUR.LOG` depuis l'image boot (`llm-baremetal-boot*.img`) via WSL+mtools,
+  - écrit `artifacts/m14/extract-state.json` et `artifacts/m14/extract-history.jsonl`.
+- `m8-reliability.ps1` supporte désormais la parité stricte avec `-M14RequireJournalParity`.
+- CI runtime active ce mode strict et publie les artefacts `OOJOUR.LOG` + état/historique d'extraction.
 
 ## Résultat global
 
