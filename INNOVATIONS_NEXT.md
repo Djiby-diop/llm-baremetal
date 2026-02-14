@@ -6,7 +6,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ A2 baseline implemented (structured observability markers in runtime + OO consult).
 - ✅ B1 baseline implemented in log-only mode (confidence score + threshold logged).
 - ✅ B1 threshold gating implemented behind config flags (`oo_conf_gate`, `oo_conf_threshold`), off by default.
-- ▶️ Next coding target: A1 startup latency work (model open + metadata path).
+- ✅ A1 baseline implemented: startup model path now avoids eager GGUF summary parse, adds startup timing markers, and caches GGUF summary once per session for `/model_info`.
+- ▶️ Next coding target: B2 outcome feedback loop (persist `action -> observed_effect` for policy ranking).
 
 ## Track A — llm-baremetal core
 

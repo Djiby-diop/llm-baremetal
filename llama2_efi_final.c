@@ -52,9 +52,15 @@ static LlmkModelFormat g_loaded_model_format = LLMK_MODEL_FMT_UNKNOWN;
 static CHAR16 g_loaded_model_path16[160];
 static volatile UINT32 g_loaded_model_path16_canary = 0xD1B1D1B1u;
 static GgufSummary g_loaded_model_gguf;
+static int g_loaded_model_gguf_valid = 0;
+
+// Forward decl used by early GGUF summary printer.
+static void llmk_print_ascii(const char *s);
 
 static void llmk_model_set_loaded_path(const CHAR16 *path) {
     g_loaded_model_path16_canary = 0xD1B1D1B1u;
+    g_loaded_model_gguf_valid = 0;
+    SetMem(&g_loaded_model_gguf, sizeof(g_loaded_model_gguf), 0);
     if (!path) {
         g_loaded_model_path16[0] = 0;
         return;
@@ -84,12 +90,34 @@ static void llmk_debug_print_loaded_model_path(const CHAR16 *tag) {
     }
 }
 
+static void llmk_print_gguf_summary_block(const CHAR16 *path16, const GgufSummary *s) {
+    if (!s) return;
+    Print(L"\r\nGGUF model info:\r\n");
+    Print(L"  file=%s\r\n", path16 ? path16 : L"(unknown)");
+    Print(L"  version=%u tensors=%lu kv=%lu header_bytes=%lu\r\n",
+          (unsigned)s->version,
+          (UINT64)s->tensor_count,
+          (UINT64)s->kv_count,
+          (UINT64)s->header_bytes);
+    Print(L"  arch="); llmk_print_ascii(s->architecture[0] ? s->architecture : "(unknown)"); Print(L"\r\n");
+    Print(L"  name="); llmk_print_ascii(s->name[0] ? s->name : "(none)"); Print(L"\r\n");
+    Print(L"  file_type=%lu\r\n", (UINT64)s->file_type);
+    if (s->context_length)   Print(L"  ctx=%lu\r\n", (UINT64)s->context_length);
+    if (s->embedding_length) Print(L"  dim=%lu\r\n", (UINT64)s->embedding_length);
+    if (s->block_count)      Print(L"  layers=%lu\r\n", (UINT64)s->block_count);
+    if (s->head_count)       Print(L"  heads=%lu\r\n", (UINT64)s->head_count);
+    if (s->head_count_kv)    Print(L"  kv_heads=%lu\r\n", (UINT64)s->head_count_kv);
+    if (s->vocab_size)       Print(L"  vocab=%lu\r\n", (UINT64)s->vocab_size);
+    if (s->tokenizer_model[0]) { Print(L"  tokenizer="); llmk_print_ascii(s->tokenizer_model); Print(L"\r\n"); }
+}
+
 #ifndef LLMB_BUILD_ID
 #define LLMB_BUILD_ID L"(unknown)"
 #endif
 
 // Forward decl (defined later).
 static int uefi_wall_us(unsigned long long *out_us);
+static void llmk_print_ascii(const char *s);
 
 typedef struct {
     const CHAR16 *name;
@@ -3568,6 +3596,14 @@ static void llmk_repl_no_model_loop(void) {
                 StrCpy(path16, L"model.bin");
             }
 
+            if (g_loaded_model_format == LLMK_MODEL_FMT_GGUF &&
+                g_loaded_model_gguf_valid &&
+                llmk_char16_streq_ci(path16, g_loaded_model_path16)) {
+                llmk_print_gguf_summary_block(path16, &g_loaded_model_gguf);
+                Print(L"\r\n");
+                continue;
+            }
+
             EFI_FILE_HANDLE f = NULL;
             EFI_STATUS st = llmk_open_read_file(&f, path16);
             if (EFI_ERROR(st) || !f) {
@@ -3584,19 +3620,11 @@ static void llmk_repl_no_model_loop(void) {
                     Print(L"\r\nGGUF: failed to parse (%r)\r\n\r\n", gst);
                     continue;
                 }
-                Print(L"\r\nGGUF model info:\r\n");
-                Print(L"  file=%s\r\n", path16);
-                Print(L"  version=%u tensors=%lu kv=%lu header_bytes=%lu\r\n", (unsigned)s.version, (UINT64)s.tensor_count, (UINT64)s.kv_count, (UINT64)s.header_bytes);
-                Print(L"  arch="); llmk_print_ascii(s.architecture[0] ? s.architecture : "(unknown)"); Print(L"\r\n");
-                Print(L"  name="); llmk_print_ascii(s.name[0] ? s.name : "(none)"); Print(L"\r\n");
-                Print(L"  file_type=%lu\r\n", (UINT64)s.file_type);
-                if (s.context_length)   Print(L"  ctx=%lu\r\n", (UINT64)s.context_length);
-                if (s.embedding_length) Print(L"  dim=%lu\r\n", (UINT64)s.embedding_length);
-                if (s.block_count)      Print(L"  layers=%lu\r\n", (UINT64)s.block_count);
-                if (s.head_count)       Print(L"  heads=%lu\r\n", (UINT64)s.head_count);
-                if (s.head_count_kv)    Print(L"  kv_heads=%lu\r\n", (UINT64)s.head_count_kv);
-                if (s.vocab_size)       Print(L"  vocab=%lu\r\n", (UINT64)s.vocab_size);
-                if (s.tokenizer_model[0]) { Print(L"  tokenizer="); llmk_print_ascii(s.tokenizer_model); Print(L"\r\n"); }
+                llmk_print_gguf_summary_block(path16, &s);
+                if (g_loaded_model_format == LLMK_MODEL_FMT_GGUF && llmk_char16_streq_ci(path16, g_loaded_model_path16)) {
+                    g_loaded_model_gguf = s;
+                    g_loaded_model_gguf_valid = 1;
+                }
                 Print(L"\r\n");
                 continue;
             }
@@ -8962,6 +8990,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     if (g_boot_verbose) {
         Print(L"[2/7] Loading model...\r\n");
     }
+
+    unsigned long long startup_model_t0_us = 0;
+    unsigned long long startup_model_select_done_us = 0;
+    unsigned long long startup_model_prep_done_us = 0;
+    (void)uefi_wall_us(&startup_model_t0_us);
     
     EFI_FILE_HANDLE ModelFile;
     CHAR16 *model_filename = NULL;
@@ -9135,6 +9168,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 model_selected:
         ;
 
+    (void)uefi_wall_us(&startup_model_select_done_us);
+
         if (g_cfg_oo_enable && cfg_model_override_requested && cfg_model_override_failed && model_filename != NULL) {
             Print(L"OK: OO model fallback: %s -> %s\r\n", cfg_model_requested, model_filename);
         }
@@ -9166,19 +9201,7 @@ model_selected:
     int shared_classifier = 0;
 
     if (g_loaded_model_format == LLMK_MODEL_FMT_GGUF) {
-        // Parse GGUF metadata best-effort, then fall back to a .bin model if available.
-        // (If GGUF inference is unsupported, we keep the old safe .bin fallback behavior.)
-        EFI_STATUS gst = gguf_read_summary(ModelFile, &g_loaded_model_gguf);
-        if (!EFI_ERROR(gst)) {
-            Print(L"GGUF detected: ");
-            llmk_print_ascii(g_loaded_model_gguf.architecture[0] ? g_loaded_model_gguf.architecture : "(unknown)");
-            Print(L" | ctx=%lu dim=%lu layers=%lu heads=%lu kv_heads=%lu\r\n",
-                  (UINT64)g_loaded_model_gguf.context_length,
-                  (UINT64)g_loaded_model_gguf.embedding_length,
-                  (UINT64)g_loaded_model_gguf.block_count,
-                  (UINT64)g_loaded_model_gguf.head_count,
-                  (UINT64)g_loaded_model_gguf.head_count_kv);
-        }
+        // Parse GGUF plan directly on startup path (avoid extra summary parse here).
 
         // Try to build a GGUF inference plan. If this fails (e.g., quantized GGUF), fall back to .bin.
         {
@@ -9195,6 +9218,10 @@ model_selected:
 
                 shared_classifier = gguf_has_output_weight ? 0 : 1;
                 use_gguf_inference = 1;
+                if (g_boot_verbose) {
+                    Print(L"GGUF detected: ctx=%d dim=%d layers=%d heads=%d kv_heads=%d\r\n",
+                          config.seq_len, config.dim, config.n_layers, config.n_heads, config.n_kv_heads);
+                }
                 Print(L"OK: GGUF inference enabled (F16/F32/Q4/Q5/Q8).\r\n\r\n");
             } else {
                 Print(L"NOTE: GGUF inference unsupported (%r); searching for a .bin fallback...\r\n", pst);
@@ -9304,6 +9331,20 @@ model_selected:
         }
 gguf_fallback_done:
         ;
+    }
+
+    (void)uefi_wall_us(&startup_model_prep_done_us);
+    if (startup_model_t0_us && startup_model_prep_done_us && startup_model_prep_done_us >= startup_model_t0_us) {
+        unsigned long long select_ms = (startup_model_select_done_us >= startup_model_t0_us)
+                                       ? ((startup_model_select_done_us - startup_model_t0_us) / 1000ULL)
+                                       : 0ULL;
+        unsigned long long prep_ms = (startup_model_prep_done_us >= startup_model_select_done_us)
+                                     ? ((startup_model_prep_done_us - startup_model_select_done_us) / 1000ULL)
+                                     : 0ULL;
+        const char *fmt_s = (g_loaded_model_format == LLMK_MODEL_FMT_GGUF) ? "gguf" :
+                            (g_loaded_model_format == LLMK_MODEL_FMT_BIN) ? "bin" : "unknown";
+        Print(L"[obs][startup] model_select_ms=%lu model_prepare_ms=%lu format=%a\r\n",
+              (UINT64)select_ms, (UINT64)prep_ms, fmt_s);
     }
 
     UINTN bytes_to_read = 0;
@@ -11430,6 +11471,14 @@ snap_autoload_done:
                     }
                 }
 
+                if (g_loaded_model_format == LLMK_MODEL_FMT_GGUF &&
+                    g_loaded_model_gguf_valid &&
+                    llmk_char16_streq_ci(path16, g_loaded_model_path16)) {
+                    llmk_print_gguf_summary_block(path16, &g_loaded_model_gguf);
+                    Print(L"\r\nNOTE: GGUF inference is not wired yet; use .bin for generation today.\r\n\r\n");
+                    continue;
+                }
+
                 EFI_FILE_HANDLE f = NULL;
                 CHAR16 picked[192];
                 picked[0] = 0;
@@ -11456,19 +11505,11 @@ snap_autoload_done:
                         continue;
                     }
 
-                    Print(L"\r\nGGUF model info:\r\n");
-                    Print(L"  file=%s\r\n", path16);
-                    Print(L"  version=%u tensors=%lu kv=%lu header_bytes=%lu\r\n", (unsigned)s.version, (UINT64)s.tensor_count, (UINT64)s.kv_count, (UINT64)s.header_bytes);
-                    Print(L"  arch="); llmk_print_ascii(s.architecture[0] ? s.architecture : "(unknown)"); Print(L"\r\n");
-                    Print(L"  name="); llmk_print_ascii(s.name[0] ? s.name : "(none)"); Print(L"\r\n");
-                    Print(L"  file_type=%lu\r\n", (UINT64)s.file_type);
-                    if (s.context_length)   Print(L"  ctx=%lu\r\n", (UINT64)s.context_length);
-                    if (s.embedding_length) Print(L"  dim=%lu\r\n", (UINT64)s.embedding_length);
-                    if (s.block_count)      Print(L"  layers=%lu\r\n", (UINT64)s.block_count);
-                    if (s.head_count)       Print(L"  heads=%lu\r\n", (UINT64)s.head_count);
-                    if (s.head_count_kv)    Print(L"  kv_heads=%lu\r\n", (UINT64)s.head_count_kv);
-                    if (s.vocab_size)       Print(L"  vocab=%lu\r\n", (UINT64)s.vocab_size);
-                    if (s.tokenizer_model[0]) { Print(L"  tokenizer="); llmk_print_ascii(s.tokenizer_model); Print(L"\r\n"); }
+                    llmk_print_gguf_summary_block(path16, &s);
+                    if (g_loaded_model_format == LLMK_MODEL_FMT_GGUF && llmk_char16_streq_ci(path16, g_loaded_model_path16)) {
+                        g_loaded_model_gguf = s;
+                        g_loaded_model_gguf_valid = 1;
+                    }
                     Print(L"\r\nNOTE: GGUF inference is not wired yet; use .bin for generation today.\r\n\r\n");
                     continue;
                 }
