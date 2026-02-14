@@ -12,7 +12,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ A3 baseline implemented: `/models` now reports size+type+summary and startup `model=` path failures now emit explicit fallback diagnostics and recovery hints.
 - ✅ M8 baseline implemented: `m8-reliability.ps1` now executes static + runtime reliability checks with targeted autorun scenarios for A1/A3/B1/B2/B3 and emits pass/fail markers.
 - ✅ M8.1 CI wiring implemented: GitHub Actions workflow runs M8 static pass on push/PR and exposes optional runtime pass via manual dispatch on self-hosted Windows runner.
-- ▶️ Next coding target: M9 regression guardrails (parse M8 logs and enforce marker/latency budgets).
+- ✅ M9 baseline implemented: `m9-guardrails.ps1` parses M8 runtime logs and enforces startup marker + latency budgets (`model_select_ms`, `model_prepare_ms`) with optional OO marker requirements.
+- ▶️ Next coding target: M9.1 trend tracking (persist budget history and detect drift across runs).
 
 ## Track A — llm-baremetal core
 

@@ -7,7 +7,11 @@ param(
   [ValidateSet('auto','whpx','tcg','none')]
   [string]$Accel = 'tcg',
   [ValidateRange(1024, 8192)]
-  [int]$MemMB = 4096
+  [int]$MemMB = 4096,
+  [ValidateRange(0, 120000)]
+  [int]$MaxModelSelectMs = 2000,
+  [ValidateRange(0, 120000)]
+  [int]$MaxModelPrepareMs = 12000
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +41,7 @@ function Assert-Pattern([string]$text, [string]$pattern, [string]$label) {
 $preflightScript = Join-Path $PSScriptRoot 'preflight-host.ps1'
 $buildScript = Join-Path $PSScriptRoot 'build.ps1'
 $runScript = Join-Path $PSScriptRoot 'run.ps1'
+$m9Script = Join-Path $PSScriptRoot 'm9-guardrails.ps1'
 $cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
 $autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
@@ -212,6 +217,16 @@ try {
 
   if (-not $staticOk -or -not $runtimeOk) {
     throw "M8 reliability checks failed (see log: $logPath)"
+  }
+
+  if (-not (Test-Path -LiteralPath $m9Script)) {
+    throw "M9 script not found: $m9Script"
+  }
+
+  Write-Step 'Running M9 regression guardrails'
+  & $m9Script -LogPath $logPath -MaxModelSelectMs $MaxModelSelectMs -MaxModelPrepareMs $MaxModelPrepareMs -RequireOoMarkers
+  if ($LASTEXITCODE -ne 0) {
+    throw "M9 guardrails failed with exit code $LASTEXITCODE"
   }
 
   Write-Ok "M8 runtime reliability pass complete (log: $logPath)"

@@ -186,7 +186,21 @@ End-to-end runtime checks (build + QEMU autorun scenario):
 ./m8-reliability.ps1 -RunQemu -Accel tcg -TimeoutSec 150
 ```
 
+Runtime checks with explicit startup latency budgets:
+
+```powershell
+./m8-reliability.ps1 -RunQemu -Accel tcg -TimeoutSec 150 -MaxModelSelectMs 5000 -MaxModelPrepareMs 30000
+```
+
 The runtime log is written to `artifacts/m8/m8-qemu-serial.log`.
+
+### M9 regression guardrails
+
+Parse an M8 runtime log and enforce marker/latency budgets:
+
+```powershell
+./m9-guardrails.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -MaxModelSelectMs 2000 -MaxModelPrepareMs 12000 -RequireOoMarkers
+```
 
 ### M8.1 CI workflow
 
