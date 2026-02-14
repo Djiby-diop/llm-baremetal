@@ -46,7 +46,15 @@ param(
   [int]$M12AdjUnknown = 0,
   [switch]$M14RequireJournalParity,
   [switch]$M14SkipJournalExtract,
-  [string]$M14ImagePath
+  [string]$M14ImagePath,
+  [ValidateRange(1, 50)]
+  [int]$M15BaselineWindow = 5,
+  [ValidateRange(1, 100)]
+  [int]$M15MinSamplesForDrift = 5,
+  [ValidateRange(1, 200)]
+  [int]$M15MaxShareDriftPct = 80,
+  [ValidateRange(1, 100)]
+  [int]$M15MaxUnknownSharePct = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,6 +91,7 @@ $m12Script = Join-Path $PSScriptRoot 'm12-policy-curriculum.ps1'
 $m13Script = Join-Path $PSScriptRoot 'm13-explainability.ps1'
 $m14Script = Join-Path $PSScriptRoot 'm14-explainability-coverage.ps1'
 $m141ExtractScript = Join-Path $PSScriptRoot 'm14-extract-oojournal.ps1'
+$m15Script = Join-Path $PSScriptRoot 'm15-reasonid-drift.ps1'
 $cfgPath = Join-Path $PSScriptRoot 'repl.cfg'
 $autorunPath = Join-Path $PSScriptRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $PSScriptRoot 'artifacts\m8'
@@ -383,6 +392,22 @@ try {
   & $m14Script @m14Args
   if ($LASTEXITCODE -ne 0) {
     throw "M14 coverage failed with exit code $LASTEXITCODE"
+  }
+
+  if (-not (Test-Path -LiteralPath $m15Script)) {
+    throw "M15 script not found: $m15Script"
+  }
+
+  Write-Step 'Running M15 reason_id drift guardrails'
+  & $m15Script -LogPath $logPath `
+    -HistoryPath (Join-Path $PSScriptRoot 'artifacts/m13/history.jsonl') `
+    -BaselineWindow $M15BaselineWindow `
+    -MinSamplesForDrift $M15MinSamplesForDrift `
+    -MaxShareDriftPct $M15MaxShareDriftPct `
+    -MaxUnknownSharePct $M15MaxUnknownSharePct `
+    -FailOnDrift
+  if ($LASTEXITCODE -ne 0) {
+    throw "M15 drift guardrails failed with exit code $LASTEXITCODE"
   }
 
   Write-Ok "M8 runtime reliability pass complete (log: $logPath)"

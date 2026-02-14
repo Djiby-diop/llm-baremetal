@@ -177,3 +177,19 @@ jobs:
           name: oojour-log
           path: artifacts/m14/OOJOUR.LOG
           if-no-files-found: warn
+
+      - name: Upload M15 drift state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m15-drift-state
+          path: artifacts/m15/drift-state.json
+          if-no-files-found: warn
+
+      - name: Upload M15 drift history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m15-drift-history
+          path: artifacts/m15/history.jsonl
+          if-no-files-found: warn

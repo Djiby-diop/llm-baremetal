@@ -1,4 +1,4 @@
-# Ameliorations apportees (M6 -> M14.1)
+# Ameliorations apportees (M6 -> M15)
 
 Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant la phase d'industrialisation.
 
@@ -139,6 +139,17 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - écrit `artifacts/m14/extract-state.json` et `artifacts/m14/extract-history.jsonl`.
 - `m8-reliability.ps1` supporte désormais la parité stricte avec `-M14RequireJournalParity`.
 - CI runtime active ce mode strict et publie les artefacts `OOJOUR.LOG` + état/historique d'extraction.
+
+## M15 - Guardrails de drift des reason_id
+
+- Nouveau script `m15-reasonid-drift.ps1`:
+  - mesure la distribution des `reason_id` sur le run courant,
+  - compare à une baseline récente issue de l'historique M13,
+  - déclenche alertes/anomalies sur dérive forte ou profils inconnus dominants.
+- Intégration en fin de pipeline runtime M8 avec mode gate (`-FailOnDrift`).
+- Artefacts produits:
+  - `artifacts/m15/drift-state.json`,
+  - `artifacts/m15/history.jsonl`.
 
 ## Résultat global
 

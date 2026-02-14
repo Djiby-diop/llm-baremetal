@@ -320,6 +320,20 @@ Behavior:
 - persists extraction state/history in `artifacts/m14/extract-state.json` and `artifacts/m14/extract-history.jsonl`
 - M8 runtime supports strict mode with `-M14RequireJournalParity` (fails if extract/parity fails)
 
+### M15 reason_id drift guardrails
+
+Detect drift and anomalies in reason_id distribution:
+
+```powershell
+./m15-reasonid-drift.ps1 -LogPath artifacts/m8/m8-qemu-serial.log -FailOnDrift
+```
+
+Behavior:
+
+- compares current reason_id distribution to recent M13 history window
+- detects strong share drift and anomaly signals (new/unknown-heavy reason IDs)
+- writes state/history to `artifacts/m15/drift-state.json` and `artifacts/m15/history.jsonl`
+
 ### M8.1 CI workflow
 
 GitHub Actions workflow: `.github/workflows/m8-reliability.yml`
@@ -334,7 +348,7 @@ Runtime dispatch inputs:
 
 ### Synthese des ameliorations
 
-Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M14.1).
+Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M15).
 
 ## Notes
 
