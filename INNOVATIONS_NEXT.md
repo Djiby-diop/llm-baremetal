@@ -9,7 +9,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ A1 baseline implemented: startup model path now avoids eager GGUF summary parse, adds startup timing markers, and caches GGUF summary once per session for `/model_info`.
 - ✅ B2 baseline implemented: `OOOUTCOME.LOG` now persists `(action, expected, observed)` with pending/observed entries and confidence scoring now includes recent outcome feedback bias.
 - ✅ B3 baseline implemented: bounded per-boot multi-step plan (`oo_plan_enable`, `oo_plan_max_actions`), explicit rollback checkpoint markers before auto-apply, and hard-stop on verify failures.
-- ▶️ Next coding target: A3 model selection UX hardening.
+- ✅ A3 baseline implemented: `/models` now reports size+type+summary and startup `model=` path failures now emit explicit fallback diagnostics and recovery hints.
+- ▶️ Next coding target: M8 reliability/CI pass (targeted autorun scenarios for A1/A3/B1/B2/B3).
 
 ## Track A — llm-baremetal core
 

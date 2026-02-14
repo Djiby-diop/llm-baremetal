@@ -3480,6 +3480,13 @@ static int llmk_is_model_file_name16(const CHAR16 *name) {
     return 0;
 }
 
+static const CHAR16 *llmk_model_type_name16(const CHAR16 *name) {
+    if (!name) return L"?";
+    if (llmk_char16_endswith_ci(name, L".gguf")) return L"GGUF";
+    if (llmk_char16_endswith_ci(name, L".bin")) return L"BIN";
+    return L"?";
+}
+
 static int llmk_try_open_first_model_in_dir_best_effort(const CHAR16 *dir_path, EFI_FILE_HANDLE *out_f, CHAR16 *out_path, int out_cap) {
     if (out_f) *out_f = NULL;
     if (out_path && out_cap > 0) out_path[0] = 0;
@@ -3989,6 +3996,9 @@ static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries) {
 
     UINTN printed = 0;
     UINTN matched = 0;
+    UINTN bin_count = 0;
+    UINTN gguf_count = 0;
+    UINT64 total_bytes = 0;
     UINTN buf_cap = 1024;
     void *buf = NULL;
     EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, buf_cap, &buf);
@@ -4014,14 +4024,26 @@ static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries) {
         if (!llmk_is_model_file_name16(info->FileName)) continue;
 
         if (matched == 0) {
-            Print(L"  size      name\r\n");
+            Print(L"  size      type  name\r\n");
         }
+        const CHAR16 *type = llmk_model_type_name16(info->FileName);
         Print(L"  ");
         llmk_print_u64(info->FileSize);
         Print(L" ");
+        Print(L"%s", type);
+        if (llmk_char16_streq(type, L"BIN")) {
+            Print(L"   ");
+            bin_count++;
+        } else if (llmk_char16_streq(type, L"GGUF")) {
+            Print(L"  ");
+            gguf_count++;
+        } else {
+            Print(L"    ");
+        }
         Print(L"%s\r\n", info->FileName);
         printed++;
         matched++;
+        total_bytes += info->FileSize;
     }
 
     if (matched == 0) {
@@ -4029,6 +4051,17 @@ static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries) {
     }
     if (printed >= (UINTN)max_entries) {
         Print(L"  ... (truncated)\r\n");
+    }
+    if (matched > 0) {
+        Print(L"  summary: total=");
+        llmk_print_u64((UINT64)matched);
+        Print(L" bin=");
+        llmk_print_u64((UINT64)bin_count);
+        Print(L" gguf=");
+        llmk_print_u64((UINT64)gguf_count);
+        Print(L" bytes=");
+        llmk_print_u64(total_bytes);
+        Print(L"\r\n");
     }
 
     uefi_call_wrapper(BS->FreePool, 1, buf);
@@ -9374,7 +9407,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 ModelFile = f;
                 status = st;
             } else {
-                Print(L"[cfg] WARNING: model override not found: %s\r\n", cfg_model);
+                Print(L"[cfg] WARNING: model override open failed: %s (%r)\r\n", cfg_model, st);
+                Print(L"[cfg] hint: run /models to inspect available files, or set model=<name>.bin|.gguf\r\n");
+                Print(L"[cfg] fallback: continuing with auto-detect candidates\r\n");
                 cfg_model_override_failed = 1;
             }
         }
@@ -9484,7 +9519,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             } else {
                 Print(L"ERROR: Model file not found.\r\n");
                 Print(L"Expected one of (root or models\\): stories300M.bin stories260M.bin stories200M.bin stories110M.bin stories15M.bin model.bin\r\n");
+                Print(L"Last open status: %r\r\n", last);
                 Print(L"Or set repl.cfg: model=<path> (supports .bin/.gguf)\r\n");
+                Print(L"Tip: in no-model REPL use /models and /model_info <path>\r\n");
                 // Do not exit: keep the app alive so /models + /model_info are usable.
                 InterfaceFx_End();
                 llmk_repl_no_model_loop();
