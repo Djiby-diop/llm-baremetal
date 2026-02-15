@@ -208,6 +208,24 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - paramètres exposés via `reliability.ps1` wrapper public.
 - Résultat: visibilité long-terme sur performance runtime, détection automatique régressions, traçabilité CI.
 
+## M17 - Intégration CI complète avec reporting automatique
+
+- Script `m17-ci-metrics-report.ps1`:
+  - génération rapport compact pour logs CI (texte + Markdown),
+  - analyse dérive avec seuils warn/fail séparés (défaut: 15%/30%),
+  - création automatique GitHub Actions job summary avec tableaux métriques,
+  - gate optionnel sur dérive excessive (`-M17FailOnDrift`).
+- Workflow GitHub Actions (`.github/workflows/m8-reliability.yml`):
+  - step post-runtime: extraction automatique `LLMK_METRICS.LOG` depuis image bootable,
+  - génération rapport M17 avec drift detection,
+  - upload artifacts: métriques raw JSON + rapport texte pour traçabilité,
+  - intégration job summary: tableaux performance visibles directement dans l'UI GitHub Actions.
+- Intégration M8/reliability:
+  - flag `-M17EnableCIReport` active génération rapport post-extraction,
+  - détection automatique fichier métriques le plus récent si non spécifié,
+  - seuils configurables via paramètres exposed dans `reliability.ps1`.
+- Résultat: traçabilité continue performance runtime dans CI, alertes visuelles sur dérives, historique artifacts pour analyse régression.
+
 ## Résultat global
 
 - Pipeline plus sûr, plus observable, et mieux automatisé.

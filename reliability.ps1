@@ -70,7 +70,13 @@ param(
   [ValidateRange(0.05, 2.0)]
   [double]$M16DriftThresholdPct = 0.20,
   [switch]$M16UpdateBaseline,
-  [switch]$M16RejectOnDrift
+  [switch]$M16RejectOnDrift,
+  [switch]$M17EnableCIReport,
+  [ValidateRange(0.05, 2.0)]
+  [double]$M17WarnThresholdPct = 0.15,
+  [ValidateRange(0.05, 2.0)]
+  [double]$M17FailThresholdPct = 0.30,
+  [switch]$M17FailOnDrift
 )
 
 $ErrorActionPreference = 'Stop'
@@ -113,6 +119,8 @@ $argHash = @{
   M151TopReasonIds = $M151TopReasonIds
   M16WindowRuns = $M16WindowRuns
   M16DriftThresholdPct = $M16DriftThresholdPct
+  M17WarnThresholdPct = $M17WarnThresholdPct
+  M17FailThresholdPct = $M17FailThresholdPct
 }
 
 if ($SkipPreflight) { $argHash['SkipPreflight'] = $true }
@@ -125,6 +133,8 @@ if ($M16ExtractMetrics) { $argHash['M16ExtractMetrics'] = $true }
 if ($M16SkipExtract) { $argHash['M16SkipExtract'] = $true }
 if ($M16UpdateBaseline) { $argHash['M16UpdateBaseline'] = $true }
 if ($M16RejectOnDrift) { $argHash['M16RejectOnDrift'] = $true }
+if ($M17EnableCIReport) { $argHash['M17EnableCIReport'] = $true }
+if ($M17FailOnDrift) { $argHash['M17FailOnDrift'] = $true }
 
 & $orchestratorScript @argHash
 exit $LASTEXITCODE

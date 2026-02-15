@@ -68,7 +68,13 @@ param(
   [ValidateRange(0.05, 2.0)]
   [double]$M16DriftThresholdPct = 0.20,
   [switch]$M16UpdateBaseline,
-  [switch]$M16RejectOnDrift
+  [switch]$M16RejectOnDrift,
+  [switch]$M17EnableCIReport,
+  [ValidateRange(0.05, 2.0)]
+  [double]$M17WarnThresholdPct = 0.15,
+  [ValidateRange(0.05, 2.0)]
+  [double]$M17FailThresholdPct = 0.30,
+  [switch]$M17FailOnDrift
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,6 +116,7 @@ $m15Script = Join-Path $PSScriptRoot 'm15-reasonid-drift.ps1'
 $m151Script = Join-Path $PSScriptRoot 'm15-slo-dashboard.ps1'
 $m16ExtractScript = Join-Path $PSScriptRoot 'm16-extract-metrics.ps1'
 $m16AggregateScript = Join-Path $PSScriptRoot 'm16-metrics-aggregate.ps1'
+$m17ReportScript = Join-Path $PSScriptRoot 'm17-ci-metrics-report.ps1'
 $cfgPath = Join-Path $repoRoot 'repl.cfg'
 $autorunPath = Join-Path $repoRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $repoRoot 'artifacts\m8'
@@ -485,6 +492,53 @@ try {
       } else {
         Write-Ok 'M16.2 metrics aggregation complete'
       }
+    }
+  }
+
+  # M17: CI metrics reporting
+  if ($M17EnableCIReport) {
+    # Check if we have extracted metrics to report on
+    $latestMetrics = Join-Path $repoRoot 'artifacts/m16/raw/metrics_ci_latest.json'
+    if (-not (Test-Path -LiteralPath $latestMetrics)) {
+      # Try to find most recent metrics file
+      $rawMetricsDir = Join-Path $repoRoot 'artifacts/m16/raw'
+      if (Test-Path -LiteralPath $rawMetricsDir) {
+        $latestFile = Get-ChildItem -LiteralPath $rawMetricsDir -Filter '*.json' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($latestFile) {
+          $latestMetrics = $latestFile.FullName
+        }
+      }
+    }
+
+    if (Test-Path -LiteralPath $latestMetrics) {
+      if (-not (Test-Path -LiteralPath $m17ReportScript)) {
+        Write-Warn "M17 CI report script not found: $m17ReportScript"
+      } else {
+        Write-Step 'Running M17 CI metrics report generation'
+        $m17Args = @{
+          MetricsFile = $latestMetrics
+          OutputPath = 'artifacts/m17/ci-metrics-report.txt'
+          WarnThresholdPct = $M17WarnThresholdPct
+          FailThresholdPct = $M17FailThresholdPct
+        }
+        if ($M17FailOnDrift) {
+          $m17Args.FailOnDrift = $true
+        }
+
+        & $m17ReportScript @m17Args
+        if ($LASTEXITCODE -ne 0) {
+          if ($M17FailOnDrift) {
+            throw "M17 CI metrics report failed with exit code $LASTEXITCODE"
+          } else {
+            Write-Warn "M17 CI metrics report detected drift (non-blocking)"
+          }
+        } else {
+          Write-Ok 'M17 CI metrics report complete'
+        }
+      }
+    } else {
+      Write-Warn "M17 CI report requested but no metrics file found"
+      Write-Warn "Ensure M16ExtractMetrics is enabled to collect runtime metrics"
     }
   }
 

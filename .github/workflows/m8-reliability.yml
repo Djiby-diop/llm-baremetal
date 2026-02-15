@@ -217,3 +217,35 @@ jobs:
           name: m151-dashboard-history
           path: artifacts/m15/dashboard-history.jsonl
           if-no-files-found: warn
+
+      - name: Extract M16.1 runtime metrics from bootable image
+        if: always()
+        shell: pwsh
+        run: |
+          ./.ops/milestones/m16-extract-metrics.ps1 -ImagePath llm-baremetal-boot.img -OutputDir artifacts/m16/raw -OutputFilename metrics_ci_latest.json
+
+      - name: Generate M17 CI metrics report
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path artifacts/m16/raw/metrics_ci_latest.json) {
+            ./.ops/milestones/m17-ci-metrics-report.ps1 -MetricsFile artifacts/m16/raw/metrics_ci_latest.json -OutputPath artifacts/m17/ci-metrics-report.txt -WarnThresholdPct 0.15 -FailThresholdPct 0.30
+          } else {
+            Write-Host "[CI] No metrics file extracted; skipping M17 report generation."
+          }
+
+      - name: Upload M16 extracted metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m16-runtime-metrics
+          path: artifacts/m16/raw/metrics_ci_latest.json
+          if-no-files-found: warn
+
+      - name: Upload M17 CI metrics report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m17-ci-metrics-report
+          path: artifacts/m17/ci-metrics-report.txt
+          if-no-files-found: warn

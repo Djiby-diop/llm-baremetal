@@ -29,7 +29,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M16 baseline implemented: `reliability.ps1` unified public interface hides granular milestone scripts (M8-M15.1) in `.ops/milestones/` for cleaner repo surface and simpler operator workflow.
 - ✅ M16.1 baseline implemented: runtime now tracks performance metrics (`LlmkRuntimeMetrics` struct) capturing prefill/decode cycles, token counts, KV cache resets, and generations with `/metrics` REPL command exporting JSON to `LLMK_METRICS.LOG`.
 - ✅ M16.2 baseline implemented: `m16-extract-metrics.ps1` extracts runtime metrics from bootable image, `m16-metrics-aggregate.ps1` computes P50/P95/P99 stats and detects performance drift versus baseline with configurable thresholds and rejection gates.
-- ▶️ Next coding target: M17 candidate definition (extended adaptation/self-healing capabilities).
+- ✅ M17 baseline implemented: `m17-ci-metrics-report.ps1` generates CI-friendly performance reports with drift detection, GitHub Actions workflow auto-extracts metrics post-runtime and uploads as artifacts with job summary integration.
+- ▶️ Next coding target: M18 candidate definition (advanced adaptation/telemetry capabilities).
 
 ## Track A — llm-baremetal core
 
