@@ -244,6 +244,25 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - logs runtime `[m18] autotune=... decode_cpt=...` lors d’un ajustement effectif.
 - Résultat: adaptation automatique légère sans refactor lourd, meilleure stabilité perfs sur charges variables.
 
+## M18.1 - Guardrails temps réel + safe fallback mode
+
+- Guardrail hard decode en boucle de génération:
+  - compteur d'overruns decode surveillé en temps réel,
+  - arrêt anticipé de génération (`stop_reason=budget_guard`) quand le seuil est dépassé,
+  - seuil configurable via `repl.cfg` (`guardrails_decode_hard_stop_overruns`).
+- Safe fallback post-trip (multi-turn borné):
+  - active un mode dégradé pendant N tours (`guardrails_safe_turns`),
+  - applique caps défensifs sur `top_k`, `max_gen_tokens`, `top_p`, `temperature`,
+  - option de reset KV cache sur trip (`guardrails_reset_kv_on_trip=1`).
+- Configuration `repl.cfg` (M18.1):
+  - `guardrails` / `m181_guardrails` (on/off),
+  - `guardrails_safe_top_k`, `guardrails_safe_max_tokens`,
+  - `guardrails_safe_top_p_milli`, `guardrails_safe_temp_milli`.
+- Observabilité:
+  - nouvelle commande REPL `/guard_status` (état runtime, trip count, turns restants, caps),
+  - logs explicites `[m18.1] hard-stop decode ...` et `[m18.1] safe-mode caps applied ...`.
+- Résultat: comportement plus robuste sous dérive latence, avec réponse graduée (stop immédiat + mode sûr temporaire).
+
 ## Résultat global
 
 - Pipeline plus sûr, plus observable, et mieux automatisé.

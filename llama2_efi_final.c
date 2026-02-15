@@ -1344,6 +1344,34 @@ static LlmkAutoTuneConfig g_autotune = {
     0ULL
 };
 
+typedef struct {
+    int enabled;
+    int hard_stop_overruns_decode;
+    int safe_mode_turns;
+    int safe_top_k_cap;
+    int safe_max_tokens_cap;
+    int safe_top_p_milli;
+    int safe_temp_milli;
+    int reset_kv_on_trip;
+    int active_turns_remaining;
+    int trip_count;
+    int last_trip_overruns_decode;
+} LlmkGuardrailsConfig;
+
+static LlmkGuardrailsConfig g_guardrails = {
+    0,
+    6,
+    2,
+    40,
+    96,
+    880,
+    700,
+    0,
+    0,
+    0,
+    0
+};
+
 static void llmk_metrics_reset(void) {
     g_metrics.session_start_cycles = __rdtsc();
     g_metrics.total_prefill_cycles = 0;
@@ -1361,6 +1389,90 @@ static void llmk_metrics_reset(void) {
     g_metrics.generation_count = 0;
     g_autotune.last_action = 0;
     g_autotune.last_decode_cpt = 0;
+    g_guardrails.active_turns_remaining = 0;
+    g_guardrails.trip_count = 0;
+    g_guardrails.last_trip_overruns_decode = 0;
+}
+
+static void llmk_guardrails_print_status(float temperature, float top_p, int top_k, int max_gen_tokens) {
+    int temp_milli = (int)(temperature * 1000.0f + 0.5f);
+    int top_p_milli = (int)(top_p * 1000.0f + 0.5f);
+
+    Print(L"[m18.1] guardrails=%d hard_stop_overruns_decode=%d safe_mode_turns=%d\r\n",
+          g_guardrails.enabled,
+          g_guardrails.hard_stop_overruns_decode,
+          g_guardrails.safe_mode_turns);
+    Print(L"[m18.1] safe caps: top_k<=%d max_tokens<=%d top_p<=%d.%03d temp<=%d.%03d reset_kv=%d\r\n",
+          g_guardrails.safe_top_k_cap,
+          g_guardrails.safe_max_tokens_cap,
+          g_guardrails.safe_top_p_milli / 1000,
+          g_guardrails.safe_top_p_milli % 1000,
+          g_guardrails.safe_temp_milli / 1000,
+          g_guardrails.safe_temp_milli % 1000,
+          g_guardrails.reset_kv_on_trip);
+    Print(L"[m18.1] runtime: active_safe_turns=%d trip_count=%d last_trip_overruns=%d\r\n",
+          g_guardrails.active_turns_remaining,
+          g_guardrails.trip_count,
+          g_guardrails.last_trip_overruns_decode);
+    Print(L"[m18.1] current: top_k=%d max_tokens=%d top_p=%d.%03d temp=%d.%03d\r\n",
+          top_k,
+          max_gen_tokens,
+          top_p_milli / 1000,
+          top_p_milli % 1000,
+          temp_milli / 1000,
+          temp_milli % 1000);
+}
+
+static void llmk_guardrails_apply_safe_caps(float *temperature, float *top_p, int *top_k, int *max_gen_tokens, int emit_log) {
+    if (!g_guardrails.enabled) return;
+    if (g_guardrails.active_turns_remaining <= 0) return;
+    if (!temperature || !top_p || !top_k || !max_gen_tokens) return;
+
+    int changed = 0;
+    int temp_milli = (int)((*temperature) * 1000.0f + 0.5f);
+    int top_p_milli = (int)((*top_p) * 1000.0f + 0.5f);
+
+    if (*top_k > g_guardrails.safe_top_k_cap) {
+        *top_k = g_guardrails.safe_top_k_cap;
+        changed = 1;
+    }
+    if (*max_gen_tokens > g_guardrails.safe_max_tokens_cap) {
+        *max_gen_tokens = g_guardrails.safe_max_tokens_cap;
+        changed = 1;
+    }
+    if (top_p_milli > g_guardrails.safe_top_p_milli) {
+        top_p_milli = g_guardrails.safe_top_p_milli;
+        changed = 1;
+    }
+    if (temp_milli > g_guardrails.safe_temp_milli) {
+        temp_milli = g_guardrails.safe_temp_milli;
+        changed = 1;
+    }
+
+    *temperature = (float)temp_milli / 1000.0f;
+    *top_p = (float)top_p_milli / 1000.0f;
+
+    if (emit_log && changed) {
+        Print(L"[m18.1] safe-mode caps applied (turns_left=%d): top_k=%d max_tokens=%d top_p=%d.%03d temp=%d.%03d\r\n",
+              g_guardrails.active_turns_remaining,
+              *top_k,
+              *max_gen_tokens,
+              top_p_milli / 1000,
+              top_p_milli % 1000,
+              temp_milli / 1000,
+              temp_milli % 1000);
+    }
+}
+
+static void llmk_guardrails_finish_turn(int had_guard_trip) {
+    if (!g_guardrails.enabled) return;
+
+    if (had_guard_trip) {
+        g_guardrails.trip_count++;
+        g_guardrails.active_turns_remaining = g_guardrails.safe_mode_turns;
+    } else if (g_guardrails.active_turns_remaining > 0) {
+        g_guardrails.active_turns_remaining--;
+    }
 }
 
 static void llmk_autotune_print_status(float temperature, float top_p, int top_k, int max_gen_tokens) {
@@ -5340,6 +5452,66 @@ static void llmk_load_repl_cfg_best_effort(
                 g_autotune.step_temp_milli = v;
                 applied = 1;
             }
+        } else if (llmk_cfg_streq_ci(key, "guardrails") || llmk_cfg_streq_ci(key, "m181_guardrails")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_guardrails.enabled = b;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "guardrails_decode_hard_stop_overruns")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > 128) v = 128;
+                g_guardrails.hard_stop_overruns_decode = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "guardrails_safe_turns")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > 32) v = 32;
+                g_guardrails.safe_mode_turns = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "guardrails_safe_top_k")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > 256) v = 256;
+                g_guardrails.safe_top_k_cap = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "guardrails_safe_max_tokens")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > MAX_TOKENS) v = MAX_TOKENS;
+                g_guardrails.safe_max_tokens_cap = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "guardrails_safe_top_p_milli")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 100) v = 100;
+                if (v > 1000) v = 1000;
+                g_guardrails.safe_top_p_milli = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "guardrails_safe_temp_milli")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 100) v = 100;
+                if (v > 2000) v = 2000;
+                g_guardrails.safe_temp_milli = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "guardrails_reset_kv_on_trip")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_guardrails.reset_kv_on_trip = b;
+                applied = 1;
+            }
         } else if (llmk_cfg_streq_ci(key, "stats")) {
             int b;
             if (llmk_cfg_parse_bool(val, &b)) {
@@ -7941,6 +8113,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/diag_report", L"Write llmk-diag.txt report (or /diag_report <file>)" },
     { "/metrics", L"Export runtime performance metrics to LLMK_METRICS.LOG (JSON)" },
     { "/autotune_status", L"Show M18 autotune thresholds + current sampling knobs" },
+    { "/guard_status", L"Show M18.1 guardrails + safe-mode status" },
     { "/version", L"Show build version + features" },
     { "/diag", L"Display system diagnostics (GOP/RAM/CPU/models)" },
     { "/commands", L"List commands (optionally filtered)" },
@@ -10878,6 +11051,11 @@ gguf_fallback_done:
         Print(L"[cfg] m18 autotune enabled (decode_cpt_hi=%lu decode_cpt_lo=%lu)\r\n",
               g_autotune.decode_cpt_hi,
               g_autotune.decode_cpt_lo);
+    }
+    if (g_guardrails.enabled && g_boot_verbose) {
+        Print(L"[cfg] m18.1 guardrails enabled (hard_stop_overruns=%d safe_turns=%d)\r\n",
+              g_guardrails.hard_stop_overruns_decode,
+              g_guardrails.safe_mode_turns);
     }
 
     // Optional Diopion config (repl.cfg): burst defaults + profile.
@@ -15626,6 +15804,9 @@ snap_autoload_done:
             } else if (my_strncmp(prompt, "/autotune_status", 16) == 0) {
                 llmk_autotune_print_status(temperature, top_p, top_k, max_gen_tokens);
                 continue;
+            } else if (my_strncmp(prompt, "/guard_status", 13) == 0) {
+                llmk_guardrails_print_status(temperature, top_p, top_k, max_gen_tokens);
+                continue;
             }
         }
         
@@ -15672,8 +15853,13 @@ snap_autoload_done:
             }
         }
 
+        if (!g_capture_mode && !draw_mode) {
+            llmk_guardrails_apply_safe_caps(&temperature, &top_p, &top_k, &max_gen_tokens, 1);
+        }
+
         UINT64 m18_decode_cycles_start = g_metrics.total_decode_cycles;
         UINT32 m18_decode_tokens_start = g_metrics.total_decode_tokens;
+        int m181_guard_trip = 0;
         
         // Process prompt tokens through model first (prefill)
         for (int i = 0; i < n_prompt_tokens; i++) {
@@ -15996,6 +16182,21 @@ snap_autoload_done:
                         Print(L"\r\n[llmk][budget] decode overrun step=%d pos=%d cycles=%lu max=%lu (auto-raise)\r\n",
                               step, pos, g_sentinel.last_dt_cycles, g_sentinel.last_budget_cycles);
                     }
+                    if (g_guardrails.enabled &&
+                        g_budget_overruns_decode >= (UINT32)g_guardrails.hard_stop_overruns_decode) {
+                        m181_guard_trip = 1;
+                        g_guardrails.last_trip_overruns_decode = (int)g_budget_overruns_decode;
+                        if (!stop_reason) {
+                            stop_reason = L"budget_guard";
+                            stop_token = token;
+                            stop_step = step;
+                            stop_pos = pos;
+                        }
+                        Print(L"\r\n[m18.1] hard-stop decode (overruns=%d threshold=%d)\r\n",
+                              (int)g_budget_overruns_decode,
+                              g_guardrails.hard_stop_overruns_decode);
+                        break;
+                    }
                 }
                 llmk_budget_update(&g_budget_decode_cycles, g_sentinel.last_dt_cycles);
             } else {
@@ -16148,6 +16349,16 @@ stats_done:
                 m18_base_max_gen_tokens,
                 (!g_capture_mode && !draw_mode)
             );
+        }
+
+        llmk_guardrails_finish_turn(m181_guard_trip);
+        if (m181_guard_trip && g_guardrails.reset_kv_on_trip) {
+            reset_kv_cache(&state, &config);
+            kv_pos = 0;
+            g_llmk_kv_pos = 0;
+            if (!g_capture_mode) {
+                Print(L"[m18.1] safe fallback: KV cache reset\r\n");
+            }
         }
 
         // If capture mode was active, handle it now.
