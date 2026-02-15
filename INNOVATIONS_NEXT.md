@@ -27,7 +27,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M15 baseline implemented: `m15-reasonid-drift.ps1` now monitors reason_id distribution drift against recent explainability history and raises anomaly alerts/gates on breach.
 - ✅ M15.1 baseline implemented: `m15-slo-dashboard.ps1` now exports compact weekly reason_id trend snapshots and SLO metrics for regression review (`dashboard-state.json`, `dashboard.md`, history).
 - ✅ M16 baseline implemented: `reliability.ps1` unified public interface hides granular milestone scripts (M8-M15.1) in `.ops/milestones/` for cleaner repo surface and simpler operator workflow.
-- ▶️ Next coding target: M16.1 candidate definition (extended observability/adaptation capabilities).
+- ✅ M16.1 baseline implemented: runtime now tracks performance metrics (`LlmkRuntimeMetrics` struct) capturing prefill/decode cycles, token counts, KV cache resets, and generations with `/metrics` REPL command exporting JSON to `LLMK_METRICS.LOG`.
+- ▶️ Next coding target: M16.2 candidate definition (metrics aggregation + alerting capabilities).
 
 ## Track A — llm-baremetal core
 

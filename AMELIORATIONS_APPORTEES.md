@@ -175,6 +175,20 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - workflow CI mis à jour pour utiliser `reliability.ps1`.
 - Résultat: repo plus discret, interface opérateur simplifiée, maintenance pipeline conservée.
 
+## M16.1 - Métriques runtime exportables (JSON)
+
+- Structure `LlmkRuntimeMetrics` instrumentant le runtime:
+  - capture cycles TSC (prefill/decode) avec `__rdtsc()`,
+  - compteurs tokens préfill/décodage avec phase-awareness,
+  - compteurs opérationnels: appels transformer, resets KV cache, générations complétées,
+  - placeholder pour violations sentinel (intégration future).
+- Commande REPL `/metrics`:
+  - export JSON complet de `g_metrics` vers `LLMK_METRICS.LOG`,
+  - helper `llmk_u64_to_str()` pour conversion sans `sprintf` (bare-metal UEFI),
+  - utilise infrastructure fichier existante (`llmk_open_binary_file`, `llmk_file_write_bytes`).
+- Initialisation automatique: `llmk_metrics_reset()` appelé au démarrage REPL (après `repl_ready` marker).
+- Résultat: métriques de performance accessibles en runtime pour analyse SLO, détection dérives, et debugging.
+
 ## Résultat global
 
 - Pipeline plus sûr, plus observable, et mieux automatisé.

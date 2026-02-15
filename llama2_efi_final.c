@@ -1294,6 +1294,43 @@ static int g_oo_exec_total = 0;
 static int g_oo_exec_plan_if_empty = 0;
 static char g_oo_exec_hint[256];
 
+// M16.1: Runtime metrics (tokens/sec, latency, memory pressure, sentinel)
+typedef struct {
+    UINT64 session_start_cycles;
+    UINT64 total_prefill_cycles;
+    UINT64 total_decode_cycles;
+    UINT32 total_prefill_tokens;
+    UINT32 total_decode_tokens;
+    UINT32 total_prefill_calls;
+    UINT32 total_decode_calls;
+    UINT64 last_prefill_cycles;
+    UINT64 last_decode_cycles;
+    UINT32 last_prefill_tokens;
+    UINT32 last_decode_tokens;
+    UINT32 sentinel_violations_total;
+    UINT32 kv_cache_resets;
+    UINT32 generation_count;
+} LlmkRuntimeMetrics;
+
+static LlmkRuntimeMetrics g_metrics = {0};
+
+static void llmk_metrics_reset(void) {
+    g_metrics.session_start_cycles = __rdtsc();
+    g_metrics.total_prefill_cycles = 0;
+    g_metrics.total_decode_cycles = 0;
+    g_metrics.total_prefill_tokens = 0;
+    g_metrics.total_decode_tokens = 0;
+    g_metrics.total_prefill_calls = 0;
+    g_metrics.total_decode_calls = 0;
+    g_metrics.last_prefill_cycles = 0;
+    g_metrics.last_decode_cycles = 0;
+    g_metrics.last_prefill_tokens = 0;
+    g_metrics.last_decode_tokens = 0;
+    g_metrics.sentinel_violations_total = 0;
+    g_metrics.kv_cache_resets = 0;
+    g_metrics.generation_count = 0;
+}
+
 static void llmk_capture_reset(void) {
     g_capture_len = 0;
     g_capture_truncated = 0;
@@ -6821,8 +6858,11 @@ static void llmk_oo_consult_execute(Config *config, TransformerWeights *weights,
 // ============================================================================
 
 void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int token, int pos) {
+    UINT64 start_cycles = __rdtsc();
+    int is_prefill = (pos == 0);
+    
     // DjibMark: record entry into transformer (prefill vs decode determined by caller)
-    if (pos == 0) {
+    if (is_prefill) {
         DJIBMARK_PREFILL();
     } else {
         DJIBMARK_DECODE();
@@ -6988,6 +7028,24 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
         }
     } else {
         matmul(s->logits, s->x, w->wcls, dim, p->vocab_size);
+    }
+    
+    // M16.1: Capture transformer metrics
+    UINT64 end_cycles = __rdtsc();
+    UINT64 elapsed = (end_cycles > start_cycles) ? (end_cycles - start_cycles) : 0;
+    
+    if (is_prefill) {
+        g_metrics.total_prefill_cycles += elapsed;
+        g_metrics.total_prefill_tokens++;
+        g_metrics.total_prefill_calls++;
+        g_metrics.last_prefill_cycles = elapsed;
+        g_metrics.last_prefill_tokens = 1;
+    } else {
+        g_metrics.total_decode_cycles += elapsed;
+        g_metrics.total_decode_tokens++;
+        g_metrics.total_decode_calls++;
+        g_metrics.last_decode_cycles = elapsed;
+        g_metrics.last_decode_tokens = 1;
     }
 }
 
@@ -7251,6 +7309,29 @@ static char *my_strstr(const char* haystack, const char* needle) {
         haystack++;
     }
     return NULL;
+}
+
+static void llmk_u64_to_str(UINT64 val, char *buf, int buf_size) {
+    // Convert UINT64 to decimal string (no sprintf in UEFI)
+    if (buf_size < 2) return;
+    if (val == 0) {
+        buf[0] = '0';
+        buf[1] = 0;
+        return;
+    }
+    
+    char tmp[32];
+    int i = 0;
+    while (val > 0 && i < 31) {
+        tmp[i++] = '0' + (val % 10);
+        val /= 10;
+    }
+    
+    int j = 0;
+    while (i > 0 && j < buf_size - 1) {
+        buf[j++] = tmp[--i];
+    }
+    buf[j] = 0;
 }
 
 int str_lookup(char* str, char** vocab, int vocab_size) {
@@ -7660,6 +7741,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/diag_off", L"Disable Diagnostion diagnostics" },
     { "/diag_status", L"Show diagnostics status + counters" },
     { "/diag_report", L"Write llmk-diag.txt report (or /diag_report <file>)" },
+    { "/metrics", L"Export runtime performance metrics to LLMK_METRICS.LOG (JSON)" },
     { "/version", L"Show build version + features" },
     { "/diag", L"Display system diagnostics (GOP/RAM/CPU/models)" },
     { "/commands", L"List commands (optionally filtered)" },
@@ -8165,6 +8247,9 @@ void reset_kv_cache(RunState* s, Config* p) {
         s->key_cache[i] = 0.0f;
         s->value_cache[i] = 0.0f;
     }
+    
+    // M16.1: Track KV cache resets
+    g_metrics.kv_cache_resets++;
 }
 
 static EFI_STATUS llmk_snap_load_into_state_best_effort(RunState *state, const Config *config, int *io_kv_pos, const CHAR16 *in_name) {
@@ -10547,6 +10632,9 @@ gguf_fallback_done:
     }
 
     llmk_boot_mark(L"repl_ready");
+    
+    // Initialize runtime metrics
+    llmk_metrics_reset();
     
     // Sampling parameters
     // Default sampling tuned for TinyStories (less looping, still creative).
@@ -15265,6 +15353,61 @@ snap_autoload_done:
                     repeat_penalty
                 );
                 continue;
+            } else if (my_strncmp(prompt, "/metrics", 8) == 0) {
+                // Export runtime metrics to LLMK_METRICS.LOG (JSON format)
+                EFI_FILE_HANDLE metrics_file = NULL;
+                EFI_STATUS metrics_st = llmk_open_binary_file(&metrics_file, L"LLMK_METRICS.LOG");
+
+                if (!EFI_ERROR(metrics_st) && metrics_file) {
+                    // Build JSON string manually (no sprintf in UEFI)
+                    char json_buf[2048];
+                    int jpos = 0;
+
+                    // Helper macro to append string
+                    #define JAPPEND(s) do { const char *_s = (s); while (*_s && jpos < (int)sizeof(json_buf)-1) json_buf[jpos++] = *_s++; } while(0)
+                    #define JAPPEND_U64(label, val) do { \
+                        JAPPEND("  \""); JAPPEND(label); JAPPEND("\": "); \
+                        char _tmp[32]; llmk_u64_to_str(val, _tmp, sizeof(_tmp)); JAPPEND(_tmp); JAPPEND(",\n"); \
+                    } while(0)
+
+                    JAPPEND("{\n");
+                    JAPPEND_U64("session_start_cycles", g_metrics.session_start_cycles);
+                    JAPPEND_U64("total_prefill_cycles", g_metrics.total_prefill_cycles);
+                    JAPPEND_U64("total_decode_cycles", g_metrics.total_decode_cycles);
+                    JAPPEND_U64("total_prefill_tokens", g_metrics.total_prefill_tokens);
+                    JAPPEND_U64("total_decode_tokens", g_metrics.total_decode_tokens);
+                    JAPPEND_U64("total_prefill_calls", g_metrics.total_prefill_calls);
+                    JAPPEND_U64("total_decode_calls", g_metrics.total_decode_calls);
+                    JAPPEND_U64("last_prefill_cycles", g_metrics.last_prefill_cycles);
+                    JAPPEND_U64("last_decode_cycles", g_metrics.last_decode_cycles);
+                    JAPPEND_U64("last_prefill_tokens", g_metrics.last_prefill_tokens);
+                    JAPPEND_U64("last_decode_tokens", g_metrics.last_decode_tokens);
+                    JAPPEND_U64("sentinel_violations_total", g_metrics.sentinel_violations_total);
+                    JAPPEND_U64("kv_cache_resets", g_metrics.kv_cache_resets);
+                    JAPPEND_U64("generation_count", g_metrics.generation_count);
+
+                    // Remove trailing comma + newline before closing brace
+                    if (jpos >= 2 && json_buf[jpos-2] == ',' && json_buf[jpos-1] == '\n') {
+                        jpos -= 2;
+                    }
+                    JAPPEND("\n}\n");
+                    json_buf[jpos] = 0;
+
+                    #undef JAPPEND
+                    #undef JAPPEND_U64
+
+                    metrics_st = llmk_file_write_bytes(metrics_file, json_buf, (UINTN)jpos);
+                    uefi_call_wrapper(metrics_file->Close, 1, metrics_file);
+
+                    if (!EFI_ERROR(metrics_st)) {
+                        Print(L"✅ Metrics exported to LLMK_METRICS.LOG (%d bytes)\r\n", jpos);
+                    } else {
+                        Print(L"⚠️  Metrics file write failed (status=%lx)\r\n", metrics_st);
+                    }
+                } else {
+                    Print(L"⚠️  Cannot open LLMK_METRICS.LOG for writing (status=%lx)\r\n", metrics_st);
+                }
+                continue;
             }
         }
         
@@ -15739,6 +15882,9 @@ snap_autoload_done:
 stats_done:
             ;
         }
+        
+        // M16.1: Track completed generation
+        g_metrics.generation_count++;
 
         // Diopion burst: decrement remaining and restore knobs when done.
         llmk_diopion_burst_finish_one(&max_gen_tokens, &top_k, &temperature);
