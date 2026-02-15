@@ -263,6 +263,24 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - logs explicites `[m18.1] hard-stop decode ...` et `[m18.1] safe-mode caps applied ...`.
 - Résultat: comportement plus robuste sous dérive latence, avec réponse graduée (stop immédiat + mode sûr temporaire).
 
+## M19 - Benchmark pack reproductible + matrice commit-to-commit
+
+- Corpus benchmark figé ajouté: `.ops/benchmarks/m19-corpus.json` (cas courts multi-catégories).
+- Nouveau script `m19-benchmark-pack.ps1`:
+  - génère un pack déterministe (`benchmark-pack.json`) avec métadonnées (commit, seed, modèle, profil),
+  - exporte les entrées d'exécution en JSONL (`benchmark-input.jsonl`),
+  - publie un manifeste Markdown (`benchmark-manifest.md`) et un résumé optionnel si `results.jsonl` est présent.
+- Nouveau script `m19-benchmark-compare.ps1`:
+  - compare baseline vs courant sur cas communs (`case_id`),
+  - calcule deltas par cas (latence ms, decode cycles/token),
+  - produit une matrice Markdown (`artifacts/m19/compare/benchmark-compare.md`) + résumé JSON,
+  - supporte gate régression configurable (`-RegressionThresholdPct`, `-FailOnRegression`).
+- Intégration orchestrateur fiabilité (`reliability.ps1` + `.ops/milestones/m8-reliability.ps1`):
+  - activation via `-M19EnableBenchmarkPack`,
+  - chemins baseline/courant configurables (`-M19BaselineResultsPath`, `-M19CurrentResultsPath`),
+  - gate optionnelle `-M19FailOnRegression`.
+- Résultat: base standardisée pour comparer les performances entre commits avec artefacts exploitables en local/CI.
+
 ## Résultat global
 
 - Pipeline plus sûr, plus observable, et mieux automatisé.

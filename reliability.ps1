@@ -76,7 +76,13 @@ param(
   [double]$M17WarnThresholdPct = 0.15,
   [ValidateRange(0.05, 2.0)]
   [double]$M17FailThresholdPct = 0.30,
-  [switch]$M17FailOnDrift
+  [switch]$M17FailOnDrift,
+  [switch]$M19EnableBenchmarkPack,
+  [ValidateRange(0.01, 2.0)]
+  [double]$M19RegressionThresholdPct = 0.15,
+  [switch]$M19FailOnRegression,
+  [string]$M19BaselineResultsPath = 'artifacts/m19/baseline/results.jsonl',
+  [string]$M19CurrentResultsPath = 'artifacts/m19/current/results.jsonl'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,6 +127,9 @@ $argHash = @{
   M16DriftThresholdPct = $M16DriftThresholdPct
   M17WarnThresholdPct = $M17WarnThresholdPct
   M17FailThresholdPct = $M17FailThresholdPct
+  M19RegressionThresholdPct = $M19RegressionThresholdPct
+  M19BaselineResultsPath = $M19BaselineResultsPath
+  M19CurrentResultsPath = $M19CurrentResultsPath
 }
 
 if ($SkipPreflight) { $argHash['SkipPreflight'] = $true }
@@ -135,6 +144,8 @@ if ($M16UpdateBaseline) { $argHash['M16UpdateBaseline'] = $true }
 if ($M16RejectOnDrift) { $argHash['M16RejectOnDrift'] = $true }
 if ($M17EnableCIReport) { $argHash['M17EnableCIReport'] = $true }
 if ($M17FailOnDrift) { $argHash['M17FailOnDrift'] = $true }
+if ($M19EnableBenchmarkPack) { $argHash['M19EnableBenchmarkPack'] = $true }
+if ($M19FailOnRegression) { $argHash['M19FailOnRegression'] = $true }
 
 & $orchestratorScript @argHash
 exit $LASTEXITCODE

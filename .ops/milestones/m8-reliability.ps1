@@ -74,7 +74,13 @@ param(
   [double]$M17WarnThresholdPct = 0.15,
   [ValidateRange(0.05, 2.0)]
   [double]$M17FailThresholdPct = 0.30,
-  [switch]$M17FailOnDrift
+  [switch]$M17FailOnDrift,
+  [switch]$M19EnableBenchmarkPack,
+  [ValidateRange(0.01, 2.0)]
+  [double]$M19RegressionThresholdPct = 0.15,
+  [switch]$M19FailOnRegression,
+  [string]$M19BaselineResultsPath = 'artifacts/m19/baseline/results.jsonl',
+  [string]$M19CurrentResultsPath = 'artifacts/m19/current/results.jsonl'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -117,6 +123,8 @@ $m151Script = Join-Path $PSScriptRoot 'm15-slo-dashboard.ps1'
 $m16ExtractScript = Join-Path $PSScriptRoot 'm16-extract-metrics.ps1'
 $m16AggregateScript = Join-Path $PSScriptRoot 'm16-metrics-aggregate.ps1'
 $m17ReportScript = Join-Path $PSScriptRoot 'm17-ci-metrics-report.ps1'
+$m19PackScript = Join-Path $PSScriptRoot 'm19-benchmark-pack.ps1'
+$m19CompareScript = Join-Path $PSScriptRoot 'm19-benchmark-compare.ps1'
 $cfgPath = Join-Path $repoRoot 'repl.cfg'
 $autorunPath = Join-Path $repoRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $repoRoot 'artifacts\m8'
@@ -168,6 +176,54 @@ foreach ($c in $staticChecks) {
 
 if (-not $RunQemu) {
   if ($staticOk) {
+    if ($M19EnableBenchmarkPack) {
+      # M19 can run in static mode (no QEMU required)
+      if (-not (Test-Path -LiteralPath $m19PackScript)) {
+        Write-Warn "M19 benchmark pack script not found: $m19PackScript"
+      } else {
+        Write-Step 'Running M19 benchmark pack generation (static mode)'
+        & $m19PackScript -OutputDir 'artifacts/m19/current' -ResultsPath $M19CurrentResultsPath
+        if ($LASTEXITCODE -ne 0) {
+          throw "M19 benchmark pack generation failed with exit code $LASTEXITCODE"
+        }
+        Write-Ok 'M19 benchmark pack generated (static mode)'
+      }
+
+      if (-not (Test-Path -LiteralPath $m19CompareScript)) {
+        Write-Warn "M19 benchmark compare script not found: $m19CompareScript"
+      } else {
+        $baselineFull = Join-Path $repoRoot $M19BaselineResultsPath
+        $currentFull = Join-Path $repoRoot $M19CurrentResultsPath
+
+        if ((Test-Path -LiteralPath $baselineFull) -and (Test-Path -LiteralPath $currentFull)) {
+          Write-Step 'Running M19 benchmark comparison (static mode)'
+          $m19Args = @{
+            BaselineResultsPath = $M19BaselineResultsPath
+            CurrentResultsPath = $M19CurrentResultsPath
+            OutputPath = 'artifacts/m19/compare/benchmark-compare.md'
+            RegressionThresholdPct = $M19RegressionThresholdPct
+          }
+          if ($M19FailOnRegression) {
+            $m19Args.FailOnRegression = $true
+          }
+
+          & $m19CompareScript @m19Args
+          if ($LASTEXITCODE -ne 0) {
+            if ($M19FailOnRegression) {
+              throw "M19 benchmark compare failed with exit code $LASTEXITCODE"
+            } else {
+              Write-Warn 'M19 benchmark compare detected regressions (non-blocking)'
+            }
+          } else {
+            Write-Ok 'M19 benchmark comparison complete (static mode)'
+          }
+        } else {
+          Write-Warn "M19 compare skipped: missing baseline or current results JSONL"
+          Write-Warn "Expected: $M19BaselineResultsPath and $M19CurrentResultsPath"
+        }
+      }
+    }
+
     Write-Ok 'M8 static reliability pass complete'
     Write-Host "[M8] Tip: rerun with -RunQemu for runtime autorun validation." -ForegroundColor Gray
     exit 0
@@ -539,6 +595,54 @@ try {
     } else {
       Write-Warn "M17 CI report requested but no metrics file found"
       Write-Warn "Ensure M16ExtractMetrics is enabled to collect runtime metrics"
+    }
+  }
+
+  # M19: Reproducible benchmark pack + commit-to-commit matrix
+  if ($M19EnableBenchmarkPack) {
+    if (-not (Test-Path -LiteralPath $m19PackScript)) {
+      Write-Warn "M19 benchmark pack script not found: $m19PackScript"
+    } else {
+      Write-Step 'Running M19 benchmark pack generation'
+      & $m19PackScript -OutputDir 'artifacts/m19/current' -ResultsPath $M19CurrentResultsPath
+      if ($LASTEXITCODE -ne 0) {
+        throw "M19 benchmark pack generation failed with exit code $LASTEXITCODE"
+      }
+      Write-Ok 'M19 benchmark pack generated'
+    }
+
+    if (-not (Test-Path -LiteralPath $m19CompareScript)) {
+      Write-Warn "M19 benchmark compare script not found: $m19CompareScript"
+    } else {
+      $baselineFull = Join-Path $repoRoot $M19BaselineResultsPath
+      $currentFull = Join-Path $repoRoot $M19CurrentResultsPath
+
+      if ((Test-Path -LiteralPath $baselineFull) -and (Test-Path -LiteralPath $currentFull)) {
+        Write-Step 'Running M19 benchmark comparison'
+        $m19Args = @{
+          BaselineResultsPath = $M19BaselineResultsPath
+          CurrentResultsPath = $M19CurrentResultsPath
+          OutputPath = 'artifacts/m19/compare/benchmark-compare.md'
+          RegressionThresholdPct = $M19RegressionThresholdPct
+        }
+        if ($M19FailOnRegression) {
+          $m19Args.FailOnRegression = $true
+        }
+
+        & $m19CompareScript @m19Args
+        if ($LASTEXITCODE -ne 0) {
+          if ($M19FailOnRegression) {
+            throw "M19 benchmark compare failed with exit code $LASTEXITCODE"
+          } else {
+            Write-Warn 'M19 benchmark compare detected regressions (non-blocking)'
+          }
+        } else {
+          Write-Ok 'M19 benchmark comparison complete'
+        }
+      } else {
+        Write-Warn "M19 compare skipped: missing baseline or current results JSONL"
+        Write-Warn "Expected: $M19BaselineResultsPath and $M19CurrentResultsPath"
+      }
     }
   }
 

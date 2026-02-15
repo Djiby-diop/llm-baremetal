@@ -32,7 +32,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M17 baseline implemented: `m17-ci-metrics-report.ps1` generates CI-friendly performance reports with drift detection, GitHub Actions workflow auto-extracts metrics post-runtime and uploads as artifacts with job summary integration.
 - ✅ M18 baseline implemented: runtime auto-tuning loop now adapts sampling knobs (`temperature`, `top_p`, `top_k`, `max_gen_tokens`) per turn from decode cycles/token thresholds in `repl.cfg`, with `/autotune_status` live diagnostics.
 - ✅ M18.1 baseline implemented: real-time hard decode overrun guardrails now enforce early stop and trigger bounded safe fallback mode across subsequent turns, configurable via `repl.cfg` with `/guard_status` diagnostics.
-- ▶️ Next coding target: M19 candidate definition (reproducible benchmark pack + commit-to-commit performance matrix).
+- ✅ M19 baseline implemented: reproducible benchmark corpus + pack generator (`m19-benchmark-pack.ps1`) and commit-to-commit matrix comparator (`m19-benchmark-compare.ps1`) are integrated into reliability pipeline with optional regression gate.
+- ▶️ Next coding target: M19.1 candidate definition (automated runtime capture to produce `results.jsonl` directly from scripted QEMU sessions).
 
 ## Track A — llm-baremetal core
 
