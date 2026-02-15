@@ -1314,6 +1314,36 @@ typedef struct {
 
 static LlmkRuntimeMetrics g_metrics = {0};
 
+typedef struct {
+    int enabled;
+    UINT64 decode_cpt_hi;
+    UINT64 decode_cpt_lo;
+    int step_top_k;
+    int step_max_gen_tokens;
+    int step_temp_milli;
+    int min_top_k;
+    int min_max_gen_tokens;
+    int min_top_p_milli;
+    int min_temp_milli;
+    int last_action; // 0=hold, 1=tighten, 2=relax
+    UINT64 last_decode_cpt;
+} LlmkAutoTuneConfig;
+
+static LlmkAutoTuneConfig g_autotune = {
+    0,
+    170000ULL,
+    105000ULL,
+    8,
+    16,
+    40,
+    24,
+    64,
+    800,
+    550,
+    0,
+    0ULL
+};
+
 static void llmk_metrics_reset(void) {
     g_metrics.session_start_cycles = __rdtsc();
     g_metrics.total_prefill_cycles = 0;
@@ -1329,6 +1359,130 @@ static void llmk_metrics_reset(void) {
     g_metrics.sentinel_violations_total = 0;
     g_metrics.kv_cache_resets = 0;
     g_metrics.generation_count = 0;
+    g_autotune.last_action = 0;
+    g_autotune.last_decode_cpt = 0;
+}
+
+static void llmk_autotune_print_status(float temperature, float top_p, int top_k, int max_gen_tokens) {
+    int temp_milli = (int)(temperature * 1000.0f + 0.5f);
+    int top_p_milli = (int)(top_p * 1000.0f + 0.5f);
+    const CHAR16 *last = L"hold";
+    if (g_autotune.last_action == 1) last = L"tighten";
+    else if (g_autotune.last_action == 2) last = L"relax";
+
+    Print(L"[m18] autotune=%d decode_cpt_hi=%lu decode_cpt_lo=%lu\r\n",
+          g_autotune.enabled,
+          g_autotune.decode_cpt_hi,
+          g_autotune.decode_cpt_lo);
+    Print(L"[m18] steps: top_k=%d max_tokens=%d temp_milli=%d\r\n",
+          g_autotune.step_top_k,
+          g_autotune.step_max_gen_tokens,
+          g_autotune.step_temp_milli);
+    Print(L"[m18] mins: top_k=%d max_tokens=%d top_p=%d.%03d temp=%d.%03d\r\n",
+          g_autotune.min_top_k,
+          g_autotune.min_max_gen_tokens,
+          g_autotune.min_top_p_milli / 1000,
+          g_autotune.min_top_p_milli % 1000,
+          g_autotune.min_temp_milli / 1000,
+          g_autotune.min_temp_milli % 1000);
+    Print(L"[m18] current: top_k=%d max_tokens=%d top_p=%d.%03d temp=%d.%03d\r\n",
+          top_k,
+          max_gen_tokens,
+          top_p_milli / 1000,
+          top_p_milli % 1000,
+          temp_milli / 1000,
+          temp_milli % 1000);
+    Print(L"[m18] last: action=%s decode_cpt=%lu\r\n",
+          (CHAR16 *)last,
+          g_autotune.last_decode_cpt);
+}
+
+static void llmk_autotune_apply_after_turn(
+    UINT64 decode_cycles_delta,
+    UINT32 decode_tokens_delta,
+    float *temperature,
+    float *top_p,
+    int *top_k,
+    int *max_gen_tokens,
+    int base_temp_milli,
+    int base_top_p_milli,
+    int base_top_k,
+    int base_max_gen_tokens,
+    int emit_log
+) {
+    if (!g_autotune.enabled) return;
+    if (!temperature || !top_p || !top_k || !max_gen_tokens) return;
+    if (decode_tokens_delta == 0) return;
+
+    UINT64 decode_cpt = decode_cycles_delta / (UINT64)decode_tokens_delta;
+    g_autotune.last_decode_cpt = decode_cpt;
+
+    int action = 0;
+    if (decode_cpt > g_autotune.decode_cpt_hi) {
+        action = 1;
+    } else if (decode_cpt < g_autotune.decode_cpt_lo) {
+        action = 2;
+    }
+
+    int temp_milli = (int)((*temperature) * 1000.0f + 0.5f);
+    int top_p_milli = (int)((*top_p) * 1000.0f + 0.5f);
+    int changed = 0;
+
+    if (action == 1) {
+        int new_top_k = *top_k - g_autotune.step_top_k;
+        if (new_top_k < g_autotune.min_top_k) new_top_k = g_autotune.min_top_k;
+        if (new_top_k != *top_k) { *top_k = new_top_k; changed = 1; }
+
+        int new_max_tokens = *max_gen_tokens - g_autotune.step_max_gen_tokens;
+        if (new_max_tokens < g_autotune.min_max_gen_tokens) new_max_tokens = g_autotune.min_max_gen_tokens;
+        if (new_max_tokens != *max_gen_tokens) { *max_gen_tokens = new_max_tokens; changed = 1; }
+
+        int new_temp = temp_milli - g_autotune.step_temp_milli;
+        if (new_temp < g_autotune.min_temp_milli) new_temp = g_autotune.min_temp_milli;
+        if (new_temp != temp_milli) { temp_milli = new_temp; changed = 1; }
+
+        int new_top_p = top_p_milli - 15;
+        if (new_top_p < g_autotune.min_top_p_milli) new_top_p = g_autotune.min_top_p_milli;
+        if (new_top_p != top_p_milli) { top_p_milli = new_top_p; changed = 1; }
+    } else if (action == 2) {
+        int new_top_k = *top_k + g_autotune.step_top_k;
+        if (new_top_k > base_top_k) new_top_k = base_top_k;
+        if (new_top_k != *top_k) { *top_k = new_top_k; changed = 1; }
+
+        int new_max_tokens = *max_gen_tokens + g_autotune.step_max_gen_tokens;
+        if (new_max_tokens > base_max_gen_tokens) new_max_tokens = base_max_gen_tokens;
+        if (new_max_tokens != *max_gen_tokens) { *max_gen_tokens = new_max_tokens; changed = 1; }
+
+        int new_temp = temp_milli + g_autotune.step_temp_milli;
+        if (new_temp > base_temp_milli) new_temp = base_temp_milli;
+        if (new_temp != temp_milli) { temp_milli = new_temp; changed = 1; }
+
+        int new_top_p = top_p_milli + 15;
+        if (new_top_p > base_top_p_milli) new_top_p = base_top_p_milli;
+        if (new_top_p != top_p_milli) { top_p_milli = new_top_p; changed = 1; }
+    }
+
+    if (temp_milli < 0) temp_milli = 0;
+    if (top_p_milli < 0) top_p_milli = 0;
+    if (top_p_milli > 1000) top_p_milli = 1000;
+
+    *temperature = (float)temp_milli / 1000.0f;
+    *top_p = (float)top_p_milli / 1000.0f;
+
+    g_autotune.last_action = changed ? action : 0;
+
+    if (emit_log && changed) {
+        const CHAR16 *name = (action == 1) ? L"tighten" : L"relax";
+        Print(L"\r\n[m18] autotune=%s decode_cpt=%lu -> temp=%d.%03d top_p=%d.%03d top_k=%d max_tokens=%d\r\n",
+              (CHAR16 *)name,
+              decode_cpt,
+              temp_milli / 1000,
+              temp_milli % 1000,
+              top_p_milli / 1000,
+              top_p_milli % 1000,
+              *top_k,
+              *max_gen_tokens);
+    }
 }
 
 static void llmk_capture_reset(void) {
@@ -5142,6 +5296,50 @@ static void llmk_load_repl_cfg_best_effort(
                 *max_gen_tokens = v;
                 applied = 1;
             }
+        } else if (llmk_cfg_streq_ci(key, "autotune") || llmk_cfg_streq_ci(key, "m18_autotune")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_autotune.enabled = b;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "autotune_decode_cpt_hi")) {
+            UINT64 v;
+            if (llmk_cfg_parse_u64(val, &v)) {
+                if (v < 1) v = 1;
+                g_autotune.decode_cpt_hi = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "autotune_decode_cpt_lo")) {
+            UINT64 v;
+            if (llmk_cfg_parse_u64(val, &v)) {
+                if (v < 1) v = 1;
+                g_autotune.decode_cpt_lo = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "autotune_step_top_k")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > 64) v = 64;
+                g_autotune.step_top_k = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "autotune_step_max_tokens")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > 128) v = 128;
+                g_autotune.step_max_gen_tokens = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "autotune_step_temp_milli")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > 300) v = 300;
+                g_autotune.step_temp_milli = v;
+                applied = 1;
+            }
         } else if (llmk_cfg_streq_ci(key, "stats")) {
             int b;
             if (llmk_cfg_parse_bool(val, &b)) {
@@ -7742,6 +7940,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/diag_status", L"Show diagnostics status + counters" },
     { "/diag_report", L"Write llmk-diag.txt report (or /diag_report <file>)" },
     { "/metrics", L"Export runtime performance metrics to LLMK_METRICS.LOG (JSON)" },
+    { "/autotune_status", L"Show M18 autotune thresholds + current sampling knobs" },
     { "/version", L"Show build version + features" },
     { "/diag", L"Display system diagnostics (GOP/RAM/CPU/models)" },
     { "/commands", L"List commands (optionally filtered)" },
@@ -10664,6 +10863,22 @@ gguf_fallback_done:
         &stop_on_you,
         &stop_on_double_nl
     );
+
+    int m18_base_temp_milli = (int)(temperature * 1000.0f + 0.5f);
+    int m18_base_top_p_milli = (int)(top_p * 1000.0f + 0.5f);
+    int m18_base_top_k = top_k;
+    int m18_base_max_gen_tokens = max_gen_tokens;
+
+    if (m18_base_temp_milli < g_autotune.min_temp_milli) m18_base_temp_milli = g_autotune.min_temp_milli;
+    if (m18_base_top_p_milli < g_autotune.min_top_p_milli) m18_base_top_p_milli = g_autotune.min_top_p_milli;
+    if (m18_base_top_k < g_autotune.min_top_k) m18_base_top_k = g_autotune.min_top_k;
+    if (m18_base_max_gen_tokens < g_autotune.min_max_gen_tokens) m18_base_max_gen_tokens = g_autotune.min_max_gen_tokens;
+
+    if (g_autotune.enabled && g_boot_verbose) {
+        Print(L"[cfg] m18 autotune enabled (decode_cpt_hi=%lu decode_cpt_lo=%lu)\r\n",
+              g_autotune.decode_cpt_hi,
+              g_autotune.decode_cpt_lo);
+    }
 
     // Optional Diopion config (repl.cfg): burst defaults + profile.
     llmk_load_repl_cfg_diopion_best_effort(&g_diopion);
@@ -15408,6 +15623,9 @@ snap_autoload_done:
                     Print(L"⚠️  Cannot open LLMK_METRICS.LOG for writing (status=%lx)\r\n", metrics_st);
                 }
                 continue;
+            } else if (my_strncmp(prompt, "/autotune_status", 16) == 0) {
+                llmk_autotune_print_status(temperature, top_p, top_k, max_gen_tokens);
+                continue;
             }
         }
         
@@ -15453,6 +15671,9 @@ snap_autoload_done:
                       g_budget_prefill_cycles, g_budget_decode_cycles);
             }
         }
+
+        UINT64 m18_decode_cycles_start = g_metrics.total_decode_cycles;
+        UINT32 m18_decode_tokens_start = g_metrics.total_decode_tokens;
         
         // Process prompt tokens through model first (prefill)
         for (int i = 0; i < n_prompt_tokens; i++) {
@@ -15904,6 +16125,29 @@ stats_done:
                 top_k = (int)k;
                 top_p = (float)p / 1000.0f;
             }
+        }
+
+        {
+            UINT64 m18_decode_cycles_delta = (g_metrics.total_decode_cycles >= m18_decode_cycles_start)
+                                          ? (g_metrics.total_decode_cycles - m18_decode_cycles_start)
+                                          : 0ULL;
+            UINT32 m18_decode_tokens_delta = (g_metrics.total_decode_tokens >= m18_decode_tokens_start)
+                                          ? (g_metrics.total_decode_tokens - m18_decode_tokens_start)
+                                          : 0U;
+
+            llmk_autotune_apply_after_turn(
+                m18_decode_cycles_delta,
+                m18_decode_tokens_delta,
+                &temperature,
+                &top_p,
+                &top_k,
+                &max_gen_tokens,
+                m18_base_temp_milli,
+                m18_base_top_p_milli,
+                m18_base_top_k,
+                m18_base_max_gen_tokens,
+                (!g_capture_mode && !draw_mode)
+            );
         }
 
         // If capture mode was active, handle it now.

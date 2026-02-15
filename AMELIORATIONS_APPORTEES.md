@@ -226,6 +226,24 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
   - seuils configurables via paramètres exposed dans `reliability.ps1`.
 - Résultat: traçabilité continue performance runtime dans CI, alertes visuelles sur dérives, historique artifacts pour analyse régression.
 
+## M18 - Auto-tuning runtime fermé (MVP)
+
+- Boucle d'adaptation runtime dans `llama2_efi_final.c`:
+  - ajuste dynamiquement `temperature`, `top_p`, `top_k`, `max_gen_tokens` après chaque tour,
+  - pilotage par `decode cycles/token` (delta par tour basé sur métriques M16.1),
+  - modes d'action: `tighten` (si dérive haute) et `relax` (si charge basse).
+- Configuration via `repl.cfg`:
+  - `autotune=0|1`,
+  - `autotune_decode_cpt_hi`, `autotune_decode_cpt_lo`,
+  - `autotune_step_top_k`, `autotune_step_max_tokens`, `autotune_step_temp_milli`.
+- Garde-fous intégrés:
+  - bornes minimales pour éviter une dégradation agressive (`min_top_k`, `min_max_gen_tokens`, `min_top_p`, `min_temp`),
+  - relaxation limitée aux valeurs de base chargées en début de session.
+- Observabilité opérateur:
+  - commande REPL `/autotune_status` (seuils, steps, valeurs courantes, dernière action),
+  - logs runtime `[m18] autotune=... decode_cpt=...` lors d’un ajustement effectif.
+- Résultat: adaptation automatique légère sans refactor lourd, meilleure stabilité perfs sur charges variables.
+
 ## Résultat global
 
 - Pipeline plus sûr, plus observable, et mieux automatisé.

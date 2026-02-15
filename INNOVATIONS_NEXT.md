@@ -30,7 +30,8 @@ This file defines the next practical innovation wave after M6.x hardening.
 - ✅ M16.1 baseline implemented: runtime now tracks performance metrics (`LlmkRuntimeMetrics` struct) capturing prefill/decode cycles, token counts, KV cache resets, and generations with `/metrics` REPL command exporting JSON to `LLMK_METRICS.LOG`.
 - ✅ M16.2 baseline implemented: `m16-extract-metrics.ps1` extracts runtime metrics from bootable image, `m16-metrics-aggregate.ps1` computes P50/P95/P99 stats and detects performance drift versus baseline with configurable thresholds and rejection gates.
 - ✅ M17 baseline implemented: `m17-ci-metrics-report.ps1` generates CI-friendly performance reports with drift detection, GitHub Actions workflow auto-extracts metrics post-runtime and uploads as artifacts with job summary integration.
-- ▶️ Next coding target: M18 candidate definition (advanced adaptation/telemetry capabilities).
+- ✅ M18 baseline implemented: runtime auto-tuning loop now adapts sampling knobs (`temperature`, `top_p`, `top_k`, `max_gen_tokens`) per turn from decode cycles/token thresholds in `repl.cfg`, with `/autotune_status` live diagnostics.
+- ▶️ Next coding target: M18.1 candidate definition (real-time hard guardrails + safe fallback modes).
 
 ## Track A — llm-baremetal core
 
