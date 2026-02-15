@@ -62,7 +62,15 @@ param(
   [ValidateRange(7, 365)]
   [int]$M151WeeklyWindowDays = 28,
   [ValidateRange(1, 20)]
-  [int]$M151TopReasonIds = 5
+  [int]$M151TopReasonIds = 5,
+  [switch]$M16ExtractMetrics,
+  [switch]$M16SkipExtract,
+  [ValidateRange(3, 100)]
+  [int]$M16WindowRuns = 10,
+  [ValidateRange(0.05, 2.0)]
+  [double]$M16DriftThresholdPct = 0.20,
+  [switch]$M16UpdateBaseline,
+  [switch]$M16RejectOnDrift
 )
 
 $ErrorActionPreference = 'Stop'
@@ -103,6 +111,8 @@ $argHash = @{
   M151WindowRuns = $M151WindowRuns
   M151WeeklyWindowDays = $M151WeeklyWindowDays
   M151TopReasonIds = $M151TopReasonIds
+  M16WindowRuns = $M16WindowRuns
+  M16DriftThresholdPct = $M16DriftThresholdPct
 }
 
 if ($SkipPreflight) { $argHash['SkipPreflight'] = $true }
@@ -111,6 +121,10 @@ if ($RunQemu) { $argHash['RunQemu'] = $true }
 if ($M14RequireJournalParity) { $argHash['M14RequireJournalParity'] = $true }
 if ($M14SkipJournalExtract) { $argHash['M14SkipJournalExtract'] = $true }
 if ($M14ImagePath) { $argHash['M14ImagePath'] = $M14ImagePath }
+if ($M16ExtractMetrics) { $argHash['M16ExtractMetrics'] = $true }
+if ($M16SkipExtract) { $argHash['M16SkipExtract'] = $true }
+if ($M16UpdateBaseline) { $argHash['M16UpdateBaseline'] = $true }
+if ($M16RejectOnDrift) { $argHash['M16RejectOnDrift'] = $true }
 
 & $orchestratorScript @argHash
 exit $LASTEXITCODE

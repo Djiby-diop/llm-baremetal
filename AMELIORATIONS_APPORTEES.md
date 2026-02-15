@@ -189,6 +189,25 @@ Ce document synthétise les améliorations livrées dans `llm-baremetal` pendant
 - Initialisation automatique: `llmk_metrics_reset()` appelé au démarrage REPL (après `repl_ready` marker).
 - Résultat: métriques de performance accessibles en runtime pour analyse SLO, détection dérives, et debugging.
 
+## M16.2 - Agrégation métriques + détection dérive performance
+
+- Script `m16-extract-metrics.ps1`:
+  - extraction automatique de `LLMK_METRICS.LOG` depuis image bootable (via WSL + mtools),
+  - validation JSON et stockage timestampé dans `artifacts/m16/raw/`,
+  - intégration dans pipeline M8 pour collecte post-run.
+- Script `m16-metrics-aggregate.ps1`:
+  - parse tous les fichiers métriques raw collectés,
+  - calcul statistiques agrégées: moyenne, P50, P95, P99 pour cycles/token (prefill/decode),
+  - détection dérive performance vs baseline configurable (seuil %, ex: +20%),
+  - persistance historique dans `artifacts/m16/metrics-history.jsonl`,
+  - génération dashboard Markdown avec résumé stats + alertes dérive.
+- Intégration M8/reliability:
+  - flags `-M16ExtractMetrics` active extraction + agrégation post-runtime,
+  - `-M16UpdateBaseline` met à jour baseline de référence,
+  - `-M16RejectOnDrift` bloque pipeline si dérive détectée (gate CI),
+  - paramètres exposés via `reliability.ps1` wrapper public.
+- Résultat: visibilité long-terme sur performance runtime, détection automatique régressions, traçabilité CI.
+
 ## Résultat global
 
 - Pipeline plus sûr, plus observable, et mieux automatisé.

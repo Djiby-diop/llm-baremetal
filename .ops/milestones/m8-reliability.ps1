@@ -60,7 +60,15 @@ param(
   [ValidateRange(7, 365)]
   [int]$M151WeeklyWindowDays = 28,
   [ValidateRange(1, 20)]
-  [int]$M151TopReasonIds = 5
+  [int]$M151TopReasonIds = 5,
+  [switch]$M16ExtractMetrics,
+  [switch]$M16SkipExtract,
+  [ValidateRange(3, 100)]
+  [int]$M16WindowRuns = 10,
+  [ValidateRange(0.05, 2.0)]
+  [double]$M16DriftThresholdPct = 0.20,
+  [switch]$M16UpdateBaseline,
+  [switch]$M16RejectOnDrift
 )
 
 $ErrorActionPreference = 'Stop'
@@ -100,6 +108,8 @@ $m14Script = Join-Path $PSScriptRoot 'm14-explainability-coverage.ps1'
 $m141ExtractScript = Join-Path $PSScriptRoot 'm14-extract-oojournal.ps1'
 $m15Script = Join-Path $PSScriptRoot 'm15-reasonid-drift.ps1'
 $m151Script = Join-Path $PSScriptRoot 'm15-slo-dashboard.ps1'
+$m16ExtractScript = Join-Path $PSScriptRoot 'm16-extract-metrics.ps1'
+$m16AggregateScript = Join-Path $PSScriptRoot 'm16-metrics-aggregate.ps1'
 $cfgPath = Join-Path $repoRoot 'repl.cfg'
 $autorunPath = Join-Path $repoRoot 'llmk-autorun.txt'
 $tmpDir = Join-Path $repoRoot 'artifacts\m8'
@@ -430,6 +440,52 @@ try {
     -TopReasonIds $M151TopReasonIds
   if ($LASTEXITCODE -ne 0) {
     throw "M15.1 dashboard export failed with exit code $LASTEXITCODE"
+  }
+
+  # M16.1/M16.2: Runtime metrics extraction + aggregation
+  if ($M16ExtractMetrics -and -not $M16SkipExtract) {
+    if (-not (Test-Path -LiteralPath $m16ExtractScript)) {
+      Write-Warn "M16 extract script not found: $m16ExtractScript"
+    } else {
+      Write-Step 'Running M16 runtime metrics extraction from image'
+      $imagePath = if ($M14ImagePath) { $M14ImagePath } else { 'llm-baremetal-boot.img' }
+      
+      & $m16ExtractScript -ImagePath $imagePath -OutputDir 'artifacts/m16/raw'
+      if ($LASTEXITCODE -ne 0) {
+        Write-Warn "M16 metrics extraction failed (metrics may not exist in image yet)"
+      } else {
+        Write-Ok 'M16 metrics extracted successfully'
+      }
+    }
+  }
+
+  if ($M16ExtractMetrics) {
+    if (-not (Test-Path -LiteralPath $m16AggregateScript)) {
+      Write-Warn "M16.2 aggregate script not found: $m16AggregateScript"
+    } else {
+      Write-Step 'Running M16.2 runtime metrics aggregation + drift detection'
+      $m16Args = @{
+        WindowRuns = $M16WindowRuns
+        DriftThresholdPct = $M16DriftThresholdPct
+      }
+      if ($M16UpdateBaseline) {
+        $m16Args.UpdateBaseline = $true
+      }
+      if ($M16RejectOnDrift) {
+        $m16Args.RejectOnDrift = $true
+      }
+
+      & $m16AggregateScript @m16Args
+      if ($LASTEXITCODE -ne 0) {
+        if ($M16RejectOnDrift) {
+          throw "M16.2 metrics aggregation failed with exit code $LASTEXITCODE"
+        } else {
+          Write-Warn "M16.2 metrics aggregation failed (non-blocking)"
+        }
+      } else {
+        Write-Ok 'M16.2 metrics aggregation complete'
+      }
+    }
   }
 
   Write-Ok "M8 runtime reliability pass complete (log: $logPath)"
