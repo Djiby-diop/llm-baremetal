@@ -947,7 +947,7 @@ static void llmk_serial_write_char16(const CHAR16 *s) {
 static void llmk_serial_write_char16(const CHAR16 *s) { (void)s; }
 #endif
 
-// Some generations still contain the classic mojibake sequence "ÔÇÖ" for U+2019.
+// Some generations still contain a classic mojibake sequence for U+2019 (RIGHT SINGLE QUOTATION MARK).
 // This can span token boundaries, so keep a small byte tail and repair across calls.
 static unsigned char g_utf8_repair_tail[5];
 static int g_utf8_repair_tail_len = 0;
@@ -967,15 +967,15 @@ static void uefi_print_utf8_bytes(const char *bytes, int len) {
     // Common mojibake seen in generations (CP437-ish smart punctuation).
     // Each pat is UTF-8 for the visible mojibake string; rep is UTF-8 for the intended punctuation.
     static const Mojimap maps[] = {
-        // ÔÇÖ -> ’
+        // mojibake(right single quote) -> U+2019
         { { 0xC3, 0x94, 0xC3, 0x87, 0xC3, 0x96 }, { 0xE2, 0x80, 0x99 } },
-        // ÔÇ£ -> “
+        // mojibake(left double quote) -> U+201C
         { { 0xC3, 0x94, 0xC3, 0x87, 0xC2, 0xA3 }, { 0xE2, 0x80, 0x9C } },
-        // ÔÇØ -> ”
+        // mojibake(right double quote) -> U+201D
         { { 0xC3, 0x94, 0xC3, 0x87, 0xC3, 0x98 }, { 0xE2, 0x80, 0x9D } },
-        // ÔÇö -> —
+        // mojibake(em dash) -> U+2014
         { { 0xC3, 0x94, 0xC3, 0x87, 0xC3, 0xB6 }, { 0xE2, 0x80, 0x94 } },
-        // ÔÇª -> …
+        // mojibake(ellipsis) -> U+2026
         { { 0xC3, 0x94, 0xC3, 0x87, 0xC2, 0xAA }, { 0xE2, 0x80, 0xA6 } },
     };
 
@@ -1293,6 +1293,19 @@ static int g_oo_exec_remaining = 0;
 static int g_oo_exec_total = 0;
 static int g_oo_exec_plan_if_empty = 0;
 static char g_oo_exec_hint[256];
+
+// M19.1: Benchmark capture (writes JSONL rows to a file on the boot volume)
+static int g_bench_active = 0;
+static int g_bench_pending = 0;
+static char g_bench_case_id[64];
+static char g_bench_category[48];
+static int g_bench_case_max_new_tokens = 0;
+static unsigned long long g_bench_wall0_us = 0;
+static int g_bench_have_wall = 0;
+static UINT64 g_bench_decode_cycles_start = 0;
+static UINT32 g_bench_decode_tokens_start = 0;
+static EFI_FILE_HANDLE g_bench_file = NULL;
+static CHAR16 g_bench_out_name[64] = L"LLMK_BEN.JNL";
 
 // M16.1: Runtime metrics (tokens/sec, latency, memory pressure, sentinel)
 typedef struct {
@@ -3022,7 +3035,7 @@ static EFI_STATUS llmk_open_binary_file_append(EFI_FILE_HANDLE *out, const CHAR1
 }
 
 // ============================================================================
-// OPERATING ORGANISM (OO) — v0 STATE + JOURNAL (best-effort)
+// OPERATING ORGANISM (OO) - v0 STATE + JOURNAL (best-effort)
 // ============================================================================
 
 #define LLMK_OO_STATE_MAGIC 0x54534F4Fu  // 'OOST' little-endian
@@ -3588,7 +3601,7 @@ static void llmk_oo_boot_tick_best_effort(void) {
 }
 
 // ============================================================================
-// OO M4 — Network Read-only Tick (placeholder)
+// OO M4 - Network Read-only Tick (placeholder)
 // - Never required for boot
 // - Best-effort: detect if SNP is present; do not perform IO yet
 // - Emits deterministic serial markers and journal events
@@ -3662,7 +3675,7 @@ static void llmk_oo_net_tick_best_effort(void) {
     uefi_call_wrapper(BS->FreePool, 1, handles);
 }
 
-// OO M5: /oo_consult — LLM-based system health advisor (safety-first policy)
+// OO M5: /oo_consult - LLM-based system health advisor (safety-first policy)
 // Note: requires g_llmk_ready, weights loaded, etc. 
 // Forward decl moved below after type definitions
 
@@ -6076,6 +6089,218 @@ static void llmk_cfg_out_append(char *out, int *op, int out_cap, const char *s) 
     *op = p;
 }
 
+// M19.1 benchmark capture helpers (JSONL to boot volume)
+static void llmk_bench_sanitize_token(char *dst, int cap, const char *src) {
+    if (!dst || cap <= 0) return;
+    dst[0] = 0;
+    if (!src) return;
+    int p = 0;
+    for (int i = 0; src[i] && p + 1 < cap; i++) {
+        char c = src[i];
+        // Keep JSON-simple tokens only. Replace others to avoid escaping.
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+            dst[p++] = c;
+        } else {
+            dst[p++] = '?';
+        }
+    }
+    dst[p] = 0;
+}
+
+static void llmk_bench_close_best_effort(void) {
+    if (g_bench_file) {
+        uefi_call_wrapper(g_bench_file->Flush, 1, g_bench_file);
+        uefi_call_wrapper(g_bench_file->Close, 1, g_bench_file);
+        g_bench_file = NULL;
+    }
+}
+
+static int llmk_bench_begin_best_effort(const CHAR16 *out_name) {
+    llmk_bench_close_best_effort();
+    g_bench_pending = 0;
+    g_bench_have_wall = 0;
+    g_bench_wall0_us = 0;
+    g_bench_decode_cycles_start = 0;
+    g_bench_decode_tokens_start = 0;
+
+    if (out_name && out_name[0]) {
+        StrCpy(g_bench_out_name, (CHAR16 *)out_name);
+        } else {
+            StrCpy(g_bench_out_name, L"LLMK_BEN.JNL");
+    }
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_binary_file(&f, g_bench_out_name);
+    if (EFI_ERROR(st) || !f) {
+        Print(L"\r\nERROR: bench_begin cannot open %s (%r)\r\n\r\n", g_bench_out_name, st);
+        g_bench_active = 0;
+        return 0;
+    }
+    g_bench_file = f;
+    g_bench_active = 1;
+    Print(L"\r\n[bench] begin -> %s\r\n\r\n", g_bench_out_name);
+    return 1;
+}
+
+static void llmk_bench_end_best_effort(void) {
+    if (!g_bench_active) {
+        Print(L"\r\n[bench] not active\r\n\r\n");
+        return;
+    }
+    llmk_bench_close_best_effort();
+    g_bench_active = 0;
+    g_bench_pending = 0;
+    Print(L"\r\n[bench] end\r\n\r\n");
+}
+
+static void llmk_bench_prepare_case(const char *case_id, const char *category, int max_new_tokens) {
+    llmk_bench_sanitize_token(g_bench_case_id, (int)sizeof(g_bench_case_id), case_id);
+    llmk_bench_sanitize_token(g_bench_category, (int)sizeof(g_bench_category), category);
+    g_bench_case_max_new_tokens = max_new_tokens;
+    g_bench_pending = 1;
+    g_bench_have_wall = 0;
+    g_bench_wall0_us = 0;
+    g_bench_decode_cycles_start = g_metrics.total_decode_cycles;
+    g_bench_decode_tokens_start = g_metrics.total_decode_tokens;
+}
+
+static void llmk_bench_on_turn_start(void) {
+    if (!g_bench_active || !g_bench_pending) return;
+    unsigned long long us = 0;
+    g_bench_have_wall = uefi_wall_us(&us) ? 1 : 0;
+    g_bench_wall0_us = us;
+    // Decode starts already captured in llmk_bench_prepare_case().
+}
+
+static void llmk_bench_on_turn_end(int generated_tokens) {
+    if (!g_bench_active || !g_bench_pending) return;
+
+    UINT64 decode_cycles = (g_metrics.total_decode_cycles >= g_bench_decode_cycles_start)
+                             ? (g_metrics.total_decode_cycles - g_bench_decode_cycles_start)
+                             : 0ULL;
+    UINT32 decode_tokens = (g_metrics.total_decode_tokens >= g_bench_decode_tokens_start)
+                             ? (g_metrics.total_decode_tokens - g_bench_decode_tokens_start)
+                             : 0U;
+
+    UINT64 latency_ms = 0;
+    if (g_bench_have_wall) {
+        unsigned long long us1 = 0;
+        if (uefi_wall_us(&us1)) {
+            unsigned long long dt_us = (us1 >= g_bench_wall0_us) ? (us1 - g_bench_wall0_us)
+                                                                 : (us1 + 86400ULL * 1000000ULL - g_bench_wall0_us);
+            latency_ms = (UINT64)(dt_us / 1000ULL);
+        }
+    }
+
+    if (!g_bench_file) {
+        Print(L"[bench] WARN: file not open; skipping write\r\n");
+        g_bench_pending = 0;
+        return;
+    }
+
+    char row[512];
+    int rp = 0;
+    row[0] = 0;
+    llmk_cfg_out_append(row, &rp, (int)sizeof(row), "{\"case_id\":\"");
+    llmk_cfg_out_append(row, &rp, (int)sizeof(row), g_bench_case_id);
+    llmk_cfg_out_append(row, &rp, (int)sizeof(row), "\",\"category\":\"");
+    llmk_cfg_out_append(row, &rp, (int)sizeof(row), g_bench_category);
+    llmk_cfg_out_append(row, &rp, (int)sizeof(row), "\",\"latency_ms\":");
+    {
+        char tmp[32];
+        int tp = 0;
+        tmp[0] = 0;
+        UINT64 v = latency_ms;
+        char digits[24];
+        int nd = 0;
+        if (v == 0) {
+            digits[nd++] = '0';
+        } else {
+            while (v > 0 && nd < (int)sizeof(digits)) {
+                digits[nd++] = (char)('0' + (v % 10ULL));
+                v /= 10ULL;
+            }
+        }
+        for (int i = nd - 1; i >= 0 && tp + 1 < (int)sizeof(tmp); i--) tmp[tp++] = digits[i];
+        tmp[tp] = 0;
+        llmk_cfg_out_append(row, &rp, (int)sizeof(row), tmp);
+    }
+    llmk_cfg_out_append(row, &rp, (int)sizeof(row), ",\"decode_cycles\":");
+    {
+        char tmp[32];
+        int tp = 0;
+        tmp[0] = 0;
+        UINT64 v = decode_cycles;
+        char digits[24];
+        int nd = 0;
+        if (v == 0) {
+            digits[nd++] = '0';
+        } else {
+            while (v > 0 && nd < (int)sizeof(digits)) {
+                digits[nd++] = (char)('0' + (v % 10ULL));
+                v /= 10ULL;
+            }
+        }
+        for (int i = nd - 1; i >= 0 && tp + 1 < (int)sizeof(tmp); i--) tmp[tp++] = digits[i];
+        tmp[tp] = 0;
+        llmk_cfg_out_append(row, &rp, (int)sizeof(row), tmp);
+    }
+    llmk_cfg_out_append(row, &rp, (int)sizeof(row), ",\"decode_tokens\":");
+    {
+        char tmp[24];
+        int tp = 0;
+        tmp[0] = 0;
+        UINT32 v = decode_tokens;
+        char digits[16];
+        int nd = 0;
+        if (v == 0) {
+            digits[nd++] = '0';
+        } else {
+            while (v > 0 && nd < (int)sizeof(digits)) {
+                digits[nd++] = (char)('0' + (v % 10));
+                v /= 10;
+            }
+        }
+        for (int i = nd - 1; i >= 0 && tp + 1 < (int)sizeof(tmp); i--) tmp[tp++] = digits[i];
+        tmp[tp] = 0;
+        llmk_cfg_out_append(row, &rp, (int)sizeof(row), tmp);
+    }
+    llmk_cfg_out_append(row, &rp, (int)sizeof(row), ",\"generated_tokens\":");
+    {
+        char tmp[24];
+        int tp = 0;
+        tmp[0] = 0;
+        int v = generated_tokens;
+        if (v < 0) v = 0;
+        char digits[16];
+        int nd = 0;
+        if (v == 0) {
+            digits[nd++] = '0';
+        } else {
+            while (v > 0 && nd < (int)sizeof(digits)) {
+                digits[nd++] = (char)('0' + (v % 10));
+                v /= 10;
+            }
+        }
+        for (int i = nd - 1; i >= 0 && tp + 1 < (int)sizeof(tmp); i--) tmp[tp++] = digits[i];
+        tmp[tp] = 0;
+        llmk_cfg_out_append(row, &rp, (int)sizeof(row), tmp);
+    }
+    llmk_cfg_out_append(row, &rp, (int)sizeof(row), "}\n");
+
+    EFI_STATUS st = llmk_file_write_bytes(g_bench_file, row, (UINTN)my_strlen(row));
+    if (EFI_ERROR(st)) {
+        Print(L"[bench] WARN: write failed (%r)\r\n", st);
+    } else {
+        uefi_call_wrapper(g_bench_file->Flush, 1, g_bench_file);
+        Print(L"[bench] case=");
+        llmk_print_ascii(g_bench_case_id);
+        Print(L" latency_ms=%lu decode_tokens=%u\r\n", latency_ms, decode_tokens);
+    }
+
+    g_bench_pending = 0;
+}
+
 // Forward decl: used by OO auto-apply verification helpers.
 static EFI_STATUS llmk_repl_cfg_set_kv_best_effort(const char *key, const char *val);
 
@@ -6280,7 +6505,7 @@ static int llmk_oo_auto_apply_write_verify_best_effort(const char *action,
     if (ctx_after <= 0) ctx_after = expected_ctx;
     if (seq_after <= 0) seq_after = expected_seq;
 
-    // Range checks (spec guidance: ctx_len ∈ [16,4096] etc).
+    // Range checks (spec guidance: ctx_len in [16,4096] etc).
     if (ctx_after < 16 || ctx_after > 4096) return 0;
     if (seq_after < 16 || seq_after > 4096) return 0;
 
@@ -6547,12 +6772,12 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
 }
 
 void matmul(float* xout, float* x, float* w, int n, int d) {
-    // DjibLAS computes (column-major): C(m×n) = A(k×m)^T · B(k×n)
-    // We want (row-major weights): xout(d) = W(d×n) · x(n)
-    // Trick: W(d×n) row-major has the same memory layout as B(k×n_out)
+    // DjibLAS computes (column-major): C(m x n) = A(k x m)^T * B(k x n)
+    // We want (row-major weights): xout(d) = W(d x n) * x(n)
+    // Trick: W(d x n) row-major has the same memory layout as B(k x n_out)
     // column-major when k=n and n_out=d (because W[i*n + l] == B[l + k*i]).
-    // Use A = x as a (k×1) column-major matrix.
-    // Result C is (1×d) column-major, so it lands contiguous into xout.
+    // Use A = x as a (k x 1) column-major matrix.
+    // Result C is (1 x d) column-major, so it lands contiguous into xout.
     djiblas_sgemm_f32(
         /*m=*/1, /*n=*/d, /*k=*/n,
         /*A=*/x, /*lda=*/n,
@@ -6632,7 +6857,7 @@ static void llmk_dequantize_q8_0_row(float *dst, const UINT8 *row_q8, int cols) 
     }
 }
 
-// xout(d) = W(d×n) · x(n) where W is Q8_0 row-major blocks.
+// xout(d) = W(d x n) * x(n) where W is Q8_0 row-major blocks.
 static void matmul_q8_0_scalar(float *xout, const float *x, const UINT8 *w_q8, int n, int d) {
     if (!xout || !x || !w_q8) return;
     if ((n % 32) != 0) {
@@ -8112,6 +8337,9 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/diag_status", L"Show diagnostics status + counters" },
     { "/diag_report", L"Write llmk-diag.txt report (or /diag_report <file>)" },
     { "/metrics", L"Export runtime performance metrics to LLMK_METRICS.LOG (JSON)" },
+    { "/bench_begin", L"Begin benchmark capture to LLMK_BENCH.JSONL (optional: filename)" },
+    { "/bench_case", L"Run one benchmark case: /bench_case <id> <cat> <max_new_tokens> <prompt...>" },
+    { "/bench_end", L"End benchmark capture (flush/close file)" },
     { "/autotune_status", L"Show M18 autotune thresholds + current sampling knobs" },
     { "/guard_status", L"Show M18.1 guardrails + safe-mode status" },
     { "/version", L"Show build version + features" },
@@ -11598,6 +11826,67 @@ snap_autoload_done:
             stop_on_you = 0;
             stop_on_double_nl = 1;
             if (max_gen_tokens > 48) max_gen_tokens = 48;
+        }
+
+        // M19.1 benchmark: /bench_case rewrites into a normal prompt and falls through into generation.
+        // Usage:
+        //   /bench_case <case_id> <category> <max_new_tokens> <prompt...>
+        if (!draw_mode && my_strncmp(prompt, "/bench_case", 11) == 0) {
+            const char *s = prompt + 11;
+            while (*s == ' ' || *s == '\t') s++;
+
+            if (*s == 0) {
+                Print(L"\r\nUsage: /bench_case <id> <cat> <max_new_tokens> <prompt...>\r\n\r\n");
+                prompt[0] = 0;
+                continue;
+            }
+            if (!g_bench_active || !g_bench_file) {
+                Print(L"\r\nERROR: bench not active. Run /bench_begin first.\r\n\r\n");
+                prompt[0] = 0;
+                continue;
+            }
+
+            char case_id[64];
+            char category[48];
+            int max_new = 0;
+
+            int p = 0;
+            while (*s && *s != ' ' && *s != '\t' && p + 1 < (int)sizeof(case_id)) case_id[p++] = *s++;
+            case_id[p] = 0;
+            while (*s == ' ' || *s == '\t') s++;
+
+            p = 0;
+            while (*s && *s != ' ' && *s != '\t' && p + 1 < (int)sizeof(category)) category[p++] = *s++;
+            category[p] = 0;
+            while (*s == ' ' || *s == '\t') s++;
+
+            while (*s >= '0' && *s <= '9') {
+                max_new = max_new * 10 + (*s - '0');
+                s++;
+            }
+            while (*s == ' ' || *s == '\t') s++;
+
+            if (case_id[0] == 0 || category[0] == 0 || max_new <= 0 || *s == 0) {
+                Print(L"\r\nUsage: /bench_case <id> <cat> <max_new_tokens> <prompt...>\r\n\r\n");
+                prompt[0] = 0;
+                continue;
+            }
+
+            // Keep each case independent.
+            reset_kv_cache(&state, &config);
+            kv_pos = 0;
+            g_llmk_kv_pos = kv_pos;
+
+            if (max_new > MAX_TOKENS) max_new = MAX_TOKENS;
+            max_gen_tokens = max_new;
+            llmk_bench_prepare_case(case_id, category, max_new);
+
+            // Overwrite prompt with the case prompt text (so it falls through into generation).
+            for (int i = 0; i + 1 < (int)sizeof(prompt); i++) {
+                prompt[i] = s[i];
+                if (s[i] == 0) break;
+            }
+            prompt[(int)sizeof(prompt) - 1] = 0;
         }
         
         // Check for quit
@@ -15793,13 +16082,33 @@ snap_autoload_done:
                     uefi_call_wrapper(metrics_file->Close, 1, metrics_file);
 
                     if (!EFI_ERROR(metrics_st)) {
-                        Print(L"✅ Metrics exported to LLMK_METRICS.LOG (%d bytes)\r\n", jpos);
+                        Print(L"OK: Metrics exported to LLMK_METRICS.LOG (%d bytes)\r\n", jpos);
                     } else {
-                        Print(L"⚠️  Metrics file write failed (status=%lx)\r\n", metrics_st);
+                        Print(L"WARN: Metrics file write failed (status=%lx)\r\n", metrics_st);
                     }
                 } else {
-                    Print(L"⚠️  Cannot open LLMK_METRICS.LOG for writing (status=%lx)\r\n", metrics_st);
+                    Print(L"WARN: Cannot open LLMK_METRICS.LOG for writing (status=%lx)\r\n", metrics_st);
                 }
+                continue;
+            } else if (my_strncmp(prompt, "/bench_begin", 12) == 0) {
+                // Begin benchmark JSONL capture (default: LLMK_BENCH.JSONL)
+                const char *s = prompt + 12;
+                while (*s == ' ' || *s == '\t') s++;
+
+                char name_ascii[64];
+                int n = 0;
+                while (*s && *s != ' ' && *s != '\t' && n + 1 < (int)sizeof(name_ascii)) name_ascii[n++] = *s++;
+                name_ascii[n] = 0;
+
+                CHAR16 out16[64];
+                out16[0] = 0;
+                if (name_ascii[0]) {
+                    ascii_to_char16(out16, name_ascii, (int)(sizeof(out16) / sizeof(out16[0])));
+                }
+                (void)llmk_bench_begin_best_effort(name_ascii[0] ? out16 : NULL);
+                continue;
+            } else if (my_strncmp(prompt, "/bench_end", 10) == 0) {
+                llmk_bench_end_best_effort();
                 continue;
             } else if (my_strncmp(prompt, "/autotune_status", 16) == 0) {
                 llmk_autotune_print_status(temperature, top_p, top_k, max_gen_tokens);
@@ -15856,6 +16165,9 @@ snap_autoload_done:
         if (!g_capture_mode && !draw_mode) {
             llmk_guardrails_apply_safe_caps(&temperature, &top_p, &top_k, &max_gen_tokens, 1);
         }
+
+        // M19.1: capture wall-clock start for benchmark cases.
+        llmk_bench_on_turn_start();
 
         UINT64 m18_decode_cycles_start = g_metrics.total_decode_cycles;
         UINT32 m18_decode_tokens_start = g_metrics.total_decode_tokens;
@@ -16307,6 +16619,9 @@ stats_done:
         
         // M16.1: Track completed generation
         g_metrics.generation_count++;
+
+        // M19.1: write per-case benchmark JSONL row when active.
+        llmk_bench_on_turn_end(generated_count);
 
         // Diopion burst: decrement remaining and restore knobs when done.
         llmk_diopion_burst_finish_one(&max_gen_tokens, &top_k, &temperature);

@@ -110,7 +110,7 @@ if ($xzActual -ne $xzExpected) {
 $imgSizeMB = [math]::Round(((Get-Item -LiteralPath $img).Length / 1MB), 2)
 $xzSizeMB = [math]::Round(((Get-Item -LiteralPath $xz).Length / 1MB), 2)
 
-Write-Host '[M6.2] Package check: OK ✅' -ForegroundColor Green
+Write-Host '[M6.2] Package check: OK' -ForegroundColor Green
 Write-Host "  - $imgName ($imgSizeMB MB)" -ForegroundColor Gray
 Write-Host "  - $xzName ($xzSizeMB MB)" -ForegroundColor Gray
 Write-Host "  - SHA256SUMS.txt entries verified" -ForegroundColor Gray

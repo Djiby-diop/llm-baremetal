@@ -152,13 +152,13 @@ if ($wslExe -and $hasWslDistro -and $wslDistroName) {
 
 Write-Host ''
 if ($allOk) {
-    Write-Host 'Preflight: READY ✅' -ForegroundColor Green
+    Write-Host 'Preflight: READY' -ForegroundColor Green
     Write-Host 'Next:' -ForegroundColor Cyan
     Write-Host '  .\run.ps1'
     exit 0
 }
 
-Write-Host 'Preflight: NOT READY ❌' -ForegroundColor Red
+Write-Host 'Preflight: NOT READY' -ForegroundColor Red
 Write-Host 'Suggested fixes:' -ForegroundColor Yellow
 Write-Host '  1) Install/enable WSL2 and reboot if requested:'
 Write-Host '     wsl --install'

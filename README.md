@@ -6,7 +6,27 @@ By Djiby Diop
 
 ## Build (Windows + WSL)
 
-1) Put `tokenizer.bin` and a model file in this folder.
+### Model weights (not in git)
+
+Model weights (`.gguf` / legacy `.bin`) are intentionally not tracked in git.
+Download them from Hugging Face (or any direct URL) into `models/`.
+
+Windows:
+
+```powershell
+./scripts/get-weights.ps1 -Url "https://huggingface.co/<org>/<repo>/resolve/main/<file>.gguf" -OutName "<file>.gguf"
+```
+
+Linux:
+
+```bash
+./scripts/get-weights.sh "https://huggingface.co/<org>/<repo>/resolve/main/<file>.gguf" "<file>.gguf"
+```
+
+Then pass the model path to the build.
+
+1) Ensure `tokenizer.bin` is present (this repo includes it by default).
+2) Download a model file into `models/` (see above).
    - Supported today for inference: `.bin` (llama2.c export)
    - Supported today for inference: `.gguf` (F16/F32 + common quant types like Q4/Q5/Q8; see below)
    - You can also use a base name without extension (the image builder will copy `.bin` and/or `.gguf` if present)
@@ -19,7 +39,10 @@ By Djiby Diop
 Example (base name):
 
 ```powershell
-./build.ps1 -ModelBin stories110M
+./build.ps1 -ModelBin models/stories110M
+
+# or explicit file
+./build.ps1 -ModelBin models/my-model.gguf
 ```
 
 ## Build (Linux)
@@ -73,23 +96,23 @@ Copy your model to the USB EFI/FAT partition:
 - Copy your model file (`.gguf` or legacy `.bin`) to the root of the FAT partition (or create a `models/` folder and put it there).
 - `tokenizer.bin` is already included in the Release image.
 
-Note: some UEFI FAT drivers can be unreliable with long filenames. If you hit “file not found / open failed” issues, prefer an 8.3-compatible filename (e.g. `STORIES11.GGU`) or use the FAT 8.3 alias (e.g. `STORIE~1.GGU`) when setting `model=` in `repl.cfg`.
+Note: some UEFI FAT drivers can be unreliable with long filenames. If you hit "file not found / open failed" issues, prefer an 8.3-compatible filename (e.g. `STORIES11.GGU`) or use the FAT 8.3 alias (e.g. `STORIE~1.GGU`) when setting `model=` in `repl.cfg`.
 
 Boot the USB on an x86_64 UEFI machine, then select/load your model from the REPL.
 
 ## Recommended conversational setup (8GB RAM)
 
-On an 8GB machine, “conversational” works best with a **small instruct/chat GGUF model** rather than a large 7B model.
+On an 8GB machine, "conversational" works best with a **small instruct/chat GGUF model** rather than a large 7B model.
 
 Recommended target:
 
-- Size: ~0.5B–1B parameters
+- Size: ~0.5B-1B parameters
 - Format: `.gguf`
 - Quantization: prefer variants that are supported by the current GGUF inferencer: `Q4_0/Q4_1/Q5_0/Q5_1/Q8_0` (avoid `Q4_K_*` / `Q5_K_*` for now)
 
 Suggested first-run settings:
 
-- Keep context small at first (e.g. 256–512) to avoid running out of RAM (KV cache grows with context).
+- Keep context small at first (e.g. 256-512) to avoid running out of RAM (KV cache grows with context).
 - If your model is Q8_0 and you want lower RAM usage, enable `gguf_q8_blob=1` (default in the Release image).
 
 Useful REPL commands:
@@ -208,13 +231,9 @@ Runtime dispatch inputs:
 - `run_runtime=true`
 - `timeout_sec` (default `180`)
 
-### Synthese des ameliorations
-
-Consultez `AMELIORATIONS_APPORTEES.md` pour la liste consolidée des améliorations livrées (M6 -> M16).
-
 ## Notes
 
 - Model weights are intentionally not tracked in git; use GitHub Releases or your own files.
-- Optional config: copy `repl.cfg.example` → `repl.cfg` (not committed) and rebuild.
+- Optional config: copy `repl.cfg.example` -> `repl.cfg` (not committed) and rebuild.
 - Next roadmap after M6.x: see `INNOVATIONS_NEXT.md`.
 

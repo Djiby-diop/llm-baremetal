@@ -5,6 +5,8 @@ param(
   [string]$DriftHistoryPath = "artifacts/m15/history.jsonl",
   [ValidateRange(1, 50)]
   [int]$BaselineWindow = 5,
+  [ValidateRange(1, 50)]
+  [int]$MinBaselineRunsForDrift = 3,
   [ValidateRange(1, 100)]
   [int]$MinSamplesForDrift = 5,
   [ValidateRange(1, 200)]
@@ -119,7 +121,16 @@ $anomalies = New-Object System.Collections.Generic.List[string]
 $driftBreaches = New-Object System.Collections.Generic.List[string]
 $ok = $true
 
-if ($currentDist.total -lt $MinSamplesForDrift) {
+$baselineReady = ($baselineEntries.Count -ge $MinBaselineRunsForDrift) -and ($baselineDist.total -ge $MinSamplesForDrift)
+$learningMode = -not $baselineReady
+
+if ($learningMode) {
+  Write-Warn "Baseline not ready for strict drift gate (need >=$MinBaselineRunsForDrift runs and >=$MinSamplesForDrift baseline samples; got runs=$($baselineEntries.Count) samples=$($baselineDist.total)). Skipping drift evaluation."
+}
+
+if ($learningMode) {
+  # Intentionally skip drift detection until baseline is meaningful.
+} elseif ($currentDist.total -lt $MinSamplesForDrift) {
   Write-Warn "Insufficient reason_id samples for strict drift gate (need >=$MinSamplesForDrift, got $($currentDist.total))"
 } else {
   $allKeys = New-Object System.Collections.Generic.HashSet[string]
@@ -174,11 +185,14 @@ $state = [ordered]@{
   log_path = $LogPath
   baseline_history_path = $HistoryPath
   baseline_window = $BaselineWindow
+  min_baseline_runs_for_drift = $MinBaselineRunsForDrift
   baseline_runs = $baselineEntries.Count
   current_total_reason_ids = $currentDist.total
   baseline_total_reason_ids = $baselineDist.total
   current_shares = $currentDist.shares
   baseline_shares = $baselineDist.shares
+  baseline_ready = $baselineReady
+  learning_mode = $learningMode
   drift_breaches = @($driftBreaches)
   anomalies = @($anomalies)
   max_share_drift_pct = $MaxShareDriftPct

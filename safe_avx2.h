@@ -145,9 +145,9 @@ static inline float safe_dot(const float* a, const float* b, int n) {
 // Print AVX2 status
 static inline void print_avx2_status(void) {
     if (test_avx2_safe()) {
-        Print(L"  🚀 AVX2: ENABLED (High Performance)\r\n");
+        Print(L"  AVX2: ENABLED (High Performance)\r\n");
     } else {
-        Print(L"  ⚠️  AVX2: DISABLED (Fallback to SSE2/Scalar)\r\n");
+        Print(L"  AVX2: DISABLED (Fallback to SSE2/Scalar)\r\n");
     }
 }
 

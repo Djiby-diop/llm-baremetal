@@ -306,12 +306,12 @@ if ($null -ne $baseline) {
   $md += "**Drift threshold**: $thresholdStr`n`n"
 
   if ($driftDetected) {
-    $md += "### ⚠️ DRIFT DETECTED`n`n"
+    $md += "### DRIFT DETECTED`n`n"
     foreach ($reason in $driftReasons) {
       $md += "- $reason`n"
     }
   } else {
-    $md += "### ✅ No drift detected`n`n"
+    $md += "### No drift detected`n`n"
     $md += "- Prefill drift: {0:+0.0;-0.0}%`n" -f $aggregateState.prefill_drift_pct
     $md += "- Decode drift: {0:+0.0;-0.0}%`n" -f $aggregateState.decode_drift_pct
   }

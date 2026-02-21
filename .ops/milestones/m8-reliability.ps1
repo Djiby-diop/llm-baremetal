@@ -125,8 +125,11 @@ $m16AggregateScript = Join-Path $PSScriptRoot 'm16-metrics-aggregate.ps1'
 $m17ReportScript = Join-Path $PSScriptRoot 'm17-ci-metrics-report.ps1'
 $m19PackScript = Join-Path $PSScriptRoot 'm19-benchmark-pack.ps1'
 $m19CompareScript = Join-Path $PSScriptRoot 'm19-benchmark-compare.ps1'
+$m191AutorunScript = Join-Path $PSScriptRoot 'm19.1-benchmark-autorun.ps1'
+$m191ExtractScript = Join-Path $PSScriptRoot 'm19.1-extract-bench.ps1'
 $cfgPath = Join-Path $repoRoot 'repl.cfg'
 $autorunPath = Join-Path $repoRoot 'llmk-autorun.txt'
+$autorunBenchPath = Join-Path $repoRoot 'llmk-autorun-bench.txt'
 $tmpDir = Join-Path $repoRoot 'artifacts\m8'
 $logPath = Join-Path $tmpDir 'm8-qemu-serial.log'
 $errLogPath = Join-Path $tmpDir 'm8-qemu-serial.err.log'
@@ -241,6 +244,29 @@ if (Test-Path $autorunPath) {
 }
 
 try {
+  if ($M19EnableBenchmarkPack) {
+    if (-not (Test-Path -LiteralPath $m19PackScript)) {
+      Write-Warn "M19 benchmark pack script not found: $m19PackScript"
+    } else {
+      Write-Step 'Preparing M19.1 benchmark input pack (for autorun)'
+      & $m19PackScript -OutputDir 'artifacts/m19/current' -Quiet
+      if ($LASTEXITCODE -ne 0) {
+        throw "M19 benchmark pack generation (pre-run) failed with exit code $LASTEXITCODE"
+      }
+    }
+
+    if (-not (Test-Path -LiteralPath $m191AutorunScript)) {
+      Write-Warn "M19.1 autorun generator script not found: $m191AutorunScript"
+    } else {
+      Write-Step 'Generating llmk-autorun-bench.txt (M19.1)'
+      & $m191AutorunScript -InputJsonl 'artifacts/m19/current/benchmark-input.jsonl' -OutputPath 'llmk-autorun-bench.txt'
+      if ($LASTEXITCODE -ne 0) {
+        throw "M19.1 autorun generation failed with exit code $LASTEXITCODE"
+      }
+      Write-Ok 'M19.1 benchmark autorun ready'
+    }
+  }
+
   $cfgLines = @(
     'boot_verbose=1',
     'overlay=1',
@@ -265,9 +291,17 @@ try {
     '/models',
     '/oo_consult_mock reduce ctx and reduce seq',
     '/oo_consult_mock increase context',
-    '/oo_jour',
-    'exit'
+    '/oo_jour'
   )
+
+  if ($M19EnableBenchmarkPack -and (Test-Path -LiteralPath $autorunBenchPath)) {
+    # Chain benchmark capture from the main reliability autorun.
+    # Use --shutdown to terminate the VM cleanly when benchmarks finish.
+    $autorunLines += '/autorun --shutdown llmk-autorun-bench.txt'
+  } else {
+    $autorunLines += 'exit'
+  }
+
   Set-Content -LiteralPath $autorunPath -Value ($autorunLines -join "`r`n") -Encoding ASCII
 
   if (-not $SkipBuild) {
@@ -295,6 +329,7 @@ try {
     $runScript,
     '-PassThroughExitCode',
     '-NoNormalizeExitCode',
+    '-ImagePath', 'llm-baremetal-boot.img',
     '-Accel', $Accel,
     '-MemMB', "$MemMB"
   )
@@ -349,6 +384,49 @@ try {
 
   if (-not $staticOk -or -not $runtimeOk) {
     throw "M8 reliability checks failed (see log: $logPath)"
+  }
+
+  if ($M19EnableBenchmarkPack) {
+    if (-not (Test-Path -LiteralPath $m191ExtractScript)) {
+      Write-Warn "M19.1 extract script not found: $m191ExtractScript"
+    } else {
+      Write-Step 'Extracting M19.1 benchmark results from image'
+      $currentFull = Join-Path $repoRoot $M19CurrentResultsPath
+      if (Test-Path -LiteralPath $currentFull) {
+        Remove-Item -LiteralPath $currentFull -Force -ErrorAction SilentlyContinue
+      }
+      & $m191ExtractScript -ImagePath 'llm-baremetal-boot.img' -PartitionOffset '1M' -BenchFilename 'LLMK_BEN.JNL' -OutputPath $M19CurrentResultsPath
+      if ($LASTEXITCODE -ne 0) {
+        throw "M19.1 benchmark extraction failed with exit code $LASTEXITCODE"
+      }
+      Write-Ok 'M19.1 benchmark results extracted'
+
+      # Re-run M19 compare immediately so the report matches the freshly extracted results.
+      if (Test-Path -LiteralPath $m19CompareScript) {
+        $baselineFull = Join-Path $repoRoot $M19BaselineResultsPath
+        if ((Test-Path -LiteralPath $baselineFull) -and (Test-Path -LiteralPath $currentFull)) {
+          Write-Step 'Running M19 benchmark comparison (post-extract)'
+          $m19Args = @{
+            BaselineResultsPath = $M19BaselineResultsPath
+            CurrentResultsPath = $M19CurrentResultsPath
+            OutputPath = 'artifacts/m19/compare/benchmark-compare.md'
+            RegressionThresholdPct = $M19RegressionThresholdPct
+          }
+          if ($M19FailOnRegression) {
+            $m19Args.FailOnRegression = $true
+          }
+          & $m19CompareScript @m19Args
+          if ($LASTEXITCODE -ne 0) {
+            if ($M19FailOnRegression) {
+              throw "M19 benchmark compare failed with exit code $LASTEXITCODE"
+            }
+            Write-Warn 'M19 benchmark compare reported regressions (non-blocking)'
+          } else {
+            Write-Ok 'M19 benchmark comparison complete (post-extract)'
+          }
+        }
+      }
+    }
   }
 
   if (-not (Test-Path -LiteralPath $m9Script)) {
@@ -442,17 +520,12 @@ try {
     }
 
     Write-Step 'Running M14.1 OOJOUR extraction'
-    $extractArgs = @(
-      '-OutputPath', $m14JournalPath
-    )
-    if ($M14ImagePath) {
-      $extractArgs += @('-ImagePath', $M14ImagePath)
-    }
+    $m14Image = if ($M14ImagePath) { $M14ImagePath } else { (Join-Path $repoRoot 'llm-baremetal-boot.img') }
     if ($M14RequireJournalParity) {
-      $extractArgs += '-FailIfMissing'
+      & $m141ExtractScript -OutputPath $m14JournalPath -ImagePath $m14Image -FailIfMissing
+    } else {
+      & $m141ExtractScript -OutputPath $m14JournalPath -ImagePath $m14Image
     }
-
-    & $m141ExtractScript @extractArgs
     if ($LASTEXITCODE -ne 0) {
       throw "M14.1 OOJOUR extraction failed with exit code $LASTEXITCODE"
     }
@@ -461,16 +534,11 @@ try {
   }
 
   Write-Step 'Running M14 explainability coverage check'
-  $m14Args = @(
-    '-LogPath', $logPath,
-    '-JournalLogPath', $m14JournalPath,
-    '-FailOnCoverageGap'
-  )
   if ($M14RequireJournalParity) {
-    $m14Args += '-RequireJournalParity'
+    & $m14Script -LogPath $logPath -JournalLogPath $m14JournalPath -FailOnCoverageGap -RequireJournalParity
+  } else {
+    & $m14Script -LogPath $logPath -JournalLogPath $m14JournalPath -FailOnCoverageGap
   }
-
-  & $m14Script @m14Args
   if ($LASTEXITCODE -ne 0) {
     throw "M14 coverage failed with exit code $LASTEXITCODE"
   }

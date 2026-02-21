@@ -1,41 +1,50 @@
-# Next Innovations — llm-baremetal + OO
+ ## Track B - Operating Organism (OO)
+ ### B1. M7 - Policy confidence scoring
+ ### B2. M7.1 - Outcome feedback loop
+ ### B3. M7.2 - Safe multi-step adaptation plan
+1. A2 (observability) - immediate value and low risk.
+2. A1 (startup performance) - measurable user impact.
+3. B1 (confidence scoring) - first OO M7 building block.
+4. B2 (feedback loop) - behavior quality over time.
+5. B3 (safe plan) - advanced autonomy with strict safety bounds.
+# Next Innovations - llm-baremetal + OO
 
 This file defines the next practical innovation wave after M6.x hardening.
 
 ## Current sprint status
-- ✅ A2 baseline implemented (structured observability markers in runtime + OO consult).
-- ✅ B1 baseline implemented in log-only mode (confidence score + threshold logged).
-- ✅ B1 threshold gating implemented behind config flags (`oo_conf_gate`, `oo_conf_threshold`), off by default.
-- ✅ A1 baseline implemented: startup model path now avoids eager GGUF summary parse, adds startup timing markers, and caches GGUF summary once per session for `/model_info`.
-- ✅ B2 baseline implemented: `OOOUTCOME.LOG` now persists `(action, expected, observed)` with pending/observed entries and confidence scoring now includes recent outcome feedback bias.
-- ✅ B3 baseline implemented: bounded per-boot multi-step plan (`oo_plan_enable`, `oo_plan_max_actions`), explicit rollback checkpoint markers before auto-apply, and hard-stop on verify failures.
-- ✅ A3 baseline implemented: `/models` now reports size+type+summary and startup `model=` path failures now emit explicit fallback diagnostics and recovery hints.
-- ✅ M8 baseline implemented: `m8-reliability.ps1` now executes static + runtime reliability checks with targeted autorun scenarios for A1/A3/B1/B2/B3 and emits pass/fail markers.
-- ✅ M8.1 CI wiring implemented: GitHub Actions workflow runs M8 static pass on push/PR and exposes optional runtime pass via manual dispatch on self-hosted Windows runner.
-- ✅ M9 baseline implemented: `m9-guardrails.ps1` parses M8 runtime logs and enforces startup marker + latency budgets (`model_select_ms`, `model_prepare_ms`) with optional OO marker requirements.
-- ✅ M9.1 baseline implemented: M9 now persists run history in `artifacts/m9/history.jsonl` and performs drift checks versus recent runs (configurable window and drift thresholds).
-- ✅ M10 baseline implemented: `m10-quality-guardrails.ps1` enforces harmful-ratio + failure-streak thresholds and supports auto-quarantine (`oo_auto_apply=0`) with persisted quarantine state.
-- ✅ M10.1 baseline implemented: M10 now adapts quality thresholds by detected model class (`tiny|medium|large`) and RAM tier (`low|mid|high`) with persisted effective thresholds in quarantine state.
-- ✅ M11 baseline implemented: `m11-self-heal.ps1` now auto-releases quarantine after configurable stable streak, drives canary re-enable windows, and rolls back to quarantine on canary failure.
-- ✅ M11.1 baseline implemented: M11 release/canary path now requires coupled stable windows from M9 (`pass` window) and M10 (`quality_ok` window) histories before progression.
-- ✅ M12 baseline implemented: `m12-policy-curriculum.ps1` now applies staged confidence thresholds by inferred boot phase (`early|warm|steady`) and workload class (`latency_optimization|context_expansion|mixed|unknown`).
-- ✅ M12.1 baseline implemented: M12 now auto-tunes phase/workload threshold matrix from recent M10 outcomes (`helpful/harmful` window) before applying effective curriculum threshold.
-- ✅ M13 baseline implemented: `m13-explainability.ps1` now persists reason codes and threshold provenance (M10/M11/M12) alongside per-run auto-apply outcome events.
-- ✅ M13.1 baseline implemented: runtime OO decision logs now emit explicit `reason_id=...` markers directly from the core engine, consumed by M13 explainability as primary decision reason codes.
-- ✅ M14 baseline implemented: runtime now emits `reason_id` on confidence/plan markers and `m14-explainability-coverage.ps1` checks marker coverage plus optional log/journal parity.
-- ✅ M14.1 baseline implemented: `m14-extract-oojournal.ps1` exports `OOJOUR.LOG` from runtime image to artifacts and M8/CI now supports strict parity gating (`-M14RequireJournalParity`).
-- ✅ M15 baseline implemented: `m15-reasonid-drift.ps1` now monitors reason_id distribution drift against recent explainability history and raises anomaly alerts/gates on breach.
-- ✅ M15.1 baseline implemented: `m15-slo-dashboard.ps1` now exports compact weekly reason_id trend snapshots and SLO metrics for regression review (`dashboard-state.json`, `dashboard.md`, history).
-- ✅ M16 baseline implemented: `reliability.ps1` unified public interface hides granular milestone scripts (M8-M15.1) in `.ops/milestones/` for cleaner repo surface and simpler operator workflow.
-- ✅ M16.1 baseline implemented: runtime now tracks performance metrics (`LlmkRuntimeMetrics` struct) capturing prefill/decode cycles, token counts, KV cache resets, and generations with `/metrics` REPL command exporting JSON to `LLMK_METRICS.LOG`.
-- ✅ M16.2 baseline implemented: `m16-extract-metrics.ps1` extracts runtime metrics from bootable image, `m16-metrics-aggregate.ps1` computes P50/P95/P99 stats and detects performance drift versus baseline with configurable thresholds and rejection gates.
-- ✅ M17 baseline implemented: `m17-ci-metrics-report.ps1` generates CI-friendly performance reports with drift detection, GitHub Actions workflow auto-extracts metrics post-runtime and uploads as artifacts with job summary integration.
-- ✅ M18 baseline implemented: runtime auto-tuning loop now adapts sampling knobs (`temperature`, `top_p`, `top_k`, `max_gen_tokens`) per turn from decode cycles/token thresholds in `repl.cfg`, with `/autotune_status` live diagnostics.
-- ✅ M18.1 baseline implemented: real-time hard decode overrun guardrails now enforce early stop and trigger bounded safe fallback mode across subsequent turns, configurable via `repl.cfg` with `/guard_status` diagnostics.
-- ✅ M19 baseline implemented: reproducible benchmark corpus + pack generator (`m19-benchmark-pack.ps1`) and commit-to-commit matrix comparator (`m19-benchmark-compare.ps1`) are integrated into reliability pipeline with optional regression gate.
-- ▶️ Next coding target: M19.1 candidate definition (automated runtime capture to produce `results.jsonl` directly from scripted QEMU sessions).
+- DONE: A2 baseline implemented (structured observability markers in runtime + OO consult).
+- DONE: B1 baseline implemented in log-only mode (confidence score + threshold logged).
+- DONE: B1 threshold gating implemented behind config flags (`oo_conf_gate`, `oo_conf_threshold`), off by default.
+- DONE: A1 baseline implemented: startup model path now avoids eager GGUF summary parse, adds startup timing markers, and caches GGUF summary once per session for `/model_info`.
+- DONE: B2 baseline implemented: `OOOUTCOME.LOG` now persists `(action, expected, observed)` with pending/observed entries and confidence scoring now includes recent outcome feedback bias.
+- DONE: B3 baseline implemented: bounded per-boot multi-step plan (`oo_plan_enable`, `oo_plan_max_actions`), explicit rollback checkpoint markers before auto-apply, and hard-stop on verify failures.
+- DONE: A3 baseline implemented: `/models` now reports size+type+summary and startup `model=` path failures now emit explicit fallback diagnostics and recovery hints.
+- DONE: M8 baseline implemented: `m8-reliability.ps1` now executes static + runtime reliability checks with targeted autorun scenarios for A1/A3/B1/B2/B3 and emits pass/fail markers.
+- DONE: M8.1 CI wiring implemented: GitHub Actions workflow runs M8 static pass on push/PR and exposes optional runtime pass via manual dispatch on self-hosted Windows runner.
+- DONE: M9 baseline implemented: `m9-guardrails.ps1` parses M8 runtime logs and enforces startup marker + latency budgets (`model_select_ms`, `model_prepare_ms`) with optional OO marker requirements.
+- DONE: M9.1 baseline implemented: M9 now persists run history in `artifacts/m9/history.jsonl` and performs drift checks versus recent runs (configurable window and drift thresholds).
+- DONE: M10 baseline implemented: `m10-quality-guardrails.ps1` enforces harmful-ratio + failure-streak thresholds and supports auto-quarantine (`oo_auto_apply=0`) with persisted quarantine state.
+- DONE: M10.1 baseline implemented: M10 now adapts quality thresholds by detected model class (`tiny|medium|large`) and RAM tier (`low|mid|high`) with persisted effective thresholds in quarantine state.
+- DONE: M11 baseline implemented: `m11-self-heal.ps1` now auto-releases quarantine after configurable stable streak, drives canary re-enable windows, and rolls back to quarantine on canary failure.
+- DONE: M11.1 baseline implemented: M11 release/canary path now requires coupled stable windows from M9 (`pass` window) and M10 (`quality_ok` window) histories before progression.
+- DONE: M12 baseline implemented: `m12-policy-curriculum.ps1` now applies staged confidence thresholds by inferred boot phase (`early|warm|steady`) and workload class (`latency_optimization|context_expansion|mixed|unknown`).
+- DONE: M12.1 baseline implemented: M12 now auto-tunes phase/workload threshold matrix from recent M10 outcomes (`helpful/harmful` window) before applying effective curriculum threshold.
+- DONE: M13 baseline implemented: `m13-explainability.ps1` now persists reason codes and threshold provenance (M10/M11/M12) alongside per-run auto-apply outcome events.
+- DONE: M13.1 baseline implemented: runtime OO decision logs now emit explicit `reason_id=...` markers directly from the core engine, consumed by M13 explainability as primary decision reason codes.
+- DONE: M14 baseline implemented: runtime now emits `reason_id` on confidence/plan markers and `m14-explainability-coverage.ps1` checks marker coverage plus optional log/journal parity.
+- DONE: M14.1 baseline implemented: `m14-extract-oojournal.ps1` exports `OOJOUR.LOG` from runtime image to artifacts and M8/CI now supports strict parity gating (`-M14RequireJournalParity`).
+- DONE: M15 baseline implemented: `m15-reasonid-drift.ps1` now monitors reason_id distribution drift against recent explainability history and raises anomaly alerts/gates on breach.
+- DONE: M15.1 baseline implemented: `m15-slo-dashboard.ps1` now exports compact weekly reason_id trend snapshots and SLO metrics for regression review (`dashboard-state.json`, `dashboard.md`, history).
+- DONE: M16 baseline implemented: `reliability.ps1` unified public interface hides granular milestone scripts (M8-M15.1) in `.ops/milestones/` for cleaner repo surface and simpler operator workflow.
+- DONE: M16.1 baseline implemented: runtime now tracks performance metrics (`LlmkRuntimeMetrics` struct) capturing prefill/decode cycles, token counts, KV cache resets, and generations with `/metrics` REPL command exporting JSON to `LLMK_METRICS.LOG`.
+- DONE: M16.2 baseline implemented: `m16-extract-metrics.ps1` extracts runtime metrics from bootable image, `m16-metrics-aggregate.ps1` computes P50/P95/P99 stats and detects performance drift versus baseline with configurable thresholds and rejection gates.
+- DONE: M17 baseline implemented: `m17-ci-metrics-report.ps1` generates CI-friendly performance reports with drift detection, GitHub Actions workflow auto-extracts metrics post-runtime and uploads as artifacts with job summary integration.
+- DONE: M18 baseline implemented: runtime auto-tuning loop now adapts sampling knobs (`temperature`, `top_p`, `top_k`, `max_gen_tokens`) per turn from decode cycles/token thresholds in `repl.cfg`, with `/autotune_status` live diagnostics.
+- DONE: M18.1 baseline implemented: real-time hard decode overrun guardrails now enforce early stop and trigger bounded safe fallback mode across subsequent turns, configurable via `repl.cfg` with `/guard_status` diagnostics.
+- DONE: M19 baseline implemented: reproducible benchmark corpus + pack generator (`m19-benchmark-pack.ps1`) and commit-to-commit matrix comparator (`m19-benchmark-compare.ps1`) are integrated into reliability pipeline with optional regression gate.
+- Next coding target: M19.1 candidate definition (automated runtime capture to produce `results.jsonl` directly from scripted QEMU sessions).
 
-## Track A — llm-baremetal core
+## Track A - llm-baremetal core
 
 ### A1. Faster startup path (model open + metadata)
 - Goal: reduce time-to-first-token on QEMU/TCG and real hardware.
@@ -65,9 +74,9 @@ This file defines the next practical innovation wave after M6.x hardening.
 - Done when:
   - wrong/missing model paths are self-explanatory in REPL logs.
 
-## Track B — Operating Organism (OO)
+## Track B - Operating Organism (OO)
 
-### B1. M7 — Policy confidence scoring
+### B1. M7 - Policy confidence scoring
 - Goal: augment deterministic policy with confidence scoring before apply.
 - Scope:
   - compute confidence score from vitals + last outcomes,
@@ -76,7 +85,7 @@ This file defines the next practical innovation wave after M6.x hardening.
 - Done when:
   - each OO decision includes score + threshold + applied/blocked.
 
-### B2. M7.1 — Outcome feedback loop
+### B2. M7.1 - Outcome feedback loop
 - Goal: close the loop between applied actions and next-boot effect.
 - Scope:
   - persist outcome tuples `(action, expected_effect, observed_effect)`,
@@ -85,7 +94,7 @@ This file defines the next practical innovation wave after M6.x hardening.
 - Done when:
   - policy uses historical outcomes to prioritize safer actions.
 
-### B3. M7.2 — Safe multi-step adaptation plan
+### B3. M7.2 - Safe multi-step adaptation plan
 - Goal: move from one-step decisions to bounded plan steps.
 - Scope:
   - max N actions per boot window,
@@ -95,11 +104,11 @@ This file defines the next practical innovation wave after M6.x hardening.
   - multi-step adaptation remains deterministic and bounded.
 
 ## Suggested execution order
-1. A2 (observability) — immediate value and low risk.
-2. A1 (startup performance) — measurable user impact.
-3. B1 (confidence scoring) — first OO M7 building block.
-4. B2 (feedback loop) — behavior quality over time.
-5. B3 (safe plan) — advanced autonomy with strict safety bounds.
+1. A2 (observability) - immediate value and low risk.
+2. A1 (startup performance) - measurable user impact.
+3. B1 (confidence scoring) - first OO M7 building block.
+4. B2 (feedback loop) - behavior quality over time.
+5. B3 (safe plan) - advanced autonomy with strict safety bounds.
 
 ## First implementation candidate (next)
 - Start with **A2 + B1** in one sprint:

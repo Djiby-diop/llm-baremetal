@@ -56,7 +56,7 @@ REPL_SO  = llama2_repl.so
 all: repl
 
 repl: $(TARGET)
-	@echo "✅ Build complete: $(TARGET)"
+	@echo "OK: Build complete: $(TARGET)"
 	@ls -lh $(TARGET)
 
 
@@ -121,7 +121,7 @@ attention_avx2.o: attention_avx2.c
 
 clean:
 	rm -f *.o *.so $(TARGET)
-	@echo "✅ Clean complete"
+	@echo "OK: Clean complete"
 
 rebuild: clean all
 

@@ -103,7 +103,7 @@ $notes = @(
 
 Set-Content -LiteralPath $releaseNotesPath -Value ($notes -join [Environment]::NewLine) -Encoding UTF8
 
-Write-Host '[M6.3] Upload bundle ready ✅' -ForegroundColor Green
+Write-Host '[M6.3] Upload bundle ready' -ForegroundColor Green
 Write-Host "  - $(Join-Path $bundleDir $xzName)" -ForegroundColor Gray
 Write-Host "  - $(Join-Path $bundleDir 'SHA256SUMS.txt')" -ForegroundColor Gray
 if ($IncludeRawImage) {

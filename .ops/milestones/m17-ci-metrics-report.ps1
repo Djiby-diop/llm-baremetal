@@ -109,13 +109,13 @@ if (Test-Path -LiteralPath $baselinePath) {
     if ($prefillDrift -ge $FailThresholdPct -or $decodeDrift -ge $FailThresholdPct) {
       $driftStatus = "FAIL"
       $shouldFail = $true
-      $report += "  Status: ❌ FAIL - Drift exceeds {0:P0} threshold" -f $FailThresholdPct
+      $report += "  Status: FAIL - Drift exceeds {0:P0} threshold" -f $FailThresholdPct
     } elseif ($prefillDrift -ge $WarnThresholdPct -or $decodeDrift -ge $WarnThresholdPct) {
       $driftStatus = "WARN"
-      $report += "  Status: ⚠️  WARNING - Drift exceeds {0:P0} threshold" -f $WarnThresholdPct
+      $report += "  Status: WARN - Drift exceeds {0:P0} threshold" -f $WarnThresholdPct
     } else {
       $driftStatus = "PASS"
-      $report += "  Status: ✅ PASS - Performance within acceptable range"
+      $report += "  Status: PASS - Performance within acceptable range"
     }
   } catch {
     Write-Warn "Failed to parse baseline: $_"
@@ -168,15 +168,8 @@ if ($env:GITHUB_STEP_SUMMARY) {
 "@
 
   if (Test-Path -LiteralPath $baselinePath) {
-    $statusEmoji = switch ($driftStatus) {
-      "PASS" { "✅" }
-      "WARN" { "⚠️" }
-      "FAIL" { "❌" }
-      default { "ℹ️" }
-    }
-    
     $mdReport += @"
-### Drift Analysis $statusEmoji
+### Drift Analysis
 
 | Metric | Drift | Baseline |
 |--------|-------|----------|

@@ -177,7 +177,7 @@ void matvec_optimized(float* out, const float* mat, const float* vec, int rows, 
 void matmul_init(void) {
     detect_cpu_features();
     
-    Print(L"[MATMUL] 🚀 Optimized matrix multiplication initialized\r\n");
+    Print(L"[MATMUL] OK: Optimized matrix multiplication initialized\r\n");
     Print(L"[MATMUL] CPU Features:\r\n");
     Print(L"  SSE2:    %s\r\n", g_cpu.has_sse2 ? L"YES" : L"NO");
     Print(L"  AVX:     %s\r\n", g_cpu.has_avx ? L"YES" : L"NO");

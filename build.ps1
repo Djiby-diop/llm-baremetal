@@ -68,10 +68,10 @@ function Test-ModelSpecPresent([string]$spec) {
 
 if (-not $NoModel -and -not (Test-ModelSpecPresent $ModelBin)) {
 	Write-Host "" 
-	Write-Host "❌ Missing model weights: $ModelBin" -ForegroundColor Red
+	Write-Host "ERROR: Missing model weights: $ModelBin" -ForegroundColor Red
 	Write-Host "Place the model file in this folder or one level up, then re-run." -ForegroundColor Yellow
 	Write-Host "You can also pass a base name without extension (will accept .bin or .gguf)." -ForegroundColor Yellow
-	Write-Host "Tip: download the model from GitHub Releases (recommended) instead of committing weights." -ForegroundColor Yellow
+	Write-Host "Tip: download weights from Hugging Face (or any direct URL) using scripts/get-weights.{ps1,sh}." -ForegroundColor Yellow
 	throw "Missing model weights: $ModelBin"
 }
 
@@ -81,7 +81,7 @@ if (-not $NoModel) {
 		if (-not $m) { continue }
 		if (-not (Test-ModelSpecPresent $m)) {
 			Write-Host "" 
-			Write-Host "❌ Missing extra model weights: $m" -ForegroundColor Red
+			Write-Host "ERROR: Missing extra model weights: $m" -ForegroundColor Red
 			throw "Missing extra model weights: $m"
 		}
 	}

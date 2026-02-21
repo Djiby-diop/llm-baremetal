@@ -125,3 +125,7 @@ if ($FailIfMissing -and (-not $extracted)) {
 }
 
 Write-Ok 'M14.1 OOJOUR extraction complete'
+
+# Avoid leaking exit codes from internal mtools/wsl commands to callers.
+$global:LASTEXITCODE = 0
+exit 0

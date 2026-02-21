@@ -121,8 +121,6 @@ debug-boot-failure.ps1
 diagnose-boot.ps1
 launch-qemu-simple.ps1
 launch-qemu.ps1
-run-qemu.ps1
-run-qemu.sh
 test-qemu-simple.sh
 test-qemu-wsl.sh
 test-qemu.sh
@@ -143,10 +141,7 @@ REPERE.md
 COMMANDES.md
 OO_SPEC.md
 
-# CI / release helpers are not part of the booter yet
-.github/
-release-image.ps1
-bench-matrix.ps1
+# CI / release helpers (tracked)
 
 # Optional dev tools (downloaders, wrappers, helpers)
 tools/

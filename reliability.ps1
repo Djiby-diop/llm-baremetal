@@ -88,6 +88,12 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
+# Bench autorun (M19.1) needs more wall-clock time than the default fast run.
+# If the user didn't explicitly set -TimeoutSec, auto-bump the default.
+if ($RunQemu -and $M19EnableBenchmarkPack -and (-not $PSBoundParameters.ContainsKey('TimeoutSec'))) {
+  $TimeoutSec = 480
+}
+
 $orchestratorScript = Join-Path $PSScriptRoot '.ops\milestones\m8-reliability.ps1'
 
 if (-not (Test-Path -LiteralPath $orchestratorScript)) {

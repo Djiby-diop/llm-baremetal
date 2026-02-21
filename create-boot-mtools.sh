@@ -5,9 +5,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "════════════════════════════════════════════════"
-echo "🚀 Creating Bootable USB Image (mtools method)"
-echo "════════════════════════════════════════════════"
+echo "==============================================="
+echo "Creating Bootable USB Image (mtools method)"
+echo "==============================================="
 echo ""
 
 #+#+#+#+########
@@ -48,7 +48,7 @@ EFI_BIN="${EFI_BIN:-llama2.efi}"
 echo "[1/4] Checking required files..."
 for file in "$EFI_BIN" tokenizer.bin; do
     if [ ! -f "$file" ]; then
-        echo "❌ Missing: $file"
+        echo "ERROR: Missing: $file"
         exit 1
     fi
 done
@@ -139,7 +139,7 @@ if [ -n "$MODEL" ]; then
 fi
 
 if [ "$NO_MODEL" -eq 1 ]; then
-    echo "⚠️  NO_MODEL=1: building image without embedding model weights"
+    echo "WARN: NO_MODEL=1: building image without embedding model weights"
     MODEL_SRC=""
     MODEL_OUT_NAME="(none)"
 else
@@ -147,7 +147,7 @@ else
     add_resolved_files "$MODEL_SPEC" PRIMARY_SRCS PRIMARY_NAMES
 
     if [ ${#PRIMARY_SRCS[@]} -le 0 ]; then
-        echo "❌ Missing model: $MODEL_SPEC (looked in current dir and parent dir; supports base name + .bin/.gguf)"
+        echo "ERROR: Missing model: $MODEL_SPEC (looked in current dir and parent dir; supports base name + .bin/.gguf)"
         exit 1
     fi
 
@@ -174,7 +174,7 @@ else
             tmp_nm=()
             add_resolved_files "$m_trim" tmp_sr tmp_nm
             if [ ${#tmp_sr[@]} -le 0 ]; then
-                echo "❌ Missing extra model: $m_trim (supports base name + .bin/.gguf; looked in current dir and parent dir)"
+                echo "ERROR: Missing extra model: $m_trim (supports base name + .bin/.gguf; looked in current dir and parent dir)"
                 exit 1
             fi
             for j in "${!tmp_sr[@]}"; do
@@ -188,7 +188,7 @@ else
         done
     fi
 fi
-echo "✅ All files present"
+echo "[OK] All files present"
 
 # Create image file (auto-sized)
 echo ""
@@ -205,7 +205,7 @@ if [ -n "${IMG_MB:-}" ]; then
     if [[ "${IMG_MB}" =~ ^[0-9]+$ ]] && [ "${IMG_MB}" -gt 0 ]; then
         IMAGE_MIB="${IMG_MB}"
     else
-        echo "❌ Invalid IMG_MB: '${IMG_MB}' (expected positive integer MiB)"
+        echo "ERROR: Invalid IMG_MB: '${IMG_MB}' (expected positive integer MiB)"
         exit 1
     fi
 fi
@@ -225,10 +225,10 @@ rm -f "$IMAGE" 2>/dev/null || true
 if [ -f "$IMAGE" ]; then
     ts="$(date +%Y%m%d-%H%M%S)"
     IMAGE="llm-baremetal-boot-${ts}.img"
-    echo "  ⚠️  Existing image is in use; writing new image: $IMAGE"
+    echo "  WARN: Existing image is in use; writing new image: $IMAGE"
 fi
 dd if=/dev/zero of="$IMAGE" bs=1M count=$IMAGE_MIB status=progress
-echo "✅ Image created"
+echo "[OK] Image created"
 
 # Format as FAT32 with partition table
 echo ""
@@ -252,7 +252,7 @@ echo "mtools_skip_check=1" > "$mtoolsrc_tmp"
 echo "drive z: file=\"${PWD}/${IMAGE}\" offset=${OFFSET_BYTES}" >> "$mtoolsrc_tmp"
 export MTOOLSRC="$mtoolsrc_tmp"
 mformat -F -v LLMBOOT z:
-echo "✅ Formatted"
+echo "[OK] Formatted"
 
 # Copy files with mcopy
 echo ""
@@ -260,11 +260,11 @@ echo "[4/4] Copying files with mtools..."
 mmd z:/EFI
 mmd z:/EFI/BOOT
 mcopy "$EFI_BIN" z:/EFI/BOOT/BOOTX64.EFI
-echo "  ✅ Copied BOOTX64.EFI"
+echo "  [OK] Copied BOOTX64.EFI"
 
 # Also keep a convenient copy at the root for manual launch in the UEFI shell
 mcopy "$EFI_BIN" z:/KERNEL.EFI
-echo "  ✅ Copied KERNEL.EFI"
+echo "  [OK] Copied KERNEL.EFI"
 
 if [ "$NO_MODEL" -ne 1 ]; then
     for i in "${!PRIMARY_SRCS[@]}"; do
@@ -272,38 +272,38 @@ if [ "$NO_MODEL" -ne 1 ]; then
         name="${PRIMARY_NAMES[$i]}"
         mcopy "$src" z:/"$name"
         mib=$(( ( $(stat -c %s "$src") + 1024*1024 - 1) / (1024*1024) ))
-        echo "  ✅ Copied $name (${mib} MB)"
+        echo "  [OK] Copied $name (${mib} MB)"
     done
 
     # Convenience: if a small GGUF is available (e.g. stories15M.q8_0.gguf),
     # bundle it into /models so automated tests can boot it without per-run injection.
     {
-        small_gguf_src="$(find_src 'stories15M.q8_0.gguf' 2>/dev/null || true)"
+        small_gguf_src="$(find_src 'models/stories15M.q8_0.gguf' 2>/dev/null || find_src 'stories15M.q8_0.gguf' 2>/dev/null || true)"
         if [ -n "$small_gguf_src" ]; then
             mmd z:/models 2>/dev/null || true
             mcopy "$small_gguf_src" z:/models/stories15M.q8_0.gguf
             mib=$(( ( $(stat -c %s "$small_gguf_src") + 1024*1024 - 1) / (1024*1024) ))
-            echo "  ✅ Copied models/stories15M.q8_0.gguf (${mib} MB)"
+            echo "  [OK] Copied models/stories15M.q8_0.gguf (${mib} MB)"
         fi
     }
 
     if [ ${#EXTRA_SRCS[@]} -gt 0 ]; then
         mmd z:/models
-        echo "  ✅ Created /models"
+        echo "  [OK] Created /models"
         for i in "${!EXTRA_SRCS[@]}"; do
             src="${EXTRA_SRCS[$i]}"
             name="${EXTRA_NAMES[$i]}"
             mcopy "$src" z:/models/"$name"
             mib=$(( ( $(stat -c %s "$src") + 1024*1024 - 1) / (1024*1024) ))
-            echo "  ✅ Copied models/$name (${mib} MB)"
+            echo "  [OK] Copied models/$name (${mib} MB)"
         done
     fi
 else
-    echo "  ℹ️  Skipping model copy (NO_MODEL=1)"
+    echo "  [INFO] Skipping model copy (NO_MODEL=1)"
 fi
 
 mcopy tokenizer.bin z:/
-echo "  ✅ Copied tokenizer.bin"
+echo "  [OK] Copied tokenizer.bin"
 
 # REPL config (key=value).
 # If we're bundling a primary model, write a repl.cfg that points at it so the image boots correctly.
@@ -350,22 +350,22 @@ if [ "$NO_MODEL" -ne 1 ] && [ "$AUTO_SET_REPL_MODEL" -eq 1 ]; then
     mcopy "$tmp_cfg" z:/repl.cfg
     rm -f "$tmp_cfg"
     if [ "$short_model" != "$model_long" ]; then
-        echo "  ✅ Wrote repl.cfg (model=${short_model}) [alias for ${model_long}]"
+        echo "  [OK] Wrote repl.cfg (model=${short_model}) [alias for ${model_long}]"
     else
-        echo "  ✅ Wrote repl.cfg (model=${short_model})"
+        echo "  [OK] Wrote repl.cfg (model=${short_model})"
     fi
 else
     # Optional REPL config (key=value). If present, copy to root.
     if [ -f repl.cfg ]; then
         mcopy repl.cfg z:/
-        echo "  ✅ Copied repl.cfg"
+        echo "  [OK] Copied repl.cfg"
     fi
 fi
 
 # Optional splash screen (Cyberpunk Interface)
 if [ -f splash.bmp ]; then
     mcopy splash.bmp z:/
-    echo "  ✅ Copied splash.bmp"
+    echo "  [OK] Copied splash.bmp"
 fi
 
 # Optional autorun scripts. If present, copy to root.
@@ -373,7 +373,7 @@ fi
 for f in llmk-autorun*.txt; do
     [ -f "$f" ] || continue
     mcopy "$f" z:/
-    echo "  ✅ Copied $f"
+    echo "  [OK] Copied $f"
 done
 
 # Create startup.nsh for auto-boot.
@@ -388,22 +388,22 @@ pause
 EOF
 mcopy startup.nsh z:/
 rm -f startup.nsh
-echo "  ✅ Copied startup.nsh"
+echo "  [OK] Copied startup.nsh"
 
 # Cleanup
 rm -f "$mtoolsrc_tmp"
-echo "✅ Image finalized"
+echo "[OK] Image finalized"
 
 # Show result
 echo ""
-echo "════════════════════════════════════════════════"
-echo "✅ BOOTABLE IMAGE CREATED!"
-echo "════════════════════════════════════════════════"
+echo "==============================================="
+echo "BOOTABLE IMAGE CREATED"
+echo "==============================================="
 echo ""
-echo "📁 File: $(pwd)/$IMAGE"
-echo "📊 Size: $(ls -lh $IMAGE | awk '{print $5}')"
+echo "File: $(pwd)/$IMAGE"
+echo "Size: $(ls -lh $IMAGE | awk '{print $5}')"
 echo ""
-echo "🔥 Next steps:"
+echo "Next steps:"
 echo "  1. Open Rufus on Windows"
 echo "  2. Select your USB drive"
 echo "  3. Click SELECT and choose: $IMAGE"
@@ -411,4 +411,4 @@ echo "  4. Partition scheme: GPT"
 echo "  5. Target system: UEFI (non CSM)"
 echo "  6. Click START"
 echo ""
-echo "🚀 Boot will show optimized matmul message!"
+echo "Boot will show optimized matmul message"
