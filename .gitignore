@@ -110,6 +110,7 @@ llama2_step*.c
 llama2_repl_v*.c
 
 # Local helper scripts (use the tracked build/run entrypoints instead)
+bench-matrix.ps1
 compile-fix.sh
 compile-optimized.sh
 create-bootable-image.ps1
