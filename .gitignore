@@ -44,6 +44,9 @@ DIAGNOSTIC.md
 # Local REPL config (publish repl.cfg.example instead)
 repl.cfg
 
+# Generated build-time defaults (created by Makefile when Zig is available)
+metabion_profile.h
+
 # Local archived artifacts
 artifacts/
 
