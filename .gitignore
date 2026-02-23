@@ -136,6 +136,12 @@ __pycache__/
 *.pyc
 .venv/
 
+# Rust (oo-guard)
+oo-guard/target/
+
+# Rust (rust-guard)
+rust-guard/target/
+
 # Keep repo minimal: non-essential docs/notes are local only
 ROADMAP.md
 REPERE.md
