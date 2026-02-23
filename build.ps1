@@ -3,6 +3,10 @@ param(
 	[ValidateSet('repl')]
 	[string]$Target = 'repl',
 
+	# Phase 5 (Zig): metabolism profiles (build-time defaults)
+	[ValidateSet('performance','balanced','survival')]
+	[string]$MetabionProfile = 'balanced',
+
 	# Build an image without embedding any model weights.
 	# Useful for release artifacts and for users who want to copy their own model later.
 	[switch]$NoModel,
@@ -23,7 +27,11 @@ param(
 	# Example: create a >1GB image for testing
 	#   .\build.ps1 -NoModel -ImageSizeMB 1200
 	[ValidateRange(0, 65536)]
-	[int]$ImageSizeMB = 0
+	[int]$ImageSizeMB = 0,
+
+	# Skip prebuild static analysis (Neural Protector Phase 2.2)
+	# Use during incremental development; recommended to enable for CI/CD.
+	[switch]$SkipPrebuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,6 +41,7 @@ Set-Location -LiteralPath $PSScriptRoot
 
 Write-Host "`n[Build] Build + Image (WSL)" -ForegroundColor Cyan
 Write-Host "  Target: $Target" -ForegroundColor Gray
+Write-Host "  Profile: $MetabionProfile" -ForegroundColor Gray
 if ($NoModel) {
 	Write-Host "  Model:  (no-model image)" -ForegroundColor Gray
 } else {
@@ -147,6 +156,33 @@ $extra = ($ExtraModelBins | Where-Object { $_ -and $_.Trim().Length -gt 0 }) -jo
 
 $buildStartUtc = (Get-Date).ToUniversalTime()
 
+# === Phase 2.2: Neural Protector prebuild check ===
+# Run static analysis on C sources before compilation.
+# Detects risky patterns: small buffers, malloc/free imbalance, unbounded loops.
+if (-not $SkipPrebuild) {
+	Write-Host "`n[Neural Protector] Running prebuild static analysis..." -ForegroundColor Cyan
+	$ooGuardExe = Join-Path $PSScriptRoot 'oo-guard\target\release\oo-guard.exe'
+	if (Test-Path $ooGuardExe) {
+		$sourceFile = Join-Path $PSScriptRoot 'llama2_efi_final.c'
+		& $ooGuardExe prebuild --root $PSScriptRoot --quiet $sourceFile
+		if ($LASTEXITCODE -eq 2) {
+			Write-Host "`n[Neural Protector] VIOLATION: C source contains critical risk patterns" -ForegroundColor Red
+			Write-Host "Re-run without --quiet to see details: .\run-oo-guard.ps1 prebuild llama2_efi_final.c" -ForegroundColor Yellow
+			Write-Host "To bypass (not recommended): .\build.ps1 -SkipPrebuild" -ForegroundColor Gray
+			throw "oo-guard prebuild check failed (exit code 2)"
+		} elseif ($LASTEXITCODE -ne 0) {
+			Write-Host "`n[Neural Protector] WARNING: prebuild check failed with exit code $LASTEXITCODE" -ForegroundColor Yellow
+		} else {
+			Write-Host "[Neural Protector] Prebuild check passed" -ForegroundColor Green
+		}
+	} else {
+		Write-Host "[Neural Protector] oo-guard not built; skipping prebuild check" -ForegroundColor Yellow
+		Write-Host "  To enable: cd oo-guard; cargo build --release" -ForegroundColor Gray
+	}
+} else {
+	Write-Host "`n[Neural Protector] Prebuild check skipped (-SkipPrebuild)" -ForegroundColor Gray
+}
+
 # Build + image creation in WSL (single shot). Using -lc avoids temp-script pitfalls.
 $noModelFlag = if ($NoModel) { '1' } else { '0' }
 $modelSpec = if ($NoModel) { 'nomodel' } else { $ModelBin }
@@ -156,7 +192,7 @@ $bash = @(
 	("cd '{0}'" -f $wslRepo)
 	'chmod +x create-boot-mtools.sh'
 	'make clean'
-	'make repl'
+	("make repl METABION_PROFILE='{0}'" -f $MetabionProfile)
 	# Force the EFI payload used by the image builder to be the freshly built one.
 	# Force NO_MODEL explicitly to avoid inheriting from the user's environment.
 	("{3} NO_MODEL='{0}' EFI_BIN='llama2.efi' MODEL='{1}' MODEL_BIN='{1}' EXTRA_MODELS='{2}' ./create-boot-mtools.sh" -f $noModelFlag, $modelSpec, $extra, $imgMbClause)

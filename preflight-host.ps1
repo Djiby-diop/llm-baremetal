@@ -7,11 +7,21 @@ function Write-Check {
     param(
         [string]$Name,
         [bool]$Ok,
-        [string]$Detail
+        [string]$Detail,
+        [ValidateSet('ok','fail','warn')]
+        [string]$Level = $(if ($Ok) { 'ok' } else { 'fail' })
     )
 
-    $mark = if ($Ok) { '[OK] ' } else { '[FAIL]' }
-    $color = if ($Ok) { 'Green' } else { 'Red' }
+    $mark = switch ($Level) {
+        'ok' { '[OK] ' }
+        'warn' { '[WARN]' }
+        default { '[FAIL]' }
+    }
+    $color = switch ($Level) {
+        'ok' { 'Green' }
+        'warn' { 'Yellow' }
+        default { 'Red' }
+    }
     Write-Host ("{0} {1}: {2}" -f $mark, $Name, $Detail) -ForegroundColor $color
 }
 
@@ -56,7 +66,12 @@ $fwVirtDetail = if ($fwVirtEnabled) {
 } else {
     'disabled in BIOS/UEFI (WSL2 may fail with 0x80370102)'
 }
-Write-Check -Name 'Firmware virtualization' -Ok $fwVirtEnabled -Detail $fwVirtDetail
+if ($fwVirtEnabled) {
+    Write-Check -Name 'Firmware virtualization' -Ok $true -Detail $fwVirtDetail -Level ok
+} else {
+    # Not strictly required for QEMU TCG runs, but required for WSL2.
+    Write-Check -Name 'Firmware virtualization' -Ok $true -Detail $fwVirtDetail -Level warn
+}
 
 $wslListRaw = $null
 $wslListExit = 1

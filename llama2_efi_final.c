@@ -33,6 +33,22 @@
 #include "orchestrion-engine/core/orchestrion.h"
 #include "calibrion-engine/core/calibrion.h"
 #include "compatibilion-engine/core/compatibilion.h"
+#include "evolvion-engine/core/evolvion.h"
+#include "synaption-engine/core/synaption.h"
+#include "conscience-engine/core/conscience.h"
+#include "neuralfs-engine/core/neuralfs.h"
+#include "ghost-engine/core/ghost.h"
+#include "immunion-engine/core/immunion.h"
+#include "dreamion-engine/core/dreamion.h"
+#include "symbion-engine/core/symbion.h"
+#include "collectivion-engine/core/collectivion.h"
+#include "metabion-engine/core/metabion.h"
+#include "cellion-engine/core/cellion.h"
+#include "morphion-engine/core/morphion.h"
+#include "pheromion-engine/core/pheromion.h"
+
+// Phase 5: build-time metabolism profile defaults (generated; repl.cfg can override)
+#include "metabion_profile.h"
 
 // DjibMark - Omnipresent execution tracing
 #include "djibmark.h"
@@ -124,8 +140,9 @@ typedef struct {
     unsigned long long us;
 } LlmkBootMark;
 
-static LlmkBootMark g_boot_marks[16];
+static LlmkBootMark g_boot_marks[16]; // SAFE: fixed-size boot mark ring; bounded by g_boot_mark_count check
 static int g_boot_mark_count = 0;
+
 
 static unsigned long long g_overlay_stage_start_us = 0;
 static unsigned long long g_overlay_stage_prev_us = 0;
@@ -190,7 +207,7 @@ static EFI_STATUS llmk_peek_magic4(EFI_FILE_HANDLE f, UINT8 out_magic[4]) {
 }
 
 static LlmkModelFormat llmk_detect_model_format(EFI_FILE_HANDLE f) {
-    UINT8 m[4];
+    UINT8 m[4]; // SAFE: fixed-size magic header (4 bytes) read via llmk_peek_magic4
     EFI_STATUS st = llmk_peek_magic4(f, m);
     if (EFI_ERROR(st)) return LLMK_MODEL_FMT_UNKNOWN;
     if (m[0] == 'G' && m[1] == 'G' && m[2] == 'U' && m[3] == 'F') return LLMK_MODEL_FMT_GGUF;
@@ -238,7 +255,7 @@ static int llmk_char16_has_dot_ext(const CHAR16 *s) {
     if (!last_dot) return 0;
     if (last_sep && last_dot < last_sep) return 0;
     // require something after dot
-    return last_dot[1] != 0;
+    return last_dot[1] != 0; // SAFE: constant index checks for presence of an extension char
 }
 
 static void llmk_char16_copy_cap(CHAR16 *dst, int cap, const CHAR16 *src);
@@ -487,7 +504,7 @@ static EFI_STATUS llmk_open_read_with_fat83_fallback(EFI_FILE_HANDLE Root,
 
     // Build sanitized uppercase base/ext (for alias generation).
     CHAR16 base_s[64];
-    CHAR16 ext_s[16];
+    CHAR16 ext_s[16]; // SAFE: sanitized extension (<=3 chars) + NUL; bounded writes
     int bn = 0;
     for (int i = 0; i < base_len && bn < (int)(sizeof(base_s) / sizeof(base_s[0])) - 1; i++) {
         CHAR16 c = leaf_base[i];
@@ -510,7 +527,7 @@ static EFI_STATUS llmk_open_read_with_fat83_fallback(EFI_FILE_HANDLE Root,
     if (bn <= 0) return st;
 
     // FIRST6~N + optional .EXT
-    CHAR16 prefix6[8];
+    CHAR16 prefix6[8]; // SAFE: FIRST6 + optional chars + NUL; bounded by p6<6
     int p6 = 0;
     for (int i = 0; i < bn && p6 < 6; i++) {
         prefix6[p6++] = base_s[i];
@@ -519,14 +536,14 @@ static EFI_STATUS llmk_open_read_with_fat83_fallback(EFI_FILE_HANDLE Root,
     if (p6 <= 0) return st;
 
     for (int n = 1; n <= 9; n++) {
-        CHAR16 alias_leaf[32];
+        CHAR16 alias_leaf[32]; // SAFE: 8.3 alias leaf (FIRST6~N[.EXT]) fits; built via StrCpy/StrCat with bounded parts
         alias_leaf[0] = 0;
         StrCpy(alias_leaf, prefix6);
         StrCat(alias_leaf, L"~");
         {
-            CHAR16 digit[2];
+            CHAR16 digit[2]; // SAFE: single digit + NUL
             digit[0] = (CHAR16)(L'0' + n);
-            digit[1] = 0;
+            digit[1] = 0; // SAFE: constant index into fixed-size digit[2]
             StrCat(alias_leaf, digit);
         }
         if (en > 0) {
@@ -615,6 +632,19 @@ static MemorionEngine g_memorion;
 static OrchestrionEngine g_orchestrion;
 static CalibrionEngine g_calibrion;
 static CompatibilionEngine g_compatibilion;
+static EvolvionEngine g_evolvion;
+static SynaptionEngine g_synaption;
+static ConscienceEngine g_conscience;
+static NeuralfsEngine g_neuralfs;
+static GhostEngine g_ghost;
+static ImmunionEngine g_immunion;
+static DreamionEngine g_dreamion;
+static SymbionEngine g_symbion;
+static CollectivionEngine g_collectivion;
+static MetabionEngine g_metabion;
+static CellionEngine g_cellion;
+static MorphionEngine g_morphion;
+static PheromionEngine g_pheromion;
 
 // Forward declarations (used by early config loaders)
 static EFI_STATUS llmk_open_read_file(EFI_FILE_HANDLE *out, const CHAR16 *name);
@@ -622,6 +652,8 @@ static void llmk_cfg_trim(char **s);
 static char llmk_cfg_tolower(char c);
 static int llmk_cfg_streq_ci(const char *a, const char *b);
 static int llmk_cfg_parse_i32(const char *s, int *out);
+static int llmk_cfg_parse_f32(const char *s, float *out);
+static int llmk_cfg_parse_bool(const char *s, int *out);
 static void llmk_print_ascii(const char *s);
 
 // Diopion burst runtime (sampling knobs override for N generations)
@@ -812,6 +844,9 @@ static int has_suffix_repeat(const int* tokens, int n_tokens, int span) {
 // AVX2 attention helpers live in attention_avx2.c (compiled with -mavx2)
 float llmk_dot_f32_avx2(const float *a, const float *b, int n);
 void llmk_axpy_f32_avx2(float *dst, const float *src, float alpha, int n);
+void llmk_kv_prefetch_range(const float *base, int stride, int row_len, int row_count);
+void llmk_kv_slice_keys_avx2(float *out, const float *key_cache, int kv_dim, int head_size, int kv_head_idx, int pos);
+void llmk_kv_slice_values_avx2(float *out, const float *value_cache, int kv_dim, int head_size, int kv_head_idx, int pos);
 
 static int g_attn_use_avx2 = 0;
 // -1=auto, 0=force SSE2, 1=force AVX2 (only allowed if auto-detected AVX2 is enabled)
@@ -949,7 +984,7 @@ static void llmk_serial_write_char16(const CHAR16 *s) { (void)s; }
 
 // Some generations still contain a classic mojibake sequence for U+2019 (RIGHT SINGLE QUOTATION MARK).
 // This can span token boundaries, so keep a small byte tail and repair across calls.
-static unsigned char g_utf8_repair_tail[5];
+static unsigned char g_utf8_repair_tail[5]; // SAFE: tail buffer for cross-call UTF-8 repair; bounded by keep=5
 static int g_utf8_repair_tail_len = 0;
 
 // GOP transcript (best-effort): capture streamed UTF-8 output into an ASCII-ish ring buffer
@@ -960,8 +995,8 @@ static void uefi_print_utf8_bytes(const char *bytes, int len) {
     if (!bytes || len <= 0) return;
 
     typedef struct {
-        unsigned char pat[6];
-        unsigned char rep[3];
+        unsigned char pat[6]; // SAFE: fixed UTF-8 pattern (6 bytes)
+        unsigned char rep[3]; // SAFE: fixed UTF-8 replacement (3 bytes)
     } Mojimap;
 
     // Common mojibake seen in generations (CP437-ish smart punctuation).
@@ -1147,7 +1182,7 @@ static inline float dot_f32_sse2(const float* a, const float* b, int n) {
         __m128 vb = _mm_loadu_ps(b + i);
         sum = _mm_add_ps(sum, _mm_mul_ps(va, vb));
     }
-    float tmp[4];
+    float tmp[4]; // SAFE: fixed-size SSE2 lane store
     _mm_storeu_ps(tmp, sum);
     float total = tmp[0] + tmp[1] + tmp[2] + tmp[3];
     for (; i < n; i++) total += a[i] * b[i];
@@ -1298,7 +1333,7 @@ static char g_oo_exec_hint[256];
 static int g_bench_active = 0;
 static int g_bench_pending = 0;
 static char g_bench_case_id[64];
-static char g_bench_category[48];
+static char g_bench_category[48]; // SAFE: short category label; always written with explicit bounds
 static int g_bench_case_max_new_tokens = 0;
 static unsigned long long g_bench_wall0_us = 0;
 static int g_bench_have_wall = 0;
@@ -1712,7 +1747,7 @@ static int llmk_oo_build_think_prompt(int id, const char *user, char *out, int o
             for (const char *s = a2; *s && p + 1 < out_cap; s++) out[p++] = *s;
             // small itoa
             int v = todo;
-            char rev[16];
+            char rev[16]; // SAFE: enough for int decimal digits; bounded by sizeof(rev)
             int rn = 0;
             while (v > 0 && rn < (int)sizeof(rev)) { rev[rn++] = (char)('0' + (v % 10)); v /= 10; }
             while (rn > 0 && p + 1 < out_cap) out[p++] = rev[--rn];
@@ -2751,7 +2786,7 @@ static const char* llmk_find_first_op(const char *s) {
     for (const char *p = s; *p; p++) {
         if ((p[0] == 'c' && p[1] == 'l' && p[2] == 'e' && p[3] == 'a' && p[4] == 'r') ||
             (p[0] == 'r' && p[1] == 'e' && p[2] == 'c' && p[3] == 't') ||
-            (p[0] == 'p' && p[1] == 'i' && p[2] == 'x' && p[3] == 'e' && p[4] == 'l')) {
+            (p[0] == 'p' && p[1] == 'i' && p[2] == 'x' && p[3] == 'e' && p[4] == 'l')) { // SAFE: constant-index prefix checks inside NUL-terminated C string
             return p;
         }
     }
@@ -2761,12 +2796,12 @@ static const char* llmk_find_first_op(const char *s) {
 static void llmk_apply_simple_autocorrect(char *buf) {
     // Best-effort fix for common typo seen in logs: "react" -> "rect".
     if (!buf) return;
-    for (char *p = buf; p[0] && p[1] && p[2] && p[3] && p[4]; p++) {
+    for (char *p = buf; p[0] && p[1] && p[2] && p[3] && p[4]; p++) { // SAFE: constant-index lookahead inside NUL-terminated C string
         if (p[0] == 'r' && p[1] == 'e' && p[2] == 'a' && p[3] == 'c' && p[4] == 't') {
-            p[2] = 'c';
+            p[2] = 'c'; // SAFE: constant index within validated lookahead window
             // p[3],p[4] already 'c','t' from "react"; make it "rect" by shifting left one.
-            p[3] = 't';
-            p[4] = ' ';
+            p[3] = 't'; // SAFE: constant index within validated lookahead window
+            p[4] = ' '; // SAFE: constant index within validated lookahead window
         }
     }
 }
@@ -2798,7 +2833,7 @@ static int llmk_render_scene_dsl_ex(const char *dsl, int strict) {
         while (*s && (llmk_ascii_is_space(*s) || *s == ';')) s++;
         if (!*s) break;
 
-        char op[16];
+        char op[16]; // SAFE: fixed-size op token buffer; parser is passed sizeof(op)
         const char *ns = llmk_parse_word(s, op, (int)sizeof(op));
         if (!ns) { llmk_set_dsl_error("parse op", NULL); return 0; }
         s = ns;
@@ -3220,7 +3255,7 @@ static void llmk_ascii_append_str(char *buf, int cap, int *io_p, const char *s) 
 
 static void llmk_ascii_append_u64(char *buf, int cap, int *io_p, UINT64 v) {
     if (!buf || cap <= 0 || !io_p) return;
-    char tmp[32];
+    char tmp[32]; // SAFE: enough for UINT64 decimal digits; bounded by sizeof(tmp)
     int n = 0;
     if (v == 0) {
         tmp[n++] = '0';
@@ -3318,24 +3353,26 @@ static void llmk_oo_outcome_append_best_effort(UINT64 boot_count,
                                                 const char *observed_effect,
                                                 int improved) {
     if (!g_root) return;
+    if (!g_cfg_oo_enable) return;
+    if (g_djibion.mode != DJIBION_MODE_OFF && !g_djibion.laws.allow_oo_persist) return;
 
     EFI_FILE_HANDLE f = NULL;
     EFI_STATUS st = llmk_open_binary_file_append(&f, L"OOOUTCOME.LOG");
     if (EFI_ERROR(st) || !f) return;
 
-    char line[256];
+    (void)boot_count;
+    (void)expected_effect;
+    (void)observed_effect;
+
+    // Ultra-minimal persistent outcome line (easy to parse, stable tokens).
+    // Format: out a=<action> i=<0|1|-1>
+    char line[96];
     int p = 0;
     line[0] = 0;
 
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, "[boot=");
-    llmk_ascii_append_u64(line, (int)sizeof(line), &p, boot_count);
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, "] action=");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, "out a=");
     llmk_ascii_append_str(line, (int)sizeof(line), &p, llmk_oo_action_name(action_id));
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, " expected=");
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, expected_effect ? expected_effect : "na");
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, " observed=");
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, observed_effect ? observed_effect : "na");
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, " improved=");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " i=");
     if (improved < 0) {
         llmk_ascii_append_str(line, (int)sizeof(line), &p, "-1");
     } else {
@@ -3392,12 +3429,17 @@ static void llmk_oo_outcome_feedback_recent_best_effort(int *out_reduction_good,
             p++;
         }
 
-        char *action = my_strstr(line, "action=");
-        char *imp = my_strstr(line, "improved=");
+        for (char *c = line; *c; c++) {
+            if (*c == '\r') { *c = 0; break; }
+        }
+
+        // Format: out a=<action> i=<0|1|-1>
+        char *action = my_strstr(line, "a=");
+        char *imp = my_strstr(line, "i=");
         if (!action || !imp) continue;
 
-        action += 7;
-        imp += 9;
+        action += 2;
+        imp += 2;
         if (*imp == '-') continue;
         int improved = (*imp == '1') ? 1 : 0;
 
@@ -3431,6 +3473,8 @@ static void llmk_oo_outcome_feedback_recent_best_effort(int *out_reduction_good,
 
 static void llmk_oo_journal_append_best_effort(const LlmkOoState *s, const char *event) {
     if (!g_root || !s) return;
+    if (!g_cfg_oo_enable) return;
+    if (g_djibion.mode != DJIBION_MODE_OFF && !g_djibion.laws.allow_oo_persist) return;
 
     EFI_FILE_HANDLE f = NULL;
     EFI_STATUS st = llmk_open_binary_file_append(&f, L"OOJOUR.LOG");
@@ -3440,15 +3484,7 @@ static void llmk_oo_journal_append_best_effort(const LlmkOoState *s, const char 
     int p = 0;
     line[0] = 0;
     llmk_ascii_append_str(line, (int)sizeof(line), &p, "oo event=");
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, event ? event : "boot");
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, " boot=");
-    llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)s->boot_count);
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, " mode=");
-    llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)s->mode);
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, " rc=");
-    llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)llmk_oo_get_rc(s->flags));
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, " sc=");
-    llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)llmk_oo_get_sc(s->flags));
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, (event && event[0]) ? event : "boot");
     llmk_ascii_append_str(line, (int)sizeof(line), &p, "\r\n");
 
     UINTN nb = (UINTN)p;
@@ -3462,6 +3498,9 @@ static void llmk_oo_journal_append_best_effort(const LlmkOoState *s, const char 
     // Keep only the newest part of the log (FIFO truncation).
     llmk_oo_jour_log_rotate_best_effort();
 }
+
+// Forward decl: used by early OO ticks (e.g. net tick) before full OO journaling helpers.
+static void llmk_oo_journal_event_load_state_best_effort(const char *event);
 
 static int llmk_oo_consult_metrics_tick_best_effort(LlmkOoState *s, char *out_event, int out_cap) {
     if (out_event && out_cap > 0) out_event[0] = 0;
@@ -3626,25 +3665,7 @@ static void llmk_oo_net_tick_best_effort(void) {
     if (!available) {
         Print(L"OK: OO net: unavailable\r\n");
 
-        EFI_FILE_HANDLE jf = NULL;
-        if (!EFI_ERROR(llmk_open_binary_file_append(&jf, L"OOJOUR.LOG")) && jf) {
-            char line[256];
-            int p = 0;
-            line[0] = 0;
-            llmk_ascii_append_str(line, (int)sizeof(line), &p, "oo event=net_unavailable");
-            if (g_cfg_oo_manifest_url[0]) {
-                llmk_ascii_append_str(line, (int)sizeof(line), &p, " url=");
-                llmk_ascii_append_str(line, (int)sizeof(line), &p, g_cfg_oo_manifest_url);
-            }
-            llmk_ascii_append_str(line, (int)sizeof(line), &p, "\r\n");
-            UINTN nb = (UINTN)p;
-            uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)line);
-            uefi_call_wrapper(jf->Flush, 1, jf);
-            uefi_call_wrapper(jf->Close, 1, jf);
-
-            // Enforce max journal size (best-effort).
-            llmk_oo_jour_log_rotate_best_effort();
-        }
+        llmk_oo_journal_event_load_state_best_effort("net_unavailable");
 
         if (handles) uefi_call_wrapper(BS->FreePool, 1, handles);
         return;
@@ -3653,24 +3674,8 @@ static void llmk_oo_net_tick_best_effort(void) {
     // Present, but still placeholder (no DHCP/HTTP stack here yet).
     Print(L"OK: OO net: present\r\n");
 
-    {
-        EFI_FILE_HANDLE jf = NULL;
-        if (!EFI_ERROR(llmk_open_binary_file_append(&jf, L"OOJOUR.LOG")) && jf) {
-            char line[192];
-            int p = 0;
-            line[0] = 0;
-            llmk_ascii_append_str(line, (int)sizeof(line), &p, "oo event=net_present n=");
-            llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)count);
-            llmk_ascii_append_str(line, (int)sizeof(line), &p, "\r\n");
-            UINTN nb = (UINTN)p;
-            uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)line);
-            uefi_call_wrapper(jf->Flush, 1, jf);
-            uefi_call_wrapper(jf->Close, 1, jf);
-
-            // Enforce max journal size (best-effort).
-            llmk_oo_jour_log_rotate_best_effort();
-        }
-    }
+    (void)count;
+    llmk_oo_journal_event_load_state_best_effort("net_present");
 
     uefi_call_wrapper(BS->FreePool, 1, handles);
 }
@@ -3691,12 +3696,12 @@ static int llmk_char16_streq(const CHAR16 *a, const CHAR16 *b) {
 
 static void llmk_print_u64(UINT64 v) {
     // Print decimal without relying on format widths.
-    CHAR16 buf[32];
+    CHAR16 buf[32]; // SAFE: enough for UINT64 decimal digits; bounded by sizeof(buf)
     int p = 0;
     if (v == 0) {
         buf[p++] = L'0';
     } else {
-        CHAR16 rev[32];
+        CHAR16 rev[32]; // SAFE: enough for UINT64 decimal digits; bounded by sizeof(rev)
         int rn = 0;
         while (v > 0 && rn < (int)(sizeof(rev) / sizeof(rev[0]))) {
             rev[rn++] = (CHAR16)(L'0' + (v % 10));
@@ -3791,6 +3796,9 @@ static int llmk_is_model_file_name16(const CHAR16 *name) {
     if (!name || !name[0]) return 0;
     // tokenizer.bin is a required runtime asset, but it is not a model.
     if (llmk_char16_endswith_ci(name, L"tokenizer.bin")) return 0;
+    // OO persistence / recovery files are not models, but can end up as .BIN.
+    if (llmk_char16_endswith_ci(name, L"OOSTATE.BIN")) return 0;
+    if (llmk_char16_endswith_ci(name, L"OORECOV.BIN")) return 0;
     if (llmk_char16_endswith_ci(name, L".bin")) return 1;
     if (llmk_char16_endswith_ci(name, L".gguf")) return 1;
     return 0;
@@ -3967,7 +3975,7 @@ static int llmk_model_picker(EFI_FILE_HANDLE *out_f, CHAR16 *out_path, int out_c
     if (out_path && out_cap > 0) out_path[0] = 0;
     if (!g_root || !out_f || !out_path || out_cap <= 1) return 0;
 
-    LlmkModelEntry entries[48];
+    LlmkModelEntry entries[48]; // SAFE: fixed-cap model entry list; bounded by sizeof(entries)
     int n = llmk_collect_models(entries, (int)(sizeof(entries) / sizeof(entries[0])));
     if (n <= 0) return 0;
 
@@ -4059,16 +4067,111 @@ static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries);
 static void llmk_fs_cat_best_effort(const CHAR16 *path, UINTN max_bytes);
 static void llmk_print_diag(void);
+static int llmk_autorun_start(const CHAR16 *name, int shutdown_when_done);
+static int llmk_autorun_next_line(char *out, int out_cap);
+static void llmk_autorun_stop(void);
+static int llmk_autorun_finish_if_eof(void);
+static void llmk_oo_print_oojour_tail_best_effort(int max_lines);
+static void llmk_oo_journal_cmd_best_effort(const char *cmd);
+static EFI_STATUS llmk_oo_save_to_file_best_effort(const CHAR16 *name, int *out_bytes);
 
 static void llmk_repl_no_model_loop(void) {
+    // Minimal repl.cfg parsing for autorun in no-model mode.
+    // (We can't rely on the main cfg loader here because this loop is used
+    // in early failure paths too.)
+    int autorun_autostart = 0;
+    int autorun_shutdown_when_done = 0;
+    CHAR16 autorun_file[96];
+    StrCpy(autorun_file, L"llmk-autorun.txt");
+    if (g_root) {
+        void *raw = NULL;
+        UINTN raw_len = 0;
+        EFI_STATUS st = llmk_read_entire_file_best_effort(L"repl.cfg", &raw, &raw_len);
+        if (!EFI_ERROR(st) && raw && raw_len > 0) {
+            // Make a NUL-terminated ASCII buffer.
+            char *buf = NULL;
+            EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&buf);
+            if (!EFI_ERROR(st2) && buf) {
+                CopyMem(buf, raw, raw_len);
+                buf[raw_len] = 0;
+
+                // Parse a very small subset of keys.
+                char *p = buf;
+                while (*p) {
+                    char *line = p;
+                    while (*p && *p != '\n') p++;
+                    if (*p == '\n') { *p = 0; p++; }
+                    for (char *c = line; *c; c++) { if (*c == '\r') { *c = 0; break; } }
+                    // Trim leading spaces
+                    while (*line == ' ' || *line == '\t') line++;
+                    if (line[0] == 0 || line[0] == '#' || line[0] == ';') continue;
+                    // Strip inline comment
+                    for (char *c = line; *c; c++) { if (*c == '#') { *c = 0; break; } }
+                    // key=value
+                    char *eq = line;
+                    while (*eq && *eq != '=') eq++;
+                    if (*eq != '=') continue;
+                    *eq = 0;
+                    char *key = line;
+                    char *val = eq + 1;
+                    // trim key/val
+                    while (*key == ' ' || *key == '\t') key++;
+                    while (*val == ' ' || *val == '\t') val++;
+                    char *kend = key;
+                    while (*kend) kend++;
+                    while (kend > key && (kend[-1] == ' ' || kend[-1] == '\t')) kend--;
+                    *kend = 0;
+                    char *vend = val;
+                    while (*vend) vend++;
+                    while (vend > val && (vend[-1] == ' ' || vend[-1] == '\t')) vend--;
+                    *vend = 0;
+                    // lowercase key (ASCII)
+                    for (char *k = key; *k; k++) {
+                        if (*k >= 'A' && *k <= 'Z') *k = (char)(*k - 'A' + 'a');
+                    }
+
+                    if (my_strncmp(key, "autorun_autostart", 17) == 0 && key[17] == 0) {
+                        autorun_autostart = (val[0] == '1' || val[0] == 't' || val[0] == 'T' || val[0] == 'y' || val[0] == 'Y');
+                    } else if (my_strncmp(key, "autorun_shutdown_when_done", 26) == 0 && key[26] == 0) {
+                        autorun_shutdown_when_done = (val[0] == '1' || val[0] == 't' || val[0] == 'T' || val[0] == 'y' || val[0] == 'Y');
+                    } else if (my_strncmp(key, "autorun_file", 11) == 0 && key[11] == 0) {
+                        if (val[0]) {
+                            ascii_to_char16(autorun_file, val, (int)(sizeof(autorun_file) / sizeof(autorun_file[0])));
+                        }
+                    }
+                }
+
+                uefi_call_wrapper(BS->FreePool, 1, buf);
+            }
+        }
+        if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+    }
+
     Print(L"OK: REPL ready (no model). Type /help\r\n\r\n");
+
+    // Best-effort autorun (no-model).
+    if (autorun_autostart) {
+        (void)llmk_autorun_start(autorun_file, autorun_shutdown_when_done);
+    }
+
     while (1) {
         CHAR16 user_input[512];
         char prompt[512];
         prompt[0] = 0;
-        Print(L"llmk> ");
-        read_user_input(user_input, 512);
-        char16_to_char(prompt, user_input, 512);
+
+        // Autorun: consume next scripted line if active.
+        if (llmk_autorun_next_line(prompt, (int)sizeof(prompt))) {
+            CHAR16 p16[540];
+            ascii_to_char16(p16, prompt, (int)(sizeof(p16) / sizeof(p16[0])));
+            Print(L"llmk (autorun)> %s\r\n", p16);
+        } else if (llmk_autorun_finish_if_eof()) {
+            // EOF handled (stop/shutdown); loop continues if not shutdown.
+            continue;
+        } else {
+            Print(L"llmk> ");
+            read_user_input(user_input, 512);
+            char16_to_char(prompt, user_input, 512);
+        }
         if (prompt[0] == 0) continue;
 
         if (my_strncmp(prompt, "/help", 5) == 0 || my_strncmp(prompt, "/commands", 9) == 0) {
@@ -4145,7 +4248,7 @@ static void llmk_repl_no_model_loop(void) {
                 Print(L"\r\nERROR: seek failed (%r)\r\n\r\n", pst);
                 continue;
             }
-            int hdr[7];
+            int hdr[7]; // SAFE: fixed-size BIN header (7 ints) read in one shot
             for (int k = 0; k < 7; k++) hdr[k] = 0;
             UINTN bytes = (UINTN)(7 * sizeof(int));
             EFI_STATUS rst = uefi_call_wrapper(f->Read, 3, f, &bytes, hdr);
@@ -4156,11 +4259,11 @@ static void llmk_repl_no_model_loop(void) {
             }
 
             int dim = hdr[0];
-            int n_layers = hdr[2];
-            int n_heads = hdr[3];
-            int n_kv_heads = hdr[4];
-            int vocab = hdr[5];
-            int seq_len = hdr[6];
+            int n_layers = hdr[2]; // SAFE: constant index into fixed-size hdr[7]
+            int n_heads = hdr[3]; // SAFE: constant index into fixed-size hdr[7]
+            int n_kv_heads = hdr[4]; // SAFE: constant index into fixed-size hdr[7]
+            int vocab = hdr[5]; // SAFE: constant index into fixed-size hdr[7]
+            int seq_len = hdr[6]; // SAFE: constant index into fixed-size hdr[7]
             int shared = (vocab < 0);
             if (vocab < 0) vocab = -vocab;
             Print(L"\r\nBIN model info:\r\n");
@@ -4204,6 +4307,74 @@ static void llmk_repl_no_model_loop(void) {
 
             llmk_fs_cat_best_effort(path16, 256U * 1024U);
             Print(L"\r\n");
+            continue;
+        }
+
+        // Minimal autorun controls in no-model mode.
+        if (my_strncmp(prompt, "/autorun_stop", 13) == 0) {
+            Print(L"\r\n[autorun] stopping\r\n\r\n");
+            llmk_autorun_stop();
+            continue;
+        }
+
+        // Minimal OO commands (no-model mode): supports journaling + persistence demos without LLM.
+        if (my_strncmp(prompt, "/oo_list", 8) == 0) {
+            llmk_oo_list_print();
+            llmk_oo_journal_cmd_best_effort("oo_list");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_new", 7) == 0) {
+            const char *goal = prompt + 7;
+            while (*goal == ' ' || *goal == '\t') goal++;
+            if (*goal == 0) {
+                Print(L"\r\nUsage: /oo_new <goal>\r\n\r\n");
+                continue;
+            }
+            int id = llmk_oo_new(goal);
+            if (id < 0) {
+                Print(L"\r\nERROR: cannot create entity (full?)\r\n\r\n");
+            } else {
+                Print(L"\r\nOK: created entity id=%d\r\n\r\n", id);
+                llmk_oo_journal_cmd_best_effort("oo_new");
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_save", 8) == 0) {
+            // In no-model mode, use the default OO state file (best-effort).
+            int n = 0;
+            EFI_STATUS st = llmk_oo_save_to_file_best_effort(L"OOSTATE.TXT", &n);
+            if (EFI_ERROR(st)) {
+                Print(L"\r\nERROR: failed to write OOSTATE.TXT: %r\r\n\r\n", st);
+            } else {
+                Print(L"\r\nOK: wrote OOSTATE.TXT (%d bytes)\r\n\r\n", n);
+                llmk_oo_journal_cmd_best_effort("oo_save");
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_load", 8) == 0) {
+            void *buf = NULL;
+            UINTN len = 0;
+            EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOSTATE.TXT", &buf, &len);
+            if (EFI_ERROR(st) || !buf || len == 0) {
+                if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+                Print(L"\r\nERROR: failed to read OOSTATE.TXT: %r\r\n\r\n", st);
+                continue;
+            }
+            int imported = llmk_oo_import((const char *)buf, (int)len);
+            uefi_call_wrapper(BS->FreePool, 1, buf);
+            if (imported < 0) {
+                Print(L"\r\nERROR: parse failed\r\n\r\n");
+            } else {
+                Print(L"\r\nOK: loaded %d entity(s) from OOSTATE.TXT\r\n\r\n", imported);
+                llmk_oo_journal_cmd_best_effort("oo_load");
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_jour", 8) == 0 || my_strncmp(prompt, "/oo_journal", 11) == 0) {
+            Print(L"\r\n[oo_jour] OOJOUR.LOG tail:\r\n");
+            llmk_oo_print_oojour_tail_best_effort(10);
+            Print(L"\r\n");
+            llmk_oo_journal_cmd_best_effort("oo_jour");
             continue;
         }
 
@@ -4595,6 +4766,21 @@ static int llmk_autorun_next_line(char *out, int out_cap) {
     return 0;
 }
 
+static int llmk_autorun_finish_if_eof(void) {
+    if (!g_autorun_active) return 0;
+    if (!g_autorun_buf) return 0;
+    if (g_autorun_pos < g_autorun_len) return 0;
+
+    Print(L"[autorun] done\r\n");
+    int shutdown = g_autorun_shutdown_when_done;
+    llmk_autorun_stop();
+    if (shutdown) {
+        Print(L"[autorun] shutting down\r\n");
+        uefi_call_wrapper(RT->ResetSystem, 4, EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+    }
+    return 1;
+}
+
 static void llmk_autorun_print_file_best_effort(const CHAR16 *name, int max_lines) {
     if (!name) name = L"llmk-autorun.txt";
     if (max_lines <= 0) max_lines = 200;
@@ -4656,7 +4842,7 @@ static int llmk_ascii_append_u32(char *dst, int cap, int pos, UINT32 v) {
     if (pos < 0) pos = 0;
     if (pos >= cap) return pos;
 
-    char tmp[16];
+    char tmp[16]; // SAFE: enough for UINT32 decimal digits; bounded by sizeof(tmp)
     int n = 0;
     if (v == 0) {
         tmp[n++] = '0';
@@ -5308,6 +5494,173 @@ static int llmk_cfg_parse_bool(const char *s, int *out) {
     return 0;
 }
 
+static void llmk_wasm_apply_oo_dna_kv_best_effort(
+    const uint8_t *dna,
+    size_t dna_len,
+    float *temperature,
+    float *min_p,
+    float *top_p,
+    int *top_k,
+    float *repeat_penalty,
+    int *no_repeat_ngram,
+    int *max_gen_tokens,
+    int *stats_enabled,
+    int *stop_on_you,
+    int *stop_on_double_nl,
+    int *m18_base_temp_milli,
+    int *m18_base_top_p_milli,
+    int *m18_base_top_k,
+    int *m18_base_max_gen_tokens
+) {
+    if (!dna || dna_len == 0) return;
+    if (!temperature || !min_p || !top_p || !top_k || !repeat_penalty || !no_repeat_ngram ||
+        !max_gen_tokens || !stats_enabled || !stop_on_you || !stop_on_double_nl ||
+        !m18_base_temp_milli || !m18_base_top_p_milli || !m18_base_top_k || !m18_base_max_gen_tokens) {
+        return;
+    }
+
+    // Safety cap: oo.dna should be small text.
+    if (dna_len > 8192) dna_len = 8192;
+
+    char *buf = NULL;
+    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, (UINTN)dna_len + 1, (void **)&buf);
+    if (EFI_ERROR(st) || !buf) return;
+    for (size_t i = 0; i < dna_len; i++) buf[i] = (char)dna[i];
+    buf[dna_len] = 0;
+
+    int applied = 0;
+
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        // Trim CR and whitespace.
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+        if (line[0] == '#' || line[0] == ';') continue;
+
+        // Strip inline comment.
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        // key=value
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0) continue;
+
+        // Lowercase key in-place (ASCII).
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        if (llmk_cfg_streq_ci(key, "temp") || llmk_cfg_streq_ci(key, "temperature")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.0f) v = 0.0f;
+                *temperature = v;
+                applied = 1;
+                Print(L"[wasm] apply temperature=%d.%03d\r\n", (int)(v), (int)((v - (int)v) * 1000));
+            }
+        } else if (llmk_cfg_streq_ci(key, "min_p")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                *min_p = v;
+                applied = 1;
+                Print(L"[wasm] apply min_p=%d.%03d\r\n", (int)(v), (int)((v - (int)v) * 1000));
+            }
+        } else if (llmk_cfg_streq_ci(key, "top_p")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                *top_p = v;
+                applied = 1;
+                Print(L"[wasm] apply top_p=%d.%03d\r\n", (int)(v), (int)((v - (int)v) * 1000));
+            }
+        } else if (llmk_cfg_streq_ci(key, "top_k")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > 256) v = 256;
+                *top_k = v;
+                applied = 1;
+                Print(L"[wasm] apply top_k=%d\r\n", v);
+            }
+        } else if (llmk_cfg_streq_ci(key, "repeat") || llmk_cfg_streq_ci(key, "repeat_penalty")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v <= 0.0f) v = 1.0f;
+                *repeat_penalty = v;
+                applied = 1;
+                Print(L"[wasm] apply repeat_penalty=%d.%03d\r\n", (int)(v), (int)((v - (int)v) * 1000));
+            }
+        } else if (llmk_cfg_streq_ci(key, "norepeat") || llmk_cfg_streq_ci(key, "no_repeat_ngram")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 0) v = 0;
+                if (v > 16) v = 16;
+                *no_repeat_ngram = v;
+                applied = 1;
+                Print(L"[wasm] apply no_repeat_ngram=%d\r\n", v);
+            }
+        } else if (llmk_cfg_streq_ci(key, "max_tokens") || llmk_cfg_streq_ci(key, "max_gen_tokens")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > MAX_TOKENS) v = MAX_TOKENS;
+                *max_gen_tokens = v;
+                applied = 1;
+                Print(L"[wasm] apply max_gen_tokens=%d\r\n", v);
+            }
+        } else if (llmk_cfg_streq_ci(key, "stats") || llmk_cfg_streq_ci(key, "stats_enabled")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                *stats_enabled = (b != 0);
+                applied = 1;
+                Print(L"[wasm] apply stats_enabled=%d\r\n", *stats_enabled);
+            }
+        } else if (llmk_cfg_streq_ci(key, "stop_on_you")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                *stop_on_you = (b != 0);
+                applied = 1;
+                Print(L"[wasm] apply stop_on_you=%d\r\n", *stop_on_you);
+            }
+        } else if (llmk_cfg_streq_ci(key, "stop_on_double_nl")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                *stop_on_double_nl = (b != 0);
+                applied = 1;
+                Print(L"[wasm] apply stop_on_double_nl=%d\r\n", *stop_on_double_nl);
+            }
+        }
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+
+    if (applied) {
+        *m18_base_temp_milli = (int)(*temperature * 1000.0f + 0.5f);
+        *m18_base_top_p_milli = (int)(*top_p * 1000.0f + 0.5f);
+        *m18_base_top_k = *top_k;
+        *m18_base_max_gen_tokens = *max_gen_tokens;
+        if (*m18_base_temp_milli < g_autotune.min_temp_milli) *m18_base_temp_milli = g_autotune.min_temp_milli;
+        if (*m18_base_top_p_milli < g_autotune.min_top_p_milli) *m18_base_top_p_milli = g_autotune.min_top_p_milli;
+        if (*m18_base_top_k < g_autotune.min_top_k) *m18_base_top_k = g_autotune.min_top_k;
+        if (*m18_base_max_gen_tokens < g_autotune.min_max_gen_tokens) *m18_base_max_gen_tokens = g_autotune.min_max_gen_tokens;
+    }
+}
+
 static void llmk_cfg_copy_ascii_token(char *dst, int cap, const char *src);
 
 static void llmk_load_repl_cfg_best_effort(
@@ -5626,7 +5979,7 @@ static void llmk_load_repl_cfg_best_effort(
                 }
             }
         } else if (llmk_cfg_streq_ci(key, "chat_format") || llmk_cfg_streq_ci(key, "prompt_format")) {
-            char fmt[32];
+            char fmt[32]; // SAFE: small token buffer; written via llmk_cfg_copy_ascii_token(cap)
             llmk_cfg_copy_ascii_token(fmt, (int)sizeof(fmt), val);
             if (llmk_cfg_streq_ci(fmt, "you_ai") || llmk_cfg_streq_ci(fmt, "you")) {
                 g_cfg_chat_format = LLMK_CHAT_FMT_YOU_AI;
@@ -5839,6 +6192,104 @@ static void llmk_load_repl_cfg_oo_best_effort(
                 autosave_set = 1;
             }
         }
+    }
+}
+
+static void llmk_load_repl_cfg_oo_engines_best_effort(void) {
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_read_file(&f, L"repl.cfg");
+    if (EFI_ERROR(st)) return;
+
+    char buf[4096];
+    UINTN sz = sizeof(buf) - 1;
+    st = uefi_call_wrapper(f->Read, 3, f, &sz, buf);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || sz == 0) return;
+    buf[sz] = 0;
+
+    int applied = 0;
+
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+        if (line[0] == '#' || line[0] == ';') continue;
+
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0) continue;
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        int mode;
+        if (
+            llmk_cfg_streq_ci(key, "evolvion_mode") ||
+            llmk_cfg_streq_ci(key, "synaption_mode") ||
+            llmk_cfg_streq_ci(key, "conscience_mode") ||
+            llmk_cfg_streq_ci(key, "neuralfs_mode") ||
+            llmk_cfg_streq_ci(key, "ghost_mode") ||
+            llmk_cfg_streq_ci(key, "immunion_mode") ||
+            llmk_cfg_streq_ci(key, "dreamion_mode") ||
+            llmk_cfg_streq_ci(key, "symbion_mode") ||
+            llmk_cfg_streq_ci(key, "collectivion_mode") ||
+            llmk_cfg_streq_ci(key, "metabion_mode") ||
+            llmk_cfg_streq_ci(key, "morphion_mode") ||
+            llmk_cfg_streq_ci(key, "pheromion_mode")
+        ) {
+            if (!llmk_cfg_parse_i32(val, &mode)) continue;
+            if (mode < 0) mode = 0;
+            if (mode > 2) mode = 2;
+
+            if (llmk_cfg_streq_ci(key, "evolvion_mode")) {
+                evolvion_set_mode(&g_evolvion, (EvolvionMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "synaption_mode")) {
+                synaption_set_mode(&g_synaption, (SynaptionMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "conscience_mode")) {
+                conscience_set_mode(&g_conscience, (ConscienceMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "neuralfs_mode")) {
+                neuralfs_set_mode(&g_neuralfs, (NeuralfsMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "ghost_mode")) {
+                ghost_set_mode(&g_ghost, (GhostMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "immunion_mode")) {
+                immunion_set_mode(&g_immunion, (ImmunionMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "dreamion_mode")) {
+                dreamion_set_mode(&g_dreamion, (DreamionMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "symbion_mode")) {
+                symbion_set_mode(&g_symbion, (SymbionMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "collectivion_mode")) {
+                collectivion_set_mode(&g_collectivion, (CollectivionMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "metabion_mode")) {
+                metabion_set_mode(&g_metabion, (MetabionMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "morphion_mode")) {
+                morphion_set_mode(&g_morphion, (MorphionMode)mode);
+            } else if (llmk_cfg_streq_ci(key, "pheromion_mode")) {
+                pheromion_set_mode(&g_pheromion, (PheromionMode)mode);
+            }
+
+            applied = 1;
+            if (g_boot_verbose >= 2) {
+                Print(L"[cfg][oo_engines] apply %a=%d\r\n", key, mode);
+            }
+        }
+    }
+
+    if (applied && g_boot_verbose) {
+        Print(L"[cfg] oo engines configured (see /oo_status)\r\n");
     }
 }
 
@@ -6207,11 +6658,11 @@ static void llmk_bench_on_turn_end(int generated_tokens) {
     llmk_cfg_out_append(row, &rp, (int)sizeof(row), g_bench_category);
     llmk_cfg_out_append(row, &rp, (int)sizeof(row), "\",\"latency_ms\":");
     {
-        char tmp[32];
+        char tmp[32]; // SAFE: decimal render buffer; bounded by sizeof(tmp)
         int tp = 0;
         tmp[0] = 0;
         UINT64 v = latency_ms;
-        char digits[24];
+        char digits[24]; // SAFE: digit scratch; bounded by sizeof(digits)
         int nd = 0;
         if (v == 0) {
             digits[nd++] = '0';
@@ -6227,11 +6678,11 @@ static void llmk_bench_on_turn_end(int generated_tokens) {
     }
     llmk_cfg_out_append(row, &rp, (int)sizeof(row), ",\"decode_cycles\":");
     {
-        char tmp[32];
+        char tmp[32]; // SAFE: decimal render buffer; bounded by sizeof(tmp)
         int tp = 0;
         tmp[0] = 0;
         UINT64 v = decode_cycles;
-        char digits[24];
+        char digits[24]; // SAFE: digit scratch; bounded by sizeof(digits)
         int nd = 0;
         if (v == 0) {
             digits[nd++] = '0';
@@ -6247,11 +6698,11 @@ static void llmk_bench_on_turn_end(int generated_tokens) {
     }
     llmk_cfg_out_append(row, &rp, (int)sizeof(row), ",\"decode_tokens\":");
     {
-        char tmp[24];
+        char tmp[24]; // SAFE: decimal render buffer; bounded by sizeof(tmp)
         int tp = 0;
         tmp[0] = 0;
         UINT32 v = decode_tokens;
-        char digits[16];
+        char digits[16]; // SAFE: digit scratch; bounded by sizeof(digits)
         int nd = 0;
         if (v == 0) {
             digits[nd++] = '0';
@@ -6267,12 +6718,12 @@ static void llmk_bench_on_turn_end(int generated_tokens) {
     }
     llmk_cfg_out_append(row, &rp, (int)sizeof(row), ",\"generated_tokens\":");
     {
-        char tmp[24];
+        char tmp[24]; // SAFE: decimal render buffer; bounded by sizeof(tmp)
         int tp = 0;
         tmp[0] = 0;
         int v = generated_tokens;
         if (v < 0) v = 0;
-        char digits[16];
+        char digits[16]; // SAFE: digit scratch; bounded by sizeof(digits)
         int nd = 0;
         if (v == 0) {
             digits[nd++] = '0';
@@ -6402,6 +6853,17 @@ static void llmk_oo_journal_event_load_state_best_effort(const char *event) {
     llmk_oo_journal_append_best_effort(&s, event);
 }
 
+static void llmk_oo_journal_cmd_best_effort(const char *cmd) {
+    if (!cmd || !cmd[0]) return;
+    char event[96];
+    int p = 0;
+    event[0] = 0;
+    llmk_ascii_append_str(event, (int)sizeof(event), &p, "cmd=");
+    llmk_ascii_append_str(event, (int)sizeof(event), &p, cmd);
+    event[p] = 0;
+    llmk_oo_journal_event_load_state_best_effort(event);
+}
+
 static void llmk_oo_plan_checkpoint_best_effort(const char *tag) {
     if (!g_root) return;
 
@@ -6482,7 +6944,7 @@ static int llmk_oo_auto_apply_write_verify_best_effort(const char *action,
 
     // Apply: write the intended key.
     {
-        char val[32];
+        char val[32]; // SAFE: config value string buffer; bounded by sizeof(val)
         int vp = 0;
         int v = 0;
         if (llmk_cfg_streq_ci(key, "ctx_len")) v = expected_ctx;
@@ -7525,7 +7987,12 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
             float* q_h = s->q + h * head_size;
             int att_offset = h * p->seq_len;
             float inv_scale = 1.0f / fast_sqrt((float)head_size);
-            
+            int kv_head = h / kv_mul;
+            const float *key_base = s->key_cache + loff + kv_head * head_size;
+            const float *val_base = s->value_cache + loff + kv_head * head_size;
+
+            llmk_kv_prefetch_range(key_base, kv_dim, head_size, pos + 1);
+            llmk_kv_prefetch_range(val_base, kv_dim, head_size, pos + 1);
             // Attention scores
             for (int t = 0; t <= pos; t++) {
                 float* k_t = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
@@ -7535,7 +8002,7 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
             
             // Softmax
             softmax(s->att + att_offset, pos + 1);
-            
+
             // Weighted sum
             float* xb_h = s->xb + h * head_size;
             for (int i = 0; i < head_size; i++) xb_h[i] = 0.0f;
@@ -7546,7 +8013,7 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
                 axpy_f32_best(xb_h, v_t, a, head_size);
             }
         }
-        
+        pheromion_touch(&g_pheromion, 1);
         // Output projection
         if (w->kind == 1) {
             if (use_i8_attn) {
@@ -7584,6 +8051,7 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
             matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
         }
         
+        pheromion_touch(&g_pheromion, 2);
         // SwiGLU
         for (int i = 0; i < hidden_dim; i++) {
             float val = s->hb[i];
@@ -7911,11 +8379,11 @@ static void llmk_u64_to_str(UINT64 val, char *buf, int buf_size) {
     if (buf_size < 2) return;
     if (val == 0) {
         buf[0] = '0';
-        buf[1] = 0;
+        buf[1] = 0; // SAFE: buf_size checked >= 2
         return;
     }
     
-    char tmp[32];
+    char tmp[32]; // SAFE: bounded local buffer (max 31 digits + NUL)
     int i = 0;
     while (val > 0 && i < 31) {
         tmp[i++] = '0' + (val % 10);
@@ -7974,9 +8442,9 @@ void encode(char* text, int* tokens, int* n_tokens, int max_tokens, Tokenizer* t
             tokens[(*n_tokens)++] = best_id;
             str += best_len;
         } else {
-            char single[2];
+            char single[2]; // SAFE: 1 char + NUL
             single[0] = *str;
-            single[1] = '\0';
+            single[1] = '\0'; // SAFE: fixed-size local buffer
             int id = str_lookup(single, t->vocab, t->vocab_size);
             if (id >= 0) {
                 if (*n_tokens >= max_tokens) break;
@@ -8240,6 +8708,8 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/fs_ls", L"List files in directory (default: root)" },
     { "/fs_cat", L"Print a text file (best-effort; truncated)" },
     { "/fs_write", L"Write text to file (truncate/create)" },
+    { "/wasm_info", L"Inspect Wasm custom section oo.dna" },
+    { "/wasm_apply", L"Apply oo.dna key=value deltas to runtime" },
     { "/fs_append", L"Append text to file (create if missing)" },
     { "/fs_rm", L"Delete a file" },
     { "/fs_cp", L"Copy file (best-effort)" },
@@ -8252,6 +8722,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
 
     { "/oo_new", L"Create an entity (long-lived intention)" },
     { "/oo_list", L"List entities" },
+    { "/oo_status", L"Show OO config + persistence status" },
     { "/oo_step", L"Advance one entity by one step" },
     { "/oo_run", L"Run n cooperative steps across entities" },
     { "/oo_kill", L"Kill an entity" },
@@ -8271,6 +8742,9 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/oo_auto_stop", L"Stop /oo_auto cycles" },
     { "/oo_exec", L"Run agenda items (n cycles). Stops when agenda empty unless --plan" },
     { "/oo_exec_stop", L"Stop /oo_exec" },
+    { "/oo_consult", L"Ask the model to suggest a system adaptation action" },
+    { "/oo_log", L"Tail OOCONSULT.LOG" },
+    { "/oo_jour", L"Tail OOJOUR.LOG" },
 
     { "/autorun", L"Run scripted REPL commands from file (default from repl.cfg)" },
     { "/autorun_stop", L"Stop autorun" },
@@ -8331,6 +8805,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/compat_off", L"Disable Compatibilion" },
     { "/compat_status", L"Show platform capabilities" },
     { "/compat_probe", L"Re-probe CPU features" },
+    { "/oo_status", L"Show OO organism engines status" },
 
     { "/diag_on", L"Enable Diagnostion diagnostics" },
     { "/diag_off", L"Disable Diagnostion diagnostics" },
@@ -8515,6 +8990,7 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/save_img",
         "/oo_new",
         "/oo_list",
+        "/oo_status",
         "/oo_kill",
         "/oo_step",
         "/oo_run",
@@ -8532,6 +9008,12 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/oo_think",
         "/oo_auto",
         "/oo_auto_stop",
+        "/oo_exec",
+        "/oo_exec_stop",
+        "/oo_consult",
+        "/oo_consult_mock",
+        "/oo_log",
+        "/oo_jour",
         "/autorun",
         "/autorun_stop",
         "/reset",
@@ -9109,18 +9591,19 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
             plan_hard_stop ? "yes" : "no",
             plan_hard_stop ? "OO_PLAN_HARD_STOP" : "OO_PLAN_ACTIVE");
 
+        // Ultra-minimal journal markers (details go to serial + OOCONSULT.LOG).
         if (!confidence_gate_enabled) {
-            llmk_oo_journal_event_load_state_best_effort("confidence gate=log_only pass=yes reason_id=OO_CONF_LOG_ONLY");
+            llmk_oo_journal_event_load_state_best_effort("conf_log_only");
         } else if (confidence_gate_pass) {
-            llmk_oo_journal_event_load_state_best_effort("confidence gate=enforced pass=yes reason_id=OO_CONF_GATE_PASS");
+            llmk_oo_journal_event_load_state_best_effort("conf_pass");
         } else {
-            llmk_oo_journal_event_load_state_best_effort("confidence gate=enforced pass=no reason_id=OO_CONF_GATE_FAIL");
+            llmk_oo_journal_event_load_state_best_effort("conf_fail");
         }
 
         if (plan_hard_stop) {
-            llmk_oo_journal_event_load_state_best_effort("plan status=hard_stop reason_id=OO_PLAN_HARD_STOP");
+            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop");
         } else {
-            llmk_oo_journal_event_load_state_best_effort("plan status=active reason_id=OO_PLAN_ACTIVE");
+            llmk_oo_journal_event_load_state_best_effort("plan_active");
         }
 
     // 6. Policy decision (M5.1: apply ALL valid actions when multi_enabled)
@@ -9190,7 +9673,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                             ram_mb);
                         if (ok) {
                             Print(L"OK: OO auto-apply: reduce_ctx (old=%d new=%d check=pass reason_id=OO_APPLY_OK)\r\n", ctx, new_ctx);
-                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=success reason_id=OO_APPLY_OK");
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply_reduce_ctx_ok");
                             llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_CTX);
                             actions_applied++;
                             plan_applied_now++;
@@ -9200,14 +9683,14 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reduce_ctx");
                         } else {
                             // Revert to previous value (best-effort)
-                            char oval[32];
+                            char oval[32]; // SAFE: small temp buffer for cfg numeric string
                             int op = 0;
                             llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)ctx);
                             oval[op] = 0;
                             llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
                             Print(L"ERROR: OO auto-apply verification failed: reduce_ctx (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
-                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_ctx result=failed reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED");
-                            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=reduce_ctx reason_id=OO_PLAN_HARD_STOP");
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply_reduce_ctx_fail");
+                            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop");
                             plan_hard_stop = 1;
                             actions_blocked++;
                         }
@@ -9259,7 +9742,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                             ram_mb);
                         if (ok) {
                             Print(L"OK: OO auto-apply: reduce_seq (old=%d new=%d check=pass reason_id=OO_APPLY_OK)\r\n", seq, new_seq);
-                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=success reason_id=OO_APPLY_OK");
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply_reduce_seq_ok");
                             llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_SEQ);
                             actions_applied++;
                             plan_applied_now++;
@@ -9268,14 +9751,14 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
                             llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "reduce_seq");
                         } else {
-                            char oval[32];
+                            char oval[32]; // SAFE: small temp buffer for cfg numeric string
                             int op = 0;
                             llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)seq);
                             oval[op] = 0;
                             llmk_repl_cfg_set_kv_best_effort("seq_len", oval);
                             Print(L"ERROR: OO auto-apply verification failed: reduce_seq (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
-                            llmk_oo_journal_event_load_state_best_effort("auto_apply action=reduce_seq result=failed reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED");
-                            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=reduce_seq reason_id=OO_PLAN_HARD_STOP");
+                            llmk_oo_journal_event_load_state_best_effort("auto_apply_reduce_seq_fail");
+                            llmk_oo_journal_event_load_state_best_effort("plan_hard_stop");
                             plan_hard_stop = 1;
                             actions_blocked++;
                         }
@@ -9319,7 +9802,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                         ram_mb);
                     if (ok) {
                         Print(L"OK: OO auto-apply: increase_ctx (old=%d new=%d check=pass mode=aggressive reason_id=OO_APPLY_OK)\r\n", ctx, new_ctx);
-                        llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=success reason_id=OO_APPLY_OK");
+                        llmk_oo_journal_event_load_state_best_effort("auto_apply_increase_ctx_ok");
                         llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_INCREASE_CTX);
                         actions_applied++;
                         plan_applied_now++;
@@ -9328,14 +9811,14 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                         if (batch_summary_pos > 0) llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, ",");
                         llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "increase_ctx");
                     } else {
-                        char oval[32];
+                        char oval[32]; // SAFE: small temp buffer for cfg numeric string
                         int op = 0;
                         llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)ctx);
                         oval[op] = 0;
                         llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
                         Print(L"ERROR: OO auto-apply verification failed: increase_ctx (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
-                        llmk_oo_journal_event_load_state_best_effort("auto_apply action=increase_ctx result=failed reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED");
-                        llmk_oo_journal_event_load_state_best_effort("plan_hard_stop reason=verify_failed action=increase_ctx reason_id=OO_PLAN_HARD_STOP");
+                        llmk_oo_journal_event_load_state_best_effort("auto_apply_increase_ctx_fail");
+                        llmk_oo_journal_event_load_state_best_effort("plan_hard_stop");
                         plan_hard_stop = 1;
                         actions_blocked++;
                     }
@@ -9403,45 +9886,11 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                  confidence_gate_enabled);
     }
 
-    // 7. Log to journal (best-effort)
-    if (g_root) {
-        char jlog[256];
-        int jp = 0;
-        if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
-            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "oo event=consult_multi actions=[");
-            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, batch_summary);
-            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "] applied=");
-            llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)actions_applied);
-            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " blocked=");
-            llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)actions_blocked);
-        } else {
-            llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "oo event=consult decision=");
-            if (action_stable) {
-                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "stable");
-            } else if (actions_applied > 0) {
-                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, batch_summary);
-            } else {
-                llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "ignored");
-            }
-        }
-        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " score=");
-        llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)confidence_score);
-        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " threshold=");
-        llmk_ascii_append_u64(jlog, (int)sizeof(jlog), &jp, (UINT64)confidence_threshold);
-        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, " gate=");
-        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, confidence_gate_enabled ? "enforced" : "log_only");
-        llmk_ascii_append_str(jlog, (int)sizeof(jlog), &jp, "\r\n");
-
-        EFI_FILE_HANDLE jf = NULL;
-        if (!EFI_ERROR(llmk_open_binary_file_append(&jf, L"OOJOUR.LOG"))) {
-            UINTN nb = (UINTN)jp;
-            uefi_call_wrapper(jf->Write, 3, jf, &nb, (void *)jlog);
-            uefi_call_wrapper(jf->Flush, 1, jf);
-            uefi_call_wrapper(jf->Close, 1, jf);
-
-            // Enforce max journal size (best-effort).
-            llmk_oo_jour_log_rotate_best_effort();
-        }
+    // 7. Log to journal (best-effort): ultra-minimal markers.
+    if (multi_enabled && (actions_applied > 0 || actions_blocked > 0)) {
+        llmk_oo_journal_event_load_state_best_effort("consult_multi");
+    } else {
+        llmk_oo_journal_event_load_state_best_effort("consult");
     }
 }
 
@@ -9543,44 +9992,38 @@ static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_
         log_enabled = (g_cfg_oo_llm_consult > 0) ? 1 : 0;
     }
     if (!log_enabled || !g_root) return;
+    if (!g_cfg_oo_enable) return;
+    if (g_djibion.mode != DJIBION_MODE_OFF && !g_djibion.laws.allow_oo_persist) return;
 
-    // Build log line: [boot=N] mode=MODE ram=MB ctx=val seq=val suggestion="..." decision=action applied=0|1
+    (void)suggestion;
+
+    // Compact, stable log line (avoid persisting raw suggestion payload).
+    // Format: consult b=<boot> m=<N|D|S> r=<ram_mb> c=<ctx> s=<seq> d=<decision> a=<0|1> sc=<score> th=<thr> g=<0|1>
     char logline[256];
     int lp = 0;
-    
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "[boot=");
+
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "consult b=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, boot_count);
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "] mode=");
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, 
-                         (mode == LLMK_OO_MODE_NORMAL) ? "NORMAL" : 
-                         (mode == LLMK_OO_MODE_DEGRADED) ? "DEGRADED" : "SAFE");
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " ram=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " m=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp,
+                         (mode == LLMK_OO_MODE_NORMAL) ? "N" :
+                         (mode == LLMK_OO_MODE_DEGRADED) ? "D" : "S");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " r=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, ram_mb);
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " ctx=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " c=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)ctx);
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " seq=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " s=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)seq);
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " suggestion=\"");
-    
-    // Truncate suggestion to 60 chars max
-    int slen = 0;
-    while (suggestion[slen] && slen < 60 && lp + 1 < (int)sizeof(logline) - 40) {
-        logline[lp++] = suggestion[slen++];
-    }
-    if (suggestion[slen]) {
-        llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "...");
-    }
-    
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "\" decision=");
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, decision);
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " applied=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " d=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, decision ? decision : "na");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " a=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)applied);
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " score=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " sc=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)confidence_score);
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " threshold=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " th=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)confidence_threshold);
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " gate=");
-    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, confidence_gate_enabled ? "enforced" : "log_only");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " g=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)(confidence_gate_enabled ? 1 : 0));
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "\r\n");
     logline[lp] = 0;
 
@@ -9712,36 +10155,31 @@ static void llmk_oo_consult_execute(Config *config, TransformerWeights *weights,
     char journal_tail[256];
     journal_tail[0] = 0;
     if (g_root) {
-        EFI_FILE_HANDLE jf = NULL;
-        if (!EFI_ERROR(llmk_open_binary_file_append(&jf, L"OOJOUR.LOG"))) {
-            UINT64 pos = 0;
-            if (!EFI_ERROR(uefi_call_wrapper(jf->GetPosition, 2, jf, &pos)) && pos > 0) {
-                // Seek backwards up to 256 bytes
-                UINT64 seek_start = (pos > 256ULL) ? (pos - 256ULL) : 0ULL;
-                uefi_call_wrapper(jf->SetPosition, 2, jf, seek_start);
-                UINTN nr = 256;
-                char tmp[256];
-                if (!EFI_ERROR(uefi_call_wrapper(jf->Read, 3, jf, &nr, tmp)) && nr > 0) {
-                    // Extract last 3 lines (simplistic: look for last 3 \n)
-                    int nl_count = 0;
-                    int start_idx = (int)nr - 1;
-                    while (start_idx >= 0 && nl_count < 3) {
-                        if (tmp[start_idx] == '\n') nl_count++;
-                        start_idx--;
-                    }
-                    start_idx++;
-                    if (start_idx < 0) start_idx = 0;
-                    int jt_p = 0;
-                    for (int i = start_idx; i < (int)nr && jt_p + 1 < (int)sizeof(journal_tail); i++) {
-                        char c = tmp[i];
-                        if (c == '\r' || c == '\n') c = ' ';
-                        journal_tail[jt_p++] = c;
-                    }
-                    journal_tail[jt_p] = 0;
+        void *buf = NULL;
+        UINTN len = 0;
+        EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOJOUR.LOG", &buf, &len);
+        if (!EFI_ERROR(st) && buf && len > 0) {
+            char *tmp = (char *)buf;
+            UINTN start = len;
+            int nl = 0;
+            while (start > 0) {
+                start--;
+                if (tmp[start] == '\n') {
+                    nl++;
+                    if (nl >= 3) { start++; break; }
                 }
             }
-            uefi_call_wrapper(jf->Close, 1, jf);
+            if (start >= len) start = 0;
+
+            int jt_p = 0;
+            for (UINTN i = start; i < len && jt_p + 1 < (int)sizeof(journal_tail); i++) {
+                char c = tmp[i];
+                if (c == '\r' || c == '\n') c = ' ';
+                journal_tail[jt_p++] = c;
+            }
+            journal_tail[jt_p] = 0;
         }
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
     }
 
     // 2. Compose prompt (compact, <256 chars)
@@ -9806,58 +10244,63 @@ static void llmk_oo_consult_execute(Config *config, TransformerWeights *weights,
     int llm_len = 0;
 
     {
-        // Prefill
-        int pos = 0;
-        for (int i = 0; i < n_prompt; i++) {
-            if (g_llmk_ready) {
-                llmk_sentinel_phase_start(&g_sentinel, LLMK_PHASE_PREFILL);
-                transformer_forward(state, weights, config, prompt_tokens[i], pos);
-                llmk_sentinel_phase_end(&g_sentinel);
-            } else {
-                transformer_forward(state, weights, config, prompt_tokens[i], pos);
-            }
-            pos++;
+        const int max_sugg_tokens = 32;
+        float consult_temp = 0.3f;
+        float consult_min_p = min_p;
+        float consult_top_p = top_p;
+        int consult_top_k = top_k;
+        float consult_repeat_penalty = 1.10f;
+
+        int kv_pos = g_llmk_kv_pos;
+        if (kv_pos < 0) kv_pos = 0;
+        if (kv_pos + n_prompt + max_sugg_tokens + 1 >= config->seq_len) {
+            // Best-effort: avoid overflow by clearing KV.
+            reset_kv_cache(state, config);
+            kv_pos = 0;
         }
 
-        // Decode (max 32 tokens)
+        // Prefill prompt into the model.
+        for (int i = 0; i < n_prompt; i++) {
+            int pos = kv_pos + i;
+            transformer_forward(state, weights, config, prompt_tokens[i], pos);
+        }
+
         int token = prompt_tokens[n_prompt - 1];
-        float saved_temp = temperature;
-        int saved_topk = top_k;
-        temperature = 0.3f;
-        top_k = 20;
+        int pos = kv_pos + n_prompt - 1;
 
-        for (int step = 0; step < 32; step++) {
-            if (pos >= config->seq_len) break;
+        int context_tokens[160];
+        int n_context = 0;
+        for (int i = 0; i < n_prompt && n_context < (int)(sizeof(context_tokens) / sizeof(context_tokens[0])); i++) {
+            context_tokens[n_context++] = prompt_tokens[i];
+        }
 
-            // Sample
-            int next = sample_advanced(state->logits, config->vocab_size, temperature, 
-                                      min_p, top_p, top_k, NULL, 0, 1.0f);
-            if (next == 2 || next == 1) break; // EOS/BOS
+        for (int step = 0; step < max_sugg_tokens; step++) {
+            int n_recent = n_context;
+            if (n_recent > 64) n_recent = 64;
+            int *recent = (n_recent > 0) ? &context_tokens[n_context - n_recent] : (int *)0;
 
-            // Decode token
-            char *piece = tokenizer->vocab[next];
+            int next = sample_advanced(state->logits, config->vocab_size,
+                                       consult_temp, consult_min_p, consult_top_p, consult_top_k,
+                                       recent, n_recent, consult_repeat_penalty);
+            if (next == TOKEN_EOS) break;
+
+            char *piece = (tokenizer && tokenizer->vocab) ? tokenizer->vocab[next] : NULL;
             if (piece) {
                 int plen = my_strlen(piece);
-                if (llm_len + plen + 1 < (int)sizeof(llm_suggestion)) {
-                    for (int k = 0; k < plen; k++) llm_suggestion[llm_len++] = piece[k];
-                    llm_suggestion[llm_len] = 0;
+                for (int k = 0; k < plen && llm_len + 1 < (int)sizeof(llm_suggestion); k++) {
+                    llm_suggestion[llm_len++] = piece[k];
                 }
+                llm_suggestion[llm_len] = 0;
             }
 
-            // Forward
+            if (n_context < (int)(sizeof(context_tokens) / sizeof(context_tokens[0]))) {
+                context_tokens[n_context++] = next;
+            }
+
             token = next;
-            if (g_llmk_ready) {
-                llmk_sentinel_phase_start(&g_sentinel, LLMK_PHASE_DECODE);
-                transformer_forward(state, weights, config, token, pos);
-                llmk_sentinel_phase_end(&g_sentinel);
-            } else {
-                transformer_forward(state, weights, config, token, pos);
-            }
             pos++;
+            transformer_forward(state, weights, config, token, pos);
         }
-
-        temperature = saved_temp;
-        top_k = saved_topk;
     }
 
     Print(L"[obs][oo] consult_gen prompt_tok=%d out_chars=%d\r\n", n_prompt, llm_len);
@@ -9893,6 +10336,22 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // Compatibilion engine defaults: on (platform detection).
     compatibilion_init(&g_compatibilion);
     compatibilion_probe_cpu(&g_compatibilion);
+
+    // OO Organism engines (stubs, off by default)
+    evolvion_init(&g_evolvion);
+    synaption_init(&g_synaption);
+    conscience_init(&g_conscience);
+    neuralfs_init(&g_neuralfs);
+    ghost_init(&g_ghost);
+    immunion_init(&g_immunion);
+    dreamion_init(&g_dreamion);
+    symbion_init(&g_symbion);
+    collectivion_init(&g_collectivion);
+    metabion_init(&g_metabion);
+    metabion_set_mode(&g_metabion, (MetabionMode)METABION_DEFAULT_METABION_MODE);
+    cellion_init(&g_cellion);
+    morphion_init(&g_morphion);
+    pheromion_init(&g_pheromion);
     compatibilion_set_platform(&g_compatibilion, COMPAT_PLAT_UEFI | COMPAT_PLAT_FAT32);
 
     // Initialize DjibMark tracing system
@@ -9925,7 +10384,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     Print(L"/_____/_/  |_/_/ |_/_____/_/  /_/_____/ /_/ /_/  |_/_____/\r\n\r\n");
     Print(L"LLM Baremetal UEFI - LLAMA2 Chat REPL\r\n");
     Print(L"--------------------------------------------------------------------------\r\n");
-    Print(L"Tips: /help | /logo | /compat_status | /calib_status | /orch_status\r\n\r\n");
+    Print(L"Tips: /help | /logo | /compat_status | /calib_status | /oo_status | /orch_status\r\n\r\n");
     
     if (!g_boot_verbose) {
         Print(L"Booting... (set boot_verbose=1 in repl.cfg for details; 2 for debug)\r\n\r\n");
@@ -9967,6 +10426,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     // Best-effort: read boot verbosity from repl.cfg now that the FS is ready.
     llmk_load_repl_cfg_boot_best_effort();
+
+    // Best-effort: allow repl.cfg to configure OO engines modes (stubs).
+    llmk_load_repl_cfg_oo_engines_best_effort();
 
     if (g_boot_logo) {
         llmk_print_logo();
@@ -10126,7 +10588,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         // prompt the user before auto-picking from the legacy candidate list.
         // This prevents e.g. stories110M.bin from bypassing the picker.
         if (g_cfg_model_picker != 0) {
-            LlmkModelEntry entries2[2];
+            LlmkModelEntry entries2[2]; // SAFE: model picker only needs top-2 candidates
             int n_models = llmk_collect_models(entries2, (int)(sizeof(entries2) / sizeof(entries2[0])));
             if (n_models >= 2) {
                 EFI_FILE_HANDLE f = NULL;
@@ -11237,19 +11699,19 @@ gguf_fallback_done:
     llmk_metrics_reset();
     
     // Sampling parameters
-    // Default sampling tuned for TinyStories (less looping, still creative).
-    float temperature = 0.85f;
-    float min_p = 0.05f;
-    float top_p = 0.95f;
-    int top_k = 80;
-    float repeat_penalty = 1.15f;
-    int no_repeat_ngram = 4;
-    int max_gen_tokens = 160;
-    int stats_enabled = 1;
+    // Defaults come from the Phase 5 metabolism profile (metabion_profile.h).
+    float temperature = METABION_DEFAULT_TEMPERATURE;
+    float min_p = METABION_DEFAULT_MIN_P;
+    float top_p = METABION_DEFAULT_TOP_P;
+    int top_k = METABION_DEFAULT_TOP_K;
+    float repeat_penalty = METABION_DEFAULT_REPEAT_PENALTY;
+    int no_repeat_ngram = METABION_DEFAULT_NO_REPEAT_NGRAM;
+    int max_gen_tokens = METABION_DEFAULT_MAX_GEN_TOKENS;
+    int stats_enabled = METABION_DEFAULT_STATS_ENABLED;
     // Turn-based chat defaults: stop when the model starts the next user prompt.
     // Double-newline stopping is useful for TinyStories prose, but is too aggressive for chat.
-    int stop_on_you = 1;
-    int stop_on_double_nl = 0;
+    int stop_on_you = METABION_DEFAULT_STOP_ON_YOU;
+    int stop_on_double_nl = METABION_DEFAULT_STOP_ON_DOUBLE_NL;
 
     // Optional config: repl.cfg (key=value). Best-effort; ignored if missing.
     llmk_load_repl_cfg_best_effort(
@@ -11847,7 +12309,7 @@ snap_autoload_done:
             }
 
             char case_id[64];
-            char category[48];
+            char category[48]; // SAFE: small fixed category label parsed with bounds check
             int max_new = 0;
 
             int p = 0;
@@ -12154,7 +12616,7 @@ snap_autoload_done:
                     continue;
                 }
 
-                char name[32];
+                char name[32]; // SAFE: small preset name token parsed with bounds check
                 int n = 0;
                 while (prompt[i] && prompt[i] != ' ' && n + 1 < (int)sizeof(name)) {
                     name[n++] = prompt[i++];
@@ -12268,7 +12730,7 @@ snap_autoload_done:
                     continue;
                 }
 
-                char name[32];
+                char name[32]; // SAFE: small preset name token parsed with bounds check
                 int n = 0;
                 while (prompt[i] && prompt[i] != ' ' && n + 1 < (int)sizeof(name)) {
                     name[n++] = prompt[i++];
@@ -12411,7 +12873,7 @@ snap_autoload_done:
                     while (*p == ' ' || *p == '\t') p++;
                     if (*p == 0) break;
 
-                    char tok[24];
+                    char tok[24]; // SAFE: short option token parsed with bounds check
                     int tp = 0;
                     while (*p && *p != ' ' && *p != '\t' && tp + 1 < (int)sizeof(tok)) tok[tp++] = *p++;
                     tok[tp] = 0;
@@ -13080,13 +13542,13 @@ snap_autoload_done:
                     llmk_file_write_u16(f, L"\"");
                     {
                         // diopion_mode_name_ascii returns ASCII; print it char-by-char into UTF-16 file.
-                        CHAR16 m[32];
+                        CHAR16 m[32]; // SAFE: small fixed string buffer for mode name
                         ascii_to_char16(m, diopion_mode_name_ascii(g_diopion.mode), (int)(sizeof(m) / sizeof(m[0])));
                         llmk_file_write_u16(f, m);
                     }
                     llmk_file_write_u16(f, L"\" profile=\"");
                     {
-                        CHAR16 p[32];
+                        CHAR16 p[32]; // SAFE: small fixed string buffer for profile name
                         ascii_to_char16(p, diopion_profile_name_ascii(g_diopion.profile), (int)(sizeof(p) / sizeof(p[0])));
                         llmk_file_write_u16(f, p);
                     }
@@ -13627,6 +14089,22 @@ snap_autoload_done:
                 Print(L"\r\nOK: CPU probed (flags=0x%x)\r\n\r\n", (unsigned)g_compatibilion.caps.cpu_flags);
                 continue;
 
+            } else if (my_strncmp(prompt, "/oo_status", 10) == 0) {
+                Print(L"\r\n[OO Engines]\r\n");
+                Print(L"  evolvion   %s need=%d jit=%d\r\n", evolvion_mode_name_ascii(g_evolvion.mode), (int)g_evolvion.needs_recorded, (int)g_evolvion.jit_successes);
+                Print(L"  synaption  %s blocks=%d\r\n", synaption_mode_name_ascii(g_synaption.mode), (int)g_synaption.blocks_tracked);
+                Print(L"  conscience %s samples=%d\r\n", conscience_mode_name_ascii(g_conscience.mode), (int)g_conscience.samples_taken);
+                Print(L"  neuralfs   %s idx=%d qry=%d\r\n", neuralfs_mode_name_ascii(g_neuralfs.mode), (int)g_neuralfs.blobs_indexed, (int)g_neuralfs.queries_done);
+                Print(L"  ghost      %s sent=%d recv=%d\r\n", ghost_mode_name_ascii(g_ghost.mode), (int)g_ghost.tokens_sent, (int)g_ghost.tokens_recv);
+                Print(L"  immunion   %s rec=%d react=%d\r\n", immunion_mode_name_ascii(g_immunion.mode), (int)g_immunion.patterns_recorded, (int)g_immunion.reactions_triggered);
+                Print(L"  dreamion   %s cycles=%lu tasks=%d\r\n", dreamion_mode_name_ascii(g_dreamion.mode), (unsigned long)g_dreamion.cycles_in_dream, (int)g_dreamion.tasks_completed);
+                Print(L"  symbion    %s samples=%d\r\n", symbion_mode_name_ascii(g_symbion.mode), (int)g_symbion.samples_taken);
+                Print(L"  collectivion %s bcast=%d poll=%d\r\n", collectivion_mode_name_ascii(g_collectivion.mode), (int)g_collectivion.broadcasts_sent, (int)g_collectivion.broadcasts_recv);
+                Print(L"  metabion   %s tok_s=%lu samples=%d\r\n", metabion_mode_name_ascii(g_metabion.mode), (unsigned long)g_metabion.last.tokens_per_sec, (int)g_metabion.samples_count);
+                Print(L"  morphion   %s\r\n", morphion_mode_name_ascii(g_morphion.mode));
+                Print(L"  pheromion  %s top_path=%u\r\n\r\n", pheromion_mode_name_ascii(g_pheromion.mode), (unsigned)pheromion_top_path(&g_pheromion));
+                continue;
+
             } else if (my_strncmp(prompt, "/gop", 4) == 0) {
                 if (!g_gop_fb32) {
                     Print(L"\r\n  GOP: not available\r\n\r\n");
@@ -13982,6 +14460,109 @@ snap_autoload_done:
                 Print(L"\r\n");
                 llmk_fs_cat_best_effort(path, 256U * 1024U);
                 Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/wasm_info", 10) == 0) {
+                const char *p = prompt + 10;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == 0) {
+                    Print(L"\r\nUsage: /wasm_info <file.wasm>\r\n\r\n");
+                    continue;
+                }
+                CHAR16 path[160];
+                ascii_to_char16(path, p, (int)(sizeof(path) / sizeof(path[0])));
+
+                void *wasm_buf = NULL;
+                UINTN wasm_len = 0;
+                EFI_STATUS st = llmk_read_entire_file_best_effort(path, &wasm_buf, &wasm_len);
+                if (EFI_ERROR(st) || !wasm_buf || wasm_len == 0) {
+                    if (wasm_buf) uefi_call_wrapper(BS->FreePool, 1, wasm_buf);
+                    Print(L"\r\nERROR: read failed: %r\r\n\r\n", st);
+                    continue;
+                }
+
+                const uint8_t *dna = NULL;
+                size_t dna_len = 0;
+                int rc = cellion_wasm_find_custom_section(&g_cellion, (const uint8_t *)wasm_buf, (size_t)wasm_len, "oo.dna", &dna, &dna_len);
+
+                Print(L"\r\n[wasm] file=%s bytes=%lu\r\n", path, (unsigned long)wasm_len);
+                if (rc == CELLION_OK && dna && dna_len) {
+                    Print(L"[wasm] custom section oo.dna: %lu bytes\r\n", (unsigned long)dna_len);
+                    UINTN preview = (UINTN)dna_len;
+                    if (preview > 256) preview = 256;
+                    Print(L"[wasm] preview (first %lu bytes):\r\n", (unsigned long)preview);
+                    for (UINTN i = 0; i < preview; i++) {
+                        char c = (char)dna[i];
+                        if (c == '\r') continue;
+                        if (c == 0) break;
+                        if (c == '\n') {
+                            Print(L"\r\n");
+                        } else if (c >= 32 && c <= 126) {
+                            CHAR16 w[2]; // SAFE: single UTF-16 char + NUL
+                            w[0] = (CHAR16)c;
+                            w[1] = 0; // SAFE: fixed-size local buffer
+                            Print(L"%s", w);
+                        }
+                    }
+                    Print(L"\r\n");
+                } else if (rc == CELLION_ERR_NOT_FOUND) {
+                    Print(L"[wasm] custom section oo.dna: not found\r\n");
+                } else {
+                    Print(L"[wasm] parse error (rc=%d)\r\n", rc);
+                }
+
+                uefi_call_wrapper(BS->FreePool, 1, wasm_buf);
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/wasm_apply", 10) == 0) {
+                const char *p = prompt + 10;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == 0) {
+                    Print(L"\r\nUsage: /wasm_apply <file.wasm>\r\n");
+                    Print(L"Notes: applies custom section name 'oo.dna' with ASCII key=value lines\r\n\r\n");
+                    continue;
+                }
+                CHAR16 path[160];
+                ascii_to_char16(path, p, (int)(sizeof(path) / sizeof(path[0])));
+
+                void *wasm_buf = NULL;
+                UINTN wasm_len = 0;
+                EFI_STATUS st = llmk_read_entire_file_best_effort(path, &wasm_buf, &wasm_len);
+                if (EFI_ERROR(st) || !wasm_buf || wasm_len == 0) {
+                    if (wasm_buf) uefi_call_wrapper(BS->FreePool, 1, wasm_buf);
+                    Print(L"\r\nERROR: read failed: %r\r\n\r\n", st);
+                    continue;
+                }
+
+                const uint8_t *dna = NULL;
+                size_t dna_len = 0;
+                int rc = cellion_wasm_find_custom_section(&g_cellion, (const uint8_t *)wasm_buf, (size_t)wasm_len, "oo.dna", &dna, &dna_len);
+                Print(L"\r\n[wasm] apply from %s\r\n", path);
+                if (rc == CELLION_OK && dna && dna_len) {
+                    llmk_wasm_apply_oo_dna_kv_best_effort(
+                        dna,
+                        dna_len,
+                        &temperature,
+                        &min_p,
+                        &top_p,
+                        &top_k,
+                        &repeat_penalty,
+                        &no_repeat_ngram,
+                        &max_gen_tokens,
+                        &stats_enabled,
+                        &stop_on_you,
+                        &stop_on_double_nl,
+                        &m18_base_temp_milli,
+                        &m18_base_top_p_milli,
+                        &m18_base_top_k,
+                        &m18_base_max_gen_tokens
+                    );
+                    Print(L"[wasm] done\r\n\r\n");
+                } else if (rc == CELLION_ERR_NOT_FOUND) {
+                    Print(L"\r\nERROR: oo.dna not found in module\r\n\r\n");
+                } else {
+                    Print(L"\r\nERROR: wasm parse failed (rc=%d)\r\n\r\n", rc);
+                }
+                uefi_call_wrapper(BS->FreePool, 1, wasm_buf);
                 continue;
             } else if (my_strncmp(prompt, "/fs_write", 9) == 0) {
                 const char *p = prompt + 9;
@@ -14446,10 +15027,27 @@ snap_autoload_done:
                     Print(L"\r\nERROR: cannot create entity (full?)\r\n\r\n");
                 } else {
                     Print(L"\r\nOK: created entity id=%d\r\n\r\n", id);
+                    llmk_oo_journal_cmd_best_effort("oo_new");
                 }
                 continue;
             } else if (my_strncmp(prompt, "/oo_list", 8) == 0) {
                 llmk_oo_list_print();
+                llmk_oo_journal_cmd_best_effort("oo_list");
+                continue;
+            } else if (my_strncmp(prompt, "/oo_status", 10) == 0) {
+                // Print effective OO config (best-effort)
+                int consult_enabled = g_cfg_oo_llm_consult;
+                if (consult_enabled < 0) consult_enabled = g_cfg_oo_enable ? 1 : 0;
+                int multi_enabled = g_cfg_oo_multi_actions;
+                if (multi_enabled < 0) multi_enabled = (consult_enabled > 0) ? 1 : 0;
+
+                Print(L"\r\nOO status:\r\n");
+                Print(L"  oo_enable=%d autoload=%d autosave_every=%d\r\n", g_cfg_oo_enable, oo_autoload, oo_autosave_every);
+                Print(L"  state_file=%s\r\n", oo_state_file);
+                Print(L"  llm_consult=%d multi_actions=%d\r\n", consult_enabled, multi_enabled);
+                Print(L"  conf_gate=%d conf_threshold=%d\r\n", g_cfg_oo_conf_gate, g_cfg_oo_conf_threshold);
+                Print(L"\r\nHint: /oo_list, /oo_show <id>, /oo_agenda <id>, /oo_save\r\n\r\n");
+                llmk_oo_journal_cmd_best_effort("oo_status");
                 continue;
             } else if (my_strncmp(prompt, "/oo_kill", 8) == 0) {
                 int i = 8;
@@ -14468,6 +15066,7 @@ snap_autoload_done:
                     continue;
                 }
                 Print(L"\r\nOK: killed entity id=%d\r\n\r\n", id);
+                llmk_oo_journal_cmd_best_effort("oo_kill");
                 continue;
             } else if (my_strncmp(prompt, "/oo_step", 8) == 0) {
                 int i = 8;
@@ -14486,6 +15085,7 @@ snap_autoload_done:
                     continue;
                 }
                 Print(L"\r\nOK: stepped entity id=%d\r\n\r\n", id);
+                llmk_oo_journal_cmd_best_effort("oo_step");
                 continue;
             } else if (my_strncmp(prompt, "/oo_run", 7) == 0) {
                 int steps = 1;
@@ -14501,6 +15101,7 @@ snap_autoload_done:
                 int ran = llmk_oo_run(steps);
 
                 Print(L"\r\nOK: ran %d step(s)\r\n\r\n", ran);
+                llmk_oo_journal_cmd_best_effort("oo_run");
                 continue;
             } else if (my_strncmp(prompt, "/oo_note", 8) == 0) {
                 // Usage: /oo_note <id> <text...>
@@ -14522,6 +15123,7 @@ snap_autoload_done:
                     continue;
                 }
                 Print(L"\r\nOK: noted entity id=%d\r\n\r\n", id);
+                llmk_oo_journal_cmd_best_effort("oo_note");
                 continue;
             } else if (my_strncmp(prompt, "/oo_show", 8) == 0) {
                 int i = 8;
@@ -14534,6 +15136,7 @@ snap_autoload_done:
                     Print(L"\r\nERROR: unknown entity id=%d\r\n\r\n", id);
                     continue;
                 }
+                llmk_oo_journal_cmd_best_effort("oo_show");
                 continue;
             } else if (my_strncmp(prompt, "/oo_digest", 10) == 0) {
                 int i = 10;
@@ -14547,6 +15150,7 @@ snap_autoload_done:
                     continue;
                 }
                 Print(L"\r\nOK: digested entity id=%d\r\n\r\n", id);
+                llmk_oo_journal_cmd_best_effort("oo_digest");
                 continue;
             } else if (my_strncmp(prompt, "/oo_plan", 8) == 0) {
                 // Usage: /oo_plan <id> [prio] <action...>  (optionally: a1; a2; a3)
@@ -14621,6 +15225,7 @@ snap_autoload_done:
                 } else {
                     Print(L"\r\nOK: added %d action(s) to id=%d\r\n\r\n", added, id);
                     llmk_oo_digest(id);
+                    llmk_oo_journal_cmd_best_effort("oo_plan");
                 }
                 continue;
             } else if (my_strncmp(prompt, "/oo_agenda", 10) == 0) {
@@ -14638,6 +15243,7 @@ snap_autoload_done:
                 Print(L"\r\nOO agenda for id=%d:\r\n", id);
                 llmk_oo_agenda_print(id);
                 Print(L"\r\n");
+                llmk_oo_journal_cmd_best_effort("oo_agenda");
                 continue;
             } else if (my_strncmp(prompt, "/oo_next", 8) == 0) {
                 int i = 8;
@@ -14658,6 +15264,7 @@ snap_autoload_done:
                 ascii_to_char16(a16, act, (int)(sizeof(a16) / sizeof(a16[0])));
                 Print(L"\r\nOK: next action for id=%d (#%d, marked doing):\r\n  %s\r\n\r\n", id, k, a16);
                 llmk_oo_digest(id);
+                llmk_oo_journal_cmd_best_effort("oo_next");
                 continue;
             } else if (my_strncmp(prompt, "/oo_done", 8) == 0) {
                 // Usage: /oo_done <id> <k>
@@ -14695,6 +15302,7 @@ snap_autoload_done:
                 }
                 Print(L"\r\nOK: marked done id=%d #%d\r\n\r\n", id, k);
                 llmk_oo_digest(id);
+                llmk_oo_journal_cmd_best_effort("oo_done");
                 continue;
             } else if (my_strncmp(prompt, "/oo_prio", 8) == 0) {
                 // Usage: /oo_prio <id> <k> <prio>
@@ -14729,6 +15337,7 @@ snap_autoload_done:
                 }
                 Print(L"\r\nOK: set prio id=%d #%d -> %d\r\n\r\n", id, k, pr);
                 llmk_oo_digest(id);
+                llmk_oo_journal_cmd_best_effort("oo_prio");
                 continue;
             } else if (my_strncmp(prompt, "/oo_edit", 7) == 0) {
                 // Usage: /oo_edit <id> <k> <new text...>
@@ -14753,6 +15362,7 @@ snap_autoload_done:
                 }
                 Print(L"\r\nOK: edited id=%d #%d\r\n\r\n", id, k);
                 llmk_oo_digest(id);
+                llmk_oo_journal_cmd_best_effort("oo_edit");
                 continue;
             } else if (my_strncmp(prompt, "/oo_save", 8) == 0) {
                 const char *name = prompt + 8;
@@ -14798,6 +15408,7 @@ snap_autoload_done:
                     Print(L"\r\nERROR: failed to write %s: %r\r\n\r\n", out_name, st);
                 } else {
                     Print(L"\r\nOK: wrote %s (%d bytes)\r\n\r\n", out_name, n);
+                    llmk_oo_journal_cmd_best_effort("oo_save");
                 }
                 continue;
             } else if (my_strncmp(prompt, "/oo_load", 8) == 0) {
@@ -14864,6 +15475,7 @@ snap_autoload_done:
                         Print(L"\r\nERROR: parse failed\r\n\r\n");
                     } else {
                         Print(L"\r\nOK: loaded %d entity(s) from %s\r\n\r\n", imported, bak);
+                        llmk_oo_journal_cmd_best_effort("oo_load");
                     }
                     continue;
                 }
@@ -14883,10 +15495,12 @@ snap_autoload_done:
                             Print(L"\r\nERROR: parse failed\r\n\r\n");
                         } else {
                             Print(L"\r\nOK: loaded %d entity(s) from %s\r\n\r\n", imported, bak);
+                            llmk_oo_journal_cmd_best_effort("oo_load");
                         }
                     }
                 } else {
                     Print(L"\r\nOK: loaded %d entity(s) from %s\r\n\r\n", imported, in_name);
+                    llmk_oo_journal_cmd_best_effort("oo_load");
                 }
                 continue;
             } else if (my_strncmp(prompt, "/oo_think", 9) == 0) {
@@ -14924,6 +15538,7 @@ snap_autoload_done:
                 }
 
                 Print(L"\r\n[oo] thinking...\r\n");
+                llmk_oo_journal_cmd_best_effort("oo_think");
 
                 // Configure capture mode for model output.
                 g_capture_mode = 1;
@@ -15019,6 +15634,8 @@ snap_autoload_done:
                     Print(L"[oo_auto] prompt: %s\r\n\r\n", p16);
                 }
 
+                llmk_oo_journal_cmd_best_effort("oo_auto");
+
                 // The actual cycles will run automatically at the top of the loop.
                 continue;
             } else if (my_strncmp(prompt, "/oo_exec", 8) == 0) {
@@ -15110,6 +15727,7 @@ snap_autoload_done:
                     llmk_print_ascii(g_oo_exec_hint);
                     Print(L"\r\n\r\n");
                 }
+                llmk_oo_journal_cmd_best_effort("oo_exec");
                 continue;
             } else if (my_strncmp(prompt, "/oo_exec_stop", 13) == 0) {
                 if (g_oo_exec_active) {
@@ -15123,6 +15741,7 @@ snap_autoload_done:
                 g_oo_exec_total = 0;
                 g_oo_exec_plan_if_empty = 0;
                 g_oo_exec_hint[0] = 0;
+                llmk_oo_journal_cmd_best_effort("oo_exec_stop");
                 continue;
             } else if (my_strncmp(prompt, "/oo_auto_stop", 13) == 0) {
                 if (g_oo_auto_active) {
@@ -15135,6 +15754,7 @@ snap_autoload_done:
                 g_oo_auto_remaining = 0;
                 g_oo_auto_total = 0;
                 g_oo_auto_user[0] = 0;
+                llmk_oo_journal_cmd_best_effort("oo_auto_stop");
                 continue;
             } else if (my_strncmp(prompt, "/oo_consult_mock", 15) == 0) {
                 // OO M5 (test/CI): deterministic consult without LLM generation.
@@ -15183,6 +15803,7 @@ snap_autoload_done:
                 sugg[sp] = 0;
 
                 Print(L"\r\n[oo_consult_mock] using mock suggestion\r\n\r\n");
+                llmk_oo_journal_cmd_best_effort("oo_consult_mock");
                 llmk_oo_consult_process_suggestion(ram_mb, mode, boots, config.seq_len, config.seq_len, sugg);
                 Print(L"\r\n");
                 continue;
@@ -15211,6 +15832,7 @@ snap_autoload_done:
                 }
 
                 Print(L"\r\n[oo_consult] Consulting LLM for system status adaptation...\r\n\r\n");
+                llmk_oo_journal_cmd_best_effort("oo_consult");
                 llmk_oo_consult_execute(&config, &weights, &state, &tokenizer,
                                        temperature, min_p, top_p, top_k);
                 Print(L"\r\n");
@@ -15224,6 +15846,7 @@ snap_autoload_done:
                 Print(L"\r\n[oo_log] OOCONSULT.LOG tail:\r\n");
                 llmk_oo_print_ooconsult_tail_best_effort(10);
                 Print(L"\r\n");
+                llmk_oo_journal_cmd_best_effort("oo_log");
                 continue;
             } else if (my_strncmp(prompt, "/oo_jour", 8) == 0 || my_strncmp(prompt, "/oo_journal", 11) == 0) {
                 if (!g_cfg_oo_enable) {
@@ -15234,6 +15857,7 @@ snap_autoload_done:
                 Print(L"\r\n[oo_jour] OOJOUR.LOG tail:\r\n");
                 llmk_oo_print_oojour_tail_best_effort(10);
                 Print(L"\r\n");
+                llmk_oo_journal_cmd_best_effort("oo_jour");
                 continue;
             } else if (my_strncmp(prompt, "/autorun_stop", 13) == 0) {
                 if (g_autorun_active) {
@@ -15805,7 +16429,7 @@ snap_autoload_done:
                     for (int b = 0; b < nb; b++) {
                         // d = 1.0f in fp16
                         p[0] = 0x00;
-                        p[1] = 0x3C;
+                        p[1] = 0x3C; // SAFE: row points to at least 34 bytes (block layout)
                         INT8 *qs = (INT8 *)(p + 2);
                         for (int k = 0; k < 32; k++) {
                             int v = (r * 31 + b * 17 + k * 7) & 255;
@@ -15879,7 +16503,7 @@ snap_autoload_done:
                     continue;
                 }
 
-                char name[8];
+                char name[8]; // SAFE: short matrix name token parsed with bounds check
                 name[0] = 'w'; name[1] = 'q'; name[2] = 0;
                 int layer = 0;
                 int reps = 20;
@@ -16169,6 +16793,9 @@ snap_autoload_done:
         // M19.1: capture wall-clock start for benchmark cases.
         llmk_bench_on_turn_start();
 
+        ConscienceSample cs = {0};
+        conscience_sample(&g_conscience, &cs);
+
         UINT64 m18_decode_cycles_start = g_metrics.total_decode_cycles;
         UINT32 m18_decode_tokens_start = g_metrics.total_decode_tokens;
         int m181_guard_trip = 0;
@@ -16188,6 +16815,7 @@ snap_autoload_done:
                 transformer_forward(&state, &weights, &config, prompt_tokens[i], pos);
                 BOOLEAN ok = llmk_sentinel_phase_end(&g_sentinel);
                 if (g_sentinel.tripped) {
+                    immunion_record(&g_immunion, IMMUNION_THREAT_OOBCheck, (uint32_t)g_sentinel.last_error, 80);
                     Print(L"\r\n[llmk] prefill stopped (fail-safe) at i=%d\r\n", i);
                     llmk_print_ctx(&config, model_filename, kv_pos, temperature, min_p, top_p, top_k, no_repeat_ngram, repeat_penalty, max_gen_tokens);
                     llmk_zones_print(&g_zones);
@@ -16453,6 +17081,7 @@ snap_autoload_done:
                 transformer_forward(&state, &weights, &config, token, pos);
                 BOOLEAN ok = llmk_sentinel_phase_end(&g_sentinel);
                 if (g_sentinel.tripped) {
+                    immunion_record(&g_immunion, IMMUNION_THREAT_OOBCheck, (uint32_t)g_sentinel.last_error, 80);
                     Print(L"\r\n[llmk] decode stopped (fail-safe) at step=%d pos=%d\r\n", step, pos);
                     if (!stop_reason) {
                         stop_reason = L"sentinel_decode";
@@ -16650,6 +17279,13 @@ stats_done:
             UINT32 m18_decode_tokens_delta = (g_metrics.total_decode_tokens >= m18_decode_tokens_start)
                                           ? (g_metrics.total_decode_tokens - m18_decode_tokens_start)
                                           : 0U;
+
+            if (!g_capture_mode && !draw_mode && m18_decode_cycles_delta > 0 && tsc_per_sec > 0) {
+                MetabionSample ms = {0};
+                ms.tokens_per_sec = ((uint64_t)m18_decode_tokens_delta * tsc_per_sec) / m18_decode_cycles_delta;
+                ms.cache_hit_milli = 0;
+                metabion_feed(&g_metabion, &ms);
+            }
 
             llmk_autotune_apply_after_turn(
                 m18_decode_cycles_delta,
