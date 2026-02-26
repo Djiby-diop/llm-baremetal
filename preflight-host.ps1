@@ -1,5 +1,10 @@
-[CmdletBinding()]
-param()
+[CmdletBinding(PositionalBinding = $false)]
+param(
+    # Best-effort: include OS-G checks when available (non-blocking by default).
+    [switch]$IncludeOsg,
+    # When set, OS-G check failures become blocking.
+    [switch]$OsgStrict
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -150,6 +155,35 @@ $ovmfFound = $ovmfCandidates | Where-Object { Test-Path $_ } | Select-Object -Fi
 $ovmfDetail = if ($ovmfFound) { $ovmfFound } else { 'not found in common locations' }
 Write-Check -Name 'OVMF firmware' -Ok ([bool]$ovmfFound) -Detail $ovmfDetail
 if (-not $ovmfFound) { $allOk = $false }
+
+# Optional OS-G checks (non-blocking unless -OsgStrict)
+$osgRoot = Join-Path $PSScriptRoot 'OS-G (Operating System Genesis)'
+if ($IncludeOsg -or (Test-Path -LiteralPath $osgRoot)) {
+    $cargoCmd = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $cargoCmd) {
+        $detail = 'cargo not found (install Rust toolchain to run OS-G checks)'
+        if ($OsgStrict) {
+            Write-Check -Name 'OS-G (cargo)' -Ok $false -Detail $detail
+            $allOk = $false
+        } else {
+            Write-Check -Name 'OS-G (cargo)' -Ok $true -Detail $detail -Level warn
+        }
+    } else {
+        Write-Check -Name 'OS-G (cargo)' -Ok $true -Detail $cargoCmd.Source
+    }
+
+    if (Test-Path -LiteralPath $osgRoot) {
+        Write-Check -Name 'OS-G folder' -Ok $true -Detail $osgRoot
+    } else {
+        $detail = "not found: $osgRoot"
+        if ($OsgStrict) {
+            Write-Check -Name 'OS-G folder' -Ok $false -Detail $detail
+            $allOk = $false
+        } else {
+            Write-Check -Name 'OS-G folder' -Ok $true -Detail $detail -Level warn
+        }
+    }
+}
 
 if ($wslExe -and $hasWslDistro -and $wslDistroName) {
     try {

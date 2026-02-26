@@ -70,6 +70,18 @@ GITHUB_UPLOAD.md
 serve_model.py
 test-*.ps1
 
+# Local OO/OS-G notes and scratch (untracked by default)
+.ops/
+NEURAL_PROTECTOR_*.md
+PHASE_*.md
+QUICKREF_PHASE_*.md
+OO_DNA*
+oo_genome.json
+oo_cortex_bridge.json
+reliability.ps1
+test_ffi_integration.c
+test_prebuild.c
+
 
 
 # Local notes (keep repo clean)

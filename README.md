@@ -131,6 +131,12 @@ Useful REPL commands:
 ./run.ps1 -Preflight -Gui
 ```
 
+Validate everything (recommended after pulling updates):
+
+```powershell
+./validate.ps1
+```
+
 ## OS-G (Operating System Genesis) — pillar
 
 OS-G is included as a self-contained kernel-governor prototype (Memory Warden + D+ pipeline) under:
