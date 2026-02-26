@@ -24,6 +24,9 @@ release-artifacts/
 *.safetensors
 *.gguf
 
+# Compiled OO policy blob (generated locally)
+OOPOLICY.BIN
+
 # Tokenizer is required even for NO_MODEL images
 !tokenizer.bin
 

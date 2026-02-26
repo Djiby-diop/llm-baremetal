@@ -305,6 +305,46 @@ fi
 mcopy tokenizer.bin z:/
 echo "  [OK] Copied tokenizer.bin"
 
+# Optional OO policy (OS-G D+ source of truth)
+# - If policy.dplus exists, copy it to FAT root.
+# - If policy.dplus exists and Rust/cargo is available, attempt to compile/update
+#   OOPOLICY.BIN via OS-G host tool (best-effort).
+# - If OOPOLICY.BIN exists, copy it to FAT root.
+policy_src="$(find_src 'policy.dplus' 2>/dev/null || true)"
+if [ -n "$policy_src" ]; then
+    mcopy "$policy_src" z:/policy.dplus
+    echo "  [OK] Copied policy.dplus"
+fi
+
+# Compile/update OOPOLICY.BIN only when it is missing or older than policy.dplus.
+if [ -n "$policy_src" ] && command -v cargo >/dev/null 2>&1 && [ -d "OS-G (Operating System Genesis)" ]; then
+    if [ ! -f "OOPOLICY.BIN" ] || [ "$policy_src" -nt "OOPOLICY.BIN" ]; then
+        tmp_pol="$(mktemp)"
+        rm -f "$tmp_pol"
+        # Resolve absolute path for the input policy (cargo runs in a different cwd)
+        policy_abs="$(cd "$(dirname "$policy_src")" && pwd)/$(basename "$policy_src")"
+        (
+            cd "OS-G (Operating System Genesis)"
+            cargo run --quiet --features std --bin dplus_compile_oo -- "$policy_abs" "$tmp_pol"
+        ) >/dev/null 2>&1 || true
+
+        if [ -f "$tmp_pol" ]; then
+            mv "$tmp_pol" "OOPOLICY.BIN" 2>/dev/null || {
+                cp "$tmp_pol" "OOPOLICY.BIN" || true
+                rm -f "$tmp_pol" || true
+            }
+            echo "  [OK] Built OOPOLICY.BIN"
+        else
+            echo "  [WARN] policy.dplus present but OOPOLICY.BIN not generated (cargo/toolchain missing or compile failed)"
+        fi
+    fi
+fi
+
+if [ -f "OOPOLICY.BIN" ]; then
+    mcopy "OOPOLICY.BIN" z:/OOPOLICY.BIN
+    echo "  [OK] Copied OOPOLICY.BIN"
+fi
+
 # REPL config (key=value).
 # If we're bundling a primary model, write a repl.cfg that points at it so the image boots correctly.
 # This avoids stale repl.cfg files referencing a different default model.
