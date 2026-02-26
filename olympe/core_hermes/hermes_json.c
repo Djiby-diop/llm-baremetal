@@ -165,13 +165,98 @@ hermes_status_t hermes_json_encode_msg(
 }
 
 static const char* hermes_find_key(const char* json, const char* end, const char* key) {
-    // Search for "key" token.
+    // Search for "key" token, but only when it appears as a JSON object key
+    // (i.e., a string immediately after "{" or "," and before a ":").
+    if (!json || !end || !key) return NULL;
+
     size_t klen = strlen(key);
-    for (const char* p = json; p + klen + 2 < end; p++) {
-        if (*p != '"') continue;
-        if (p + 1 + klen >= end) return NULL;
-        if (memcmp(p + 1, key, klen) == 0 && *(p + 1 + klen) == '"') {
-            return p + 1 + klen + 1;
+    if (klen == 0) return NULL;
+
+    int in_string = 0;
+    int escaped = 0;
+    int object_depth = 0;
+    char last_structural = 0;
+
+    const char* p = json;
+    while (p < end) {
+        char c = *p;
+
+        if (in_string) {
+            if (escaped) {
+                // Current character is escaped; consume it without special meaning.
+                escaped = 0;
+            } else if (c == '\\') {
+                // Start of an escape sequence.
+                escaped = 1;
+            } else if (c == '"') {
+                // End of string literal.
+                in_string = 0;
+            }
+            p++;
+            continue;
+        }
+
+        switch (c) {
+        case '"':
+            // Potential start of a key name: only valid directly inside an object
+            // and after "{" or "," (i.e. where a key is allowed by JSON grammar).
+            if (object_depth > 0 && (last_structural == '{' || last_structural == ',')) {
+                const char* key_start = p + 1;
+                const char* key_end = key_start + klen;
+                if (key_end < end && memcmp(key_start, key, klen) == 0 && *key_end == '"') {
+                    // Found the string "key". Now ensure it's followed (after optional
+                    // whitespace) by a colon, as required for an object member.
+                    const char* q = key_end + 1;
+                    while (q < end && hermes_is_space(*q)) {
+                        q++;
+                    }
+                    if (q < end && *q == ':') {
+                        // To preserve existing behaviour, return a pointer just after the
+                        // closing quote of the key. Callers then skip whitespace and
+                        // expect to see the ':' character.
+                        return key_end + 1;
+                    }
+                }
+            }
+            in_string = 1;
+            p++;
+            break;
+
+        case '{':
+            object_depth++;
+            last_structural = '{';
+            p++;
+            break;
+
+        case '}':
+            if (object_depth > 0) {
+                object_depth--;
+            }
+            last_structural = '}';
+            p++;
+            break;
+
+        case ',':
+            last_structural = ',';
+            p++;
+            break;
+
+        case '[':
+        case ']':
+        case ':':
+            last_structural = c;
+            p++;
+            break;
+
+        default:
+            if (!hermes_is_space(c)) {
+                // Any other non-whitespace character outside of strings is not a
+                // structural delimiter we care about for key detection, but we
+                // record that we're no longer immediately after "{" or ",".
+                last_structural = c;
+            }
+            p++;
+            break;
         }
     }
     return NULL;
