@@ -2985,8 +2985,19 @@ static EFI_STATUS llmk_read_entire_file_best_effort(const CHAR16 *name, void **o
 // ============================================================================
 // OO POLICY GATE (optional)
 //
-// If a file named "oo-policy.dplus" exists on the FAT root, it can allow/deny
-// /oo* commands.
+// Preferred: compiled policy blob "OOPOLICY.BIN" (produced by OS-G host tool).
+// Fallback: a D+ policy file ("policy.dplus" or legacy "oo-policy.dplus") on FAT root,
+// which can allow/deny /oo* commands.
+//
+// Compiled blob format (fixed-size):
+//   - magic: "OOPL" (4 bytes)
+//   - version: 1 (1 byte)
+//   - allow_by_default: 0/1 (1 byte)
+//   - allow_count: u8 (1 byte)
+//   - deny_count: u8 (1 byte)
+//   - reserved: 8 bytes
+//   - allow table: 32 entries * 64 bytes (NUL-terminated strings)
+//   - deny  table: 32 entries * 64 bytes
 //
 // Supported formats (line-based; best-effort):
 //   mode=deny_by_default|allow_by_default
@@ -3099,6 +3110,88 @@ static void llmk_oo_policy_try_load_once(void) {
     g_oo_policy_allow_count = 0;
     g_oo_policy_deny_count = 0;
     g_oo_policy_loaded_name[0] = 0;
+
+    // Prefer compiled blob if present (Option A). Fail-closed if present but invalid.
+    {
+        void *bin = NULL;
+        UINTN bin_len = 0;
+        EFI_STATUS sb = llmk_read_entire_file_best_effort(L"OOPOLICY.BIN", &bin, &bin_len);
+        if (!EFI_ERROR(sb) && bin && bin_len) {
+            const UINTN header_len = 16;
+            const UINTN max_rules = 32;
+            const UINTN rule_cap = 64;
+            const UINTN min_len = header_len + (max_rules * rule_cap * 2);
+            const unsigned char *b = (const unsigned char *)bin;
+
+            int ok = 1;
+            if (bin_len < min_len) ok = 0;
+            if (ok) {
+                if (!(b[0] == 'O' && b[1] == 'O' && b[2] == 'P' && b[3] == 'L')) ok = 0;
+            }
+            if (ok) {
+                if (b[4] != 1) ok = 0;
+            }
+
+            llmk_oo_policy_store_lower_cap(g_oo_policy_loaded_name, (int)sizeof(g_oo_policy_loaded_name), "OOPOLICY.BIN");
+
+            if (!ok) {
+                // Active policy, deny-by-default, no allow rules => denies all /oo*.
+                g_oo_policy_allow_by_default = 0;
+                g_oo_policy_allow_count = 0;
+                g_oo_policy_deny_count = 0;
+                g_oo_policy_state = 1;
+                uefi_call_wrapper(BS->FreePool, 1, bin);
+                return;
+            }
+
+            g_oo_policy_allow_by_default = (b[5] ? 1 : 0); // SAFE: OOPOLICY.BIN header validated; bin_len checked against min_len
+            int allow_n = (int)b[6];
+            int deny_n = (int)b[7];
+            if (allow_n < 0) allow_n = 0;
+            if (deny_n < 0) deny_n = 0;
+            if (allow_n > (int)max_rules) allow_n = (int)max_rules;
+            if (deny_n > (int)max_rules) deny_n = (int)max_rules;
+
+            // Reset counts then append rules using the normal bounded helper.
+            g_oo_policy_allow_count = 0;
+            g_oo_policy_deny_count = 0;
+
+            const UINTN allow_off = header_len;
+            const UINTN deny_off = header_len + (max_rules * rule_cap);
+
+            for (int i = 0; i < allow_n; i++) {
+                const unsigned char *src = b + allow_off + (UINTN)i * rule_cap;
+                char tok[64]; // SAFE: fixed-size token; copied with bounds checks
+                int tn = 0;
+                while (tn + 1 < (int)sizeof(tok) && src[tn] != 0) {
+                    tok[tn] = llmk_oo_policy_tolower((char)src[tn]);
+                    tn++;
+                }
+                tok[tn] = 0;
+                if (llmk_oo_policy_startswith_ci(tok, "/oo")) {
+                    llmk_oo_policy_add_rule(1, tok);
+                }
+            }
+            for (int i = 0; i < deny_n; i++) {
+                const unsigned char *src = b + deny_off + (UINTN)i * rule_cap;
+                char tok[64]; // SAFE: fixed-size token; copied with bounds checks
+                int tn = 0;
+                while (tn + 1 < (int)sizeof(tok) && src[tn] != 0) {
+                    tok[tn] = llmk_oo_policy_tolower((char)src[tn]);
+                    tn++;
+                }
+                tok[tn] = 0;
+                if (llmk_oo_policy_startswith_ci(tok, "/oo")) {
+                    llmk_oo_policy_add_rule(0, tok);
+                }
+            }
+
+            g_oo_policy_state = 1;
+            uefi_call_wrapper(BS->FreePool, 1, bin);
+            return;
+        }
+        if (bin) uefi_call_wrapper(BS->FreePool, 1, bin);
+    }
 
     void *raw = NULL;
     UINTN raw_len = 0;

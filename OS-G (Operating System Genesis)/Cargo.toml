@@ -54,6 +54,11 @@ name = "dplus_merit"
 path = "src/bin/dplus_merit.rs"
 required-features = ["std"]
 
+[[bin]]
+name = "dplus_compile_oo"
+path = "src/bin/dplus_compile_oo.rs"
+required-features = ["std"]
+
 [profile.dev]
 panic = "abort"
 
