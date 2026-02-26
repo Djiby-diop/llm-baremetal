@@ -2982,6 +2982,267 @@ static EFI_STATUS llmk_read_entire_file_best_effort(const CHAR16 *name, void **o
     return EFI_SUCCESS;
 }
 
+// ============================================================================
+// OO POLICY GATE (optional)
+//
+// If a file named "oo-policy.dplus" exists on the FAT root, it can allow/deny
+// /oo* commands.
+//
+// Supported formats (line-based; best-effort):
+//   mode=deny_by_default|allow_by_default
+//   allow=/oo_new
+//   deny=/oo_exec
+//   @@ALLOW /oo_new
+//   @@DENY  /oo_exec
+//
+// Matching:
+//   - Entries are case-insensitive.
+//   - If an entry ends with '*', it is treated as a prefix match.
+//
+// Behavior:
+//   - If the file is missing or contains no actionable keys, policy is inactive.
+//   - If active and mode is omitted, defaults to deny_by_default.
+// ============================================================================
+
+static int g_oo_policy_state = 0; // 0=untried, 1=active, -1=inactive/missing
+static int g_oo_policy_allow_by_default = 0;
+static int g_oo_policy_allow_count = 0;
+static int g_oo_policy_deny_count = 0;
+static char g_oo_policy_allow[32][64]; // SAFE: bounded allow-list table (<=32 rules, each <=63 bytes + NUL)
+static char g_oo_policy_deny[32][64];  // SAFE: bounded deny-list table (<=32 rules, each <=63 bytes + NUL)
+
+static int llmk_oo_policy_is_space(char c) {
+    return (c == ' ' || c == '\t' || c == '\r' || c == '\n');
+}
+
+static char llmk_oo_policy_tolower(char c) {
+    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
+    return c;
+}
+
+static int llmk_oo_policy_startswith_ci(const char *s, const char *prefix) {
+    if (!s || !prefix) return 0;
+    while (*prefix) {
+        char a = llmk_oo_policy_tolower(*s);
+        char b = llmk_oo_policy_tolower(*prefix);
+        if (a != b) return 0;
+        s++;
+        prefix++;
+    }
+    return 1;
+}
+
+static void llmk_oo_policy_trim(char **s) {
+    if (!s || !*s) return;
+    char *p = *s;
+    while (llmk_oo_policy_is_space(*p)) p++;
+    *s = p;
+    char *end = p;
+    while (*end) end++;
+    while (end > p && llmk_oo_policy_is_space(end[-1])) end--;
+    *end = 0;
+}
+
+static void llmk_oo_policy_store_lower_cap(char *dst, int cap, const char *src) {
+    if (!dst || cap <= 0) return;
+    dst[0] = 0;
+    if (!src) return;
+    int n = 0;
+    while (src[n] && n + 1 < cap) {
+        dst[n] = llmk_oo_policy_tolower(src[n]);
+        n++;
+    }
+    dst[n] = 0;
+}
+
+static void llmk_oo_policy_add_rule(int is_allow, const char *val) {
+    if (!val || !val[0]) return;
+    if (is_allow) {
+        if (g_oo_policy_allow_count >= (int)(sizeof(g_oo_policy_allow) / sizeof(g_oo_policy_allow[0]))) return;
+        llmk_oo_policy_store_lower_cap(g_oo_policy_allow[g_oo_policy_allow_count], (int)sizeof(g_oo_policy_allow[0]), val);
+        if (g_oo_policy_allow[g_oo_policy_allow_count][0]) g_oo_policy_allow_count++;
+    } else {
+        if (g_oo_policy_deny_count >= (int)(sizeof(g_oo_policy_deny) / sizeof(g_oo_policy_deny[0]))) return;
+        llmk_oo_policy_store_lower_cap(g_oo_policy_deny[g_oo_policy_deny_count], (int)sizeof(g_oo_policy_deny[0]), val);
+        if (g_oo_policy_deny[g_oo_policy_deny_count][0]) g_oo_policy_deny_count++;
+    }
+}
+
+static int llmk_oo_policy_match(const char *rule, const char *cmd) {
+    if (!rule || !cmd) return 0;
+    int rl = 0;
+    while (rule[rl]) rl++;
+    if (rl <= 0) return 0;
+    if (rule[rl - 1] == '*') {
+        // Prefix match
+        int pl = rl - 1;
+        for (int i = 0; i < pl; i++) {
+            if (cmd[i] == 0) return 0;
+            if (llmk_oo_policy_tolower(cmd[i]) != llmk_oo_policy_tolower(rule[i])) return 0;
+        }
+        return 1;
+    }
+    // Exact match
+    int i = 0;
+    while (rule[i] && cmd[i]) {
+        if (llmk_oo_policy_tolower(rule[i]) != llmk_oo_policy_tolower(cmd[i])) return 0;
+        i++;
+    }
+    return (rule[i] == 0 && cmd[i] == 0);
+}
+
+static void llmk_oo_policy_try_load_once(void) {
+    if (g_oo_policy_state != 0) return;
+    g_oo_policy_state = -1; // assume inactive unless proven otherwise
+    g_oo_policy_allow_by_default = 0;
+    g_oo_policy_allow_count = 0;
+    g_oo_policy_deny_count = 0;
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"oo-policy.dplus", &raw, &raw_len);
+    if (EFI_ERROR(st) || !raw || raw_len == 0) {
+        if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+        return;
+    }
+
+    // Copy to NUL-terminated buffer so we can split lines in-place.
+    char *txt = NULL;
+    EFI_STATUS s2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&txt);
+    if (EFI_ERROR(s2) || !txt) {
+        uefi_call_wrapper(BS->FreePool, 1, raw);
+        return;
+    }
+    for (UINTN i = 0; i < raw_len; i++) txt[i] = ((const char *)raw)[i];
+    txt[raw_len] = 0;
+    uefi_call_wrapper(BS->FreePool, 1, raw);
+
+    int mode_set = 0;
+
+    // Strip UTF-8 BOM if present.
+    if ((unsigned char)txt[0] == 0xEF && (unsigned char)txt[1] == 0xBB && (unsigned char)txt[2] == 0xBF) {
+        for (UINTN i = 0; i + 3 <= raw_len; i++) txt[i] = txt[i + 3];
+    }
+
+    char *p = txt;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        // Trim CR
+        for (char *c = line; *c; c++) {
+            if (*c == '\r') { *c = 0; break; }
+        }
+
+        llmk_oo_policy_trim(&line);
+        if (line[0] == 0) continue;
+        if (line[0] == '#' || line[0] == ';') continue;
+        if (line[0] == '/' && line[1] == '/') continue;
+
+        // Inline comment (best-effort)
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_oo_policy_trim(&line);
+        if (line[0] == 0) continue;
+
+        // @@ALLOW /cmd
+        if (llmk_oo_policy_startswith_ci(line, "@@allow")) {
+            char *v = line + 7;
+            llmk_oo_policy_trim(&v);
+            llmk_oo_policy_add_rule(1, v);
+            continue;
+        }
+        if (llmk_oo_policy_startswith_ci(line, "@@deny")) {
+            char *v = line + 6;
+            llmk_oo_policy_trim(&v);
+            llmk_oo_policy_add_rule(0, v);
+            continue;
+        }
+
+        // key=value
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_oo_policy_trim(&key);
+        llmk_oo_policy_trim(&val);
+        if (key[0] == 0 || val[0] == 0) continue;
+
+        if (llmk_oo_policy_startswith_ci(key, "mode")) {
+            if (llmk_oo_policy_startswith_ci(val, "allow") || llmk_oo_policy_startswith_ci(val, "allow_by_default")) {
+                g_oo_policy_allow_by_default = 1;
+                mode_set = 1;
+            } else if (llmk_oo_policy_startswith_ci(val, "deny") || llmk_oo_policy_startswith_ci(val, "deny_by_default")) {
+                g_oo_policy_allow_by_default = 0;
+                mode_set = 1;
+            }
+        } else if (llmk_oo_policy_startswith_ci(key, "allow")) {
+            llmk_oo_policy_add_rule(1, val);
+        } else if (llmk_oo_policy_startswith_ci(key, "deny")) {
+            llmk_oo_policy_add_rule(0, val);
+        }
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, txt);
+
+    // If file existed but contained no actionable keys, treat as inactive.
+    if (!mode_set && g_oo_policy_allow_count == 0 && g_oo_policy_deny_count == 0) {
+        g_oo_policy_state = -1;
+        return;
+    }
+
+    // If active but mode not set, default to deny_by_default.
+    if (!mode_set) {
+        g_oo_policy_allow_by_default = 0;
+    }
+
+    g_oo_policy_state = 1;
+}
+
+static int llmk_oo_policy_is_allowed_cmd(const char *cmd_token_lower) {
+    if (!cmd_token_lower || cmd_token_lower[0] == 0) return 1;
+    llmk_oo_policy_try_load_once();
+    if (g_oo_policy_state != 1) return 1; // inactive => allow
+
+    // Deny rules win.
+    for (int i = 0; i < g_oo_policy_deny_count; i++) {
+        if (llmk_oo_policy_match(g_oo_policy_deny[i], cmd_token_lower)) return 0;
+    }
+
+    for (int i = 0; i < g_oo_policy_allow_count; i++) {
+        if (llmk_oo_policy_match(g_oo_policy_allow[i], cmd_token_lower)) return 1;
+    }
+
+    return g_oo_policy_allow_by_default ? 1 : 0;
+}
+
+static int llmk_oo_policy_check_prompt_and_warn(const char *prompt) {
+    if (!prompt || prompt[0] != '/') return 1;
+
+    // Extract command token: '/cmd' until space or ';'
+    char cmd[64];
+    int n = 0;
+    while (prompt[n] && !llmk_oo_policy_is_space(prompt[n]) && prompt[n] != ';' && n + 1 < (int)sizeof(cmd)) {
+        cmd[n] = llmk_oo_policy_tolower(prompt[n]);
+        n++;
+    }
+    cmd[n] = 0;
+
+    if (!llmk_oo_policy_startswith_ci(cmd, "/oo")) return 1;
+
+    if (!llmk_oo_policy_is_allowed_cmd(cmd)) {
+        Print(L"\r\n[policy] DENY: ");
+        llmk_print_ascii(cmd);
+        Print(L" (oo-policy.dplus)\r\n\r\n");
+        return 0;
+    }
+    return 1;
+}
+
 static void llmk_make_bak_name(const CHAR16 *src, CHAR16 *dst, int dst_cap) {
     if (!dst || dst_cap <= 0) return;
     dst[0] = 0;
@@ -4318,6 +4579,11 @@ static void llmk_repl_no_model_loop(void) {
         }
 
         // Minimal OO commands (no-model mode): supports journaling + persistence demos without LLM.
+        if (prompt[0] == '/' && my_strncmp(prompt, "/oo", 3) == 0) {
+            if (!llmk_oo_policy_check_prompt_and_warn(prompt)) {
+                continue;
+            }
+        }
         if (my_strncmp(prompt, "/oo_list", 8) == 0) {
             llmk_oo_list_print();
             llmk_oo_journal_cmd_best_effort("oo_list");
@@ -12426,6 +12692,11 @@ snap_autoload_done:
         
         // Check for commands (except /draw which is handled above and falls through into generation)
         if (!draw_mode && prompt[0] == '/') {
+            if (my_strncmp(prompt, "/oo", 3) == 0) {
+                if (!llmk_oo_policy_check_prompt_and_warn(prompt)) {
+                    continue;
+                }
+            }
             if (my_strncmp(prompt, "/temp ", 6) == 0) {
                 float val = 0.0f;
                 int i = 6;

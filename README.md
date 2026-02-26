@@ -164,4 +164,19 @@ cargo test --features std
 - Model weights are intentionally not tracked in git; use GitHub Releases or your own files.
 - Optional config: copy `repl.cfg.example` -> `repl.cfg` (not committed) and rebuild.
 
+Optional OO policy gate:
+
+- If a file named `oo-policy.dplus` exists on the FAT root, the firmware can allow/deny `/oo*` commands.
+- If the file is absent, behavior is unchanged.
+
+Example (deny by default, allow only a few commands):
+
+```text
+mode=deny_by_default
+allow=/oo_list
+allow=/oo_new
+allow=/oo_note
+deny=/oo_exec*
+```
+
 
