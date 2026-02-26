@@ -5,6 +5,7 @@ pub mod cortex;
 pub mod dplus;
 pub mod journal;
 pub mod policy_vm;
+pub mod resonance;
 pub mod sentinel;
 pub mod soma;
 pub mod types;
@@ -16,6 +17,8 @@ pub use warden::{CapMeta, MemError, MemoryWarden, WardenSnapshot};
 pub use journal::{Event, EventKind, Journal, JournalStats};
 
 pub use soma::NeuralSoma;
+
+pub use resonance::{ResonanceConfig, ResonanceProfile, ResonanceVerdict};
 
 pub use cortex::{CortexConfig, HeuristicCortex};
 pub use policy_vm::{compile_rpn as compile_policy_rpn, CompileError as PolicyCompileError, PolicyOutcome, PolicyProgram, PolicyVerdict};
