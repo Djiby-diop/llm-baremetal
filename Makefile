@@ -85,9 +85,16 @@ repl: $(TARGET)
 # Phase 5: generate metabion_profile.h (best-effort).
 # If Zig (or the generator) is missing, use the default header.
 $(METABION_PROFILE_HDR): $(METABION_PROFILE_DEFAULT)
-	@if command -v $(ZIG) >/dev/null 2>&1 && [ -f tools/metabion_profile_gen.zig ]; then \
-		$(ZIG) run tools/metabion_profile_gen.zig -- $(METABION_PROFILE) > $(METABION_PROFILE_HDR); \
-		echo "OK: generated $(METABION_PROFILE_HDR) (profile=$(METABION_PROFILE))"; \
+	@tmp="$(METABION_PROFILE_HDR).tmp"; \
+	if command -v $(ZIG) >/dev/null 2>&1 && [ -f tools/metabion_profile_gen.zig ]; then \
+		if $(ZIG) run tools/metabion_profile_gen.zig -- $(METABION_PROFILE) > "$$tmp"; then \
+			mv "$$tmp" $(METABION_PROFILE_HDR); \
+			echo "OK: generated $(METABION_PROFILE_HDR) (profile=$(METABION_PROFILE))"; \
+		else \
+			rm -f "$$tmp"; \
+			cp $(METABION_PROFILE_DEFAULT) $(METABION_PROFILE_HDR); \
+			echo "OK: using $(METABION_PROFILE_HDR) fallback (zig/gen failed)"; \
+		fi; \
 	else \
 		cp $(METABION_PROFILE_DEFAULT) $(METABION_PROFILE_HDR); \
 		echo "OK: using $(METABION_PROFILE_HDR) fallback (zig/gen missing)"; \
