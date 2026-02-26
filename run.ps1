@@ -1,4 +1,6 @@
 param(
+  # If set, run the OS-G UEFI/QEMU smoke test and exit.
+  [switch]$OsgSmoke,
   [switch]$NewWindow,
   [switch]$Gui,
   # If set, run host preflight before launching QEMU.
@@ -36,6 +38,17 @@ param(
 
 # Run QEMU (single entrypoint)
 $ErrorActionPreference = 'Stop'
+
+if ($OsgSmoke) {
+  $osg = Join-Path $PSScriptRoot 'run-osg-smoke.ps1'
+  if (-not (Test-Path -LiteralPath $osg)) {
+    throw "OS-G smoke runner not found: $osg"
+  }
+
+  Write-Host "[Run] OS-G smoke requested" -ForegroundColor Cyan
+  & $osg -Profile release
+  exit $LASTEXITCODE
+}
 
 if ($Preflight) {
   $preflightScript = Join-Path $PSScriptRoot 'preflight-host.ps1'

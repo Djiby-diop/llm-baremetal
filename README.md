@@ -131,6 +131,28 @@ Useful REPL commands:
 ./run.ps1 -Preflight -Gui
 ```
 
+## OS-G (Operating System Genesis) — pillar
+
+OS-G is included as a self-contained kernel-governor prototype (Memory Warden + D+ pipeline) under:
+
+- `OS-G (Operating System Genesis)/`
+
+Quick validation (UEFI/QEMU smoke test, prints `RESULT: PASS/FAIL`):
+
+```powershell
+./run-osg-smoke.ps1 -Profile release
+
+# or via the main runner
+./run.ps1 -OsgSmoke
+```
+
+Host-side tests/tools (requires `std` feature):
+
+```powershell
+cd 'OS-G (Operating System Genesis)'
+cargo test --features std
+```
+
 ## Notes
 
 - Model weights are intentionally not tracked in git; use GitHub Releases or your own files.
