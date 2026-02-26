@@ -1,0 +1,13 @@
+[INTENT] {
+Je veux prouver que l'OS se répare.
+}
+
+[LAW] {
+op:20 allow(mem.allocate) if bytes<=8192 && ttl_ms<=2000 && zone == normal
+op:21 allow(mem.allocate) if bytes<=32768 && ttl_ms<=500 && zone == sandbox
+}
+
+[PROOF] {
+invariant op:20: allocated_bytes <= quota
+invariant op:21: allocated_bytes <= quota
+}

@@ -1,0 +1,21 @@
+[INTENT] {
+Je veux générer une image, mais isoler les étapes suspectes.
+Objectif: montrer Normal vs SandRAM.
+}
+
+[LAW] {
+// Allocation normale (zone normal)
+op:10 allow(mem.allocate) if bytes<=65536 && ttl_ms<=1000 && zone == normal
+
+// Allocation en SandRAM (zone sandbox)
+op:11 allow(mem.allocate) if bytes<=131072 && ttl_ms<=500 && zone == sandbox
+
+// Demande trop grosse pour quota (doit être refusée)
+op:12 allow(mem.allocate) if bytes<=99999999 && ttl_ms<=0 && zone == normal
+}
+
+[PROOF] {
+invariant op:10: allocated_bytes <= quota
+invariant op:11: allocated_bytes <= quota
+invariant op:12: allocated_bytes <= quota
+}

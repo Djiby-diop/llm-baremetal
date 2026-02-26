@@ -1,0 +1,25 @@
+@@SOMA:C
+// This is a D+ policy file loaded by the OS-G kernel at boot.
+
+@@GPU:ptx
+/* gpu marker for merit */
+
+@@LAW
+// op:999 should be ignored (comment)
+allow mem.allocate op:7 bytes<=8192 ttl_ms<=2000 zone==sandbox
+allow mem.allocate op:8 bytes<=65536 ttl_ms<=0 zone==normal /* op:998 ignored */
+
+@@WARDEN:POLICY
+// RPN program: deny allocations larger than 1MiB
+bytes 1048576 >
+deny_if_true
+allow
+
+@@CORTEX:HEUR
+enabled=1
+prefetch_repeat=3
+
+@@PROOF
+proof op:7
+proof op:8
+note "op:997 ignored"

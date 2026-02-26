@@ -1,0 +1,16 @@
+[INTENT] {
+Je veux générer une image.
+Contraintes: latence < 16ms; énergie=secteur; sécurité=stricte.
+}
+
+[LAW] {
+op:7 allow(mem.allocate) if bytes<=8192 && ttl_ms<=2000 && zone != sandbox
+op:8 allow(mem.allocate) if bytes<=131072 && ttl_ms<=0 && zone != sandbox
+op:9 allow(mem.allocate) if bytes<=99999999 && ttl_ms<=0 && zone != sandbox
+}
+
+[PROOF] {
+invariant op:7: allocated_bytes <= quota
+invariant op:8: allocated_bytes <= quota
+invariant op:9: allocated_bytes <= quota
+}

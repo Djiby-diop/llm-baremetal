@@ -1,0 +1,18 @@
+[INTENT] {
+Je veux générer une image.
+}
+
+[LAW] {
+// Pas de zone indiquée -> le mérite décide
+op:30 allow(mem.allocate) if bytes<=131072 && ttl_ms<=2000
+}
+
+[SOMA:C] {
+// muscle brut, risque plus élevé
+int main() { if (x) { return 1; } return 0; }
+}
+
+[GPU:CUDA] {
+// accélérateur / surface d'attaque / risque supplémentaire
+__global__ void k() { /* ... */ }
+}

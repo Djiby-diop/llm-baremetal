@@ -1,0 +1,17 @@
+[INTENT] {
+Je veux générer une image.
+}
+
+[LAW] {
+// Pas de zone indiquée -> le mérite décide
+op:31 allow(mem.allocate) if bytes<=131072 && ttl_ms<=2000
+}
+
+[PROTECT:RUST] {
+// armure présente -> score plus haut
+fn validate_memory(x: usize) -> Result<(), ()> { Ok(()) }
+}
+
+[PROOF] {
+invariant op:31: allocated_bytes <= quota
+}

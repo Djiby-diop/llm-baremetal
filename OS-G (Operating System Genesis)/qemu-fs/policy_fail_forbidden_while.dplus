@@ -1,0 +1,9 @@
+@@SOMA:C
+// Negative test policy: must fail verifier due to a forbidden token.
+
+@@LAW
+op:1 allow mem.allocate bytes<=4096 ttl_ms<=1000 zone==sandbox
+while true { op:1 }
+
+@@PROOF
+proof op:1

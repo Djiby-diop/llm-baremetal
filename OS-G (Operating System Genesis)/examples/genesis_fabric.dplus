@@ -1,0 +1,29 @@
+[INTENT] {
+Je veux générer une image.
+Contraintes: latence < 16ms; énergie=secteur; sécurité=stricte.
+}
+
+[LAW] {
+op:7 allow(mem.allocate) if bytes <= quota && ttl_ms <= 2000
+op:8 allow(cpu.execute) if zone != sandbox
+}
+
+[PROOF] {
+invariant op:7: allocated_bytes <= quota
+invariant op:8: no_execute_in_sandbox
+}
+
+[SOMA:C] {
+// muscle: exemple avec accolades imbriquées
+int f(int x) {
+  if (x) {
+    return 1;
+  }
+  return 0;
+}
+}
+
+[PROTECT:RUST] {
+// armure (opaque au MVP)
+// let safe_slice = validate_memory(weights)?;
+}

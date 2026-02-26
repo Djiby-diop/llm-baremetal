@@ -1,0 +1,8 @@
+[build]
+# We keep host builds as default. The QEMU test script passes `--target x86_64-unknown-uefi`.
+
+[target.x86_64-unknown-uefi]
+# UEFI binaries are PE/COFF. No special linker needed on stable Rust for this target.
+rustflags = [
+  "-C", "panic=abort",
+]

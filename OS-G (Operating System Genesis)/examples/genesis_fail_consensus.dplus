@@ -1,0 +1,20 @@
+@@INTENT
+Je veux générer une image.
+Contraintes: latence < 16ms; énergie=secteur; sécurité=stricte.
+
+@@LAW
+op:7 allow(mem.allocate) if bytes <= quota && ttl_ms <= 2000
+op:999 allow(cpu.execute) if zone != sandbox
+
+@@PROOF
+invariant op:7: allocated_bytes <= quota
+// NOTE: l'op 999 manque volontairement ici -> le consensus doit échouer
+
+@@SOMA:C
+// muscle (opaque au MVP)
+
+@@PROTECT:RUST
+// armure (opaque au MVP)
+
+@@JUDGE:WARDEN
+// tribunal (opaque au MVP)

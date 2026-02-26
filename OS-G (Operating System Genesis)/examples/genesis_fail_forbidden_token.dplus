@@ -1,0 +1,9 @@
+@@INTENT
+Je veux faire une allocation sûre.
+
+@@LAW
+// Le MVP interdit les constructs non-bornés en LAW/PROOF.
+while true { op:1 }
+
+@@PROOF
+ok op:1

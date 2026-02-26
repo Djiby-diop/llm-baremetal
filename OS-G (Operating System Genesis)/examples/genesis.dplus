@@ -1,0 +1,27 @@
+@@INTENT
+Je veux générer une image.
+Contraintes: latence < 16ms; énergie=secteur; sécurité=stricte.
+
+@@LAW
+op:7 allow(mem.allocate) if bytes <= quota && ttl_ms <= 2000
+op:8 allow(cpu.execute) if zone != sandbox
+
+@@PROOF
+invariant op:7: allocated_bytes <= quota
+invariant op:8: no_execute_in_sandbox
+
+@@SOMA:C
+// muscle: accès brut, non vérifié ici (opaque au MVP)
+// register_t weights = load_raw_model(0xBFAD);
+
+@@PROTECT:RUST
+// armure: frontières mémoire (opaque au MVP)
+// let safe_slice = validate_memory(weights)?;
+
+@@FLEET:JAVA
+// conscience: synchronisation / distribution (opaque au MVP)
+// FleetManager.syncWeights(safe_slice);
+
+@@JUDGE:WARDEN
+// tribunal: décision finale (opaque au MVP)
+// if (intent == CREATION) { manifest(); }
