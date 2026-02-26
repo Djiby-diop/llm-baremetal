@@ -3310,6 +3310,21 @@ static int llmk_oo_policy_is_allowed_cmd(const char *cmd_token_lower) {
     return g_oo_policy_allow_by_default ? 1 : 0;
 }
 
+static void llmk_oo_policy_warn_deny_cmd(const char *cmd_token_lower) {
+    if (!cmd_token_lower) cmd_token_lower = "";
+    llmk_oo_policy_try_load_once();
+
+    Print(L"\r\n[policy] DENY: ");
+    llmk_print_ascii(cmd_token_lower);
+    if (g_oo_policy_loaded_name[0]) {
+        Print(L" (");
+        llmk_print_ascii(g_oo_policy_loaded_name);
+        Print(L")\r\n\r\n");
+    } else {
+        Print(L" (policy)\r\n\r\n");
+    }
+}
+
 static int llmk_oo_policy_check_prompt_and_warn(const char *prompt) {
     if (!prompt || prompt[0] != '/') return 1;
 
@@ -3325,15 +3340,7 @@ static int llmk_oo_policy_check_prompt_and_warn(const char *prompt) {
     if (!llmk_oo_policy_startswith_ci(cmd, "/oo")) return 1;
 
     if (!llmk_oo_policy_is_allowed_cmd(cmd)) {
-        Print(L"\r\n[policy] DENY: ");
-        llmk_print_ascii(cmd);
-        if (g_oo_policy_loaded_name[0]) {
-            Print(L" (");
-            llmk_print_ascii(g_oo_policy_loaded_name);
-            Print(L")\r\n\r\n");
-        } else {
-            Print(L" (policy)\r\n\r\n");
-        }
+        llmk_oo_policy_warn_deny_cmd(cmd);
         return 0;
     }
     return 1;
@@ -12319,6 +12326,32 @@ snap_autoload_done:
         // Current turn prompt (either user input or synthesized for /oo_auto)
         char prompt[512];
         prompt[0] = 0;
+
+        // Policy enforcement for internal OO runners:
+        // /oo_auto and /oo_exec cycles run without going through the prompt dispatcher.
+        // If these modes are active due to persisted/configured state, stop them here
+        // when policy denies the corresponding command.
+        if (g_oo_exec_active && g_oo_exec_id > 0 && g_oo_exec_remaining > 0) {
+            if (!llmk_oo_policy_is_allowed_cmd("/oo_exec")) {
+                llmk_oo_policy_warn_deny_cmd("/oo_exec");
+                g_oo_exec_active = 0;
+                g_oo_exec_id = 0;
+                g_oo_exec_remaining = 0;
+                g_oo_exec_total = 0;
+                g_oo_exec_plan_if_empty = 0;
+                g_oo_exec_hint[0] = 0;
+            }
+        }
+        if (g_oo_auto_active && g_oo_auto_id > 0 && g_oo_auto_remaining > 0) {
+            if (!llmk_oo_policy_is_allowed_cmd("/oo_auto")) {
+                llmk_oo_policy_warn_deny_cmd("/oo_auto");
+                g_oo_auto_active = 0;
+                g_oo_auto_id = 0;
+                g_oo_auto_remaining = 0;
+                g_oo_auto_total = 0;
+                g_oo_auto_user[0] = 0;
+            }
+        }
 
         if (g_oo_exec_active && g_oo_exec_id > 0 && g_oo_exec_remaining > 0) {
             // Allow user to interrupt exec mode between cycles.
