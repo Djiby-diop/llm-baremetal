@@ -7,4 +7,5 @@ Domain: VECT-G (performance + low-level drivers, C-first scaffold).
 
 ## C scaffold
 
-- `p01_vect.h` / `p01_vect.c`: minimal surface built on CORE_HERMES.
+- `p01.h` / `p01.c`: minimal surface built on CORE_HERMES.
+

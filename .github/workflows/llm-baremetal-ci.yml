@@ -28,6 +28,10 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Build + test Olympe (C)
+        run: |
+          make -C olympe test
+
       - name: Build oo-guard (release)
         working-directory: oo-guard
         run: cargo build --release

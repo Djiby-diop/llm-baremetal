@@ -166,6 +166,9 @@ oo-guard/target/
 # Rust (rust-guard)
 rust-guard/target/
 
+# Olympe (local build artifacts)
+olympe/build/
+
 # Keep repo minimal: non-essential docs/notes are local only
 ROADMAP.md
 REPERE.md
