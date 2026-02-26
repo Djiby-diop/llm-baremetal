@@ -1,0 +1,50 @@
+name: llm-baremetal CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-guard:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gnu-efi \
+            mtools parted dosfstools grub-pc-bin \
+            xz-utils coreutils
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build oo-guard (release)
+        working-directory: oo-guard
+        run: cargo build --release
+
+      - name: oo-guard prebuild (C risk scan)
+        run: |
+          ./oo-guard/target/release/oo-guard prebuild llama2_efi_final.c
+
+      - name: Build firmware (UEFI)
+        run: |
+          make clean
+          make repl
+
+      - name: Build OS-G OO compiler (host tool)
+        run: |
+          cargo build --manifest-path "OS-G (Operating System Genesis)/Cargo.toml" --features std --bin dplus_compile_oo
+
+      - name: Create no-model boot image
+        run: |
+          NO_MODEL=1 EFI_BIN=llama2.efi ./create-boot-mtools.sh
