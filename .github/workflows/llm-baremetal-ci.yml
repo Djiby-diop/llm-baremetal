@@ -28,6 +28,10 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Build + test Olympe (C)
+        run: |
+          make -C olympe test
+
       - name: Build oo-guard (release)
         working-directory: oo-guard
         run: cargo build --release
@@ -42,8 +46,9 @@ jobs:
           make repl
 
       - name: Build OS-G OO compiler (host tool)
+        working-directory: OS-G (Operating System Genesis)
         run: |
-          cargo build --manifest-path "OS-G (Operating System Genesis)/Cargo.toml" --features std --bin dplus_compile_oo
+          cargo build --features std --bin dplus_compile_oo
 
       - name: Create no-model boot image
         run: |

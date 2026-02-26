@@ -1,10 +1,12 @@
 # Pillar p01
 
-Domain: VECT-G (performance + low-level drivers, C-first scaffold).
+Domain: VECT-G (performance + low-level drivers).
 
+- Language: Zig
 - Owner: pillar p01
 - Policy dialect: TBD (D+ LAW/PROOF style)
 
-## C scaffold
+## Validate
 
-- `p01_vect.h` / `p01_vect.c`: minimal surface built on CORE_HERMES.
+- `zig test pillars/p01/p01.zig`
+

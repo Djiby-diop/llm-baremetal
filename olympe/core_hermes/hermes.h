@@ -38,6 +38,8 @@ typedef struct hermes_msg {
     const void* payload;
 } hermes_msg_t;
 
+typedef hermes_status_t (*hermes_handler_fn)(const hermes_msg_t* msg, hermes_msg_t* out_response);
+
 static inline hermes_status_t hermes_validate_header(const hermes_header_t* h) {
     if (!h) return HERMES_ERR_INVALID_ARG;
     if (h->version_major != HERMES_VERSION_MAJOR) return HERMES_ERR_UNSUPPORTED_VERSION;
@@ -54,3 +56,4 @@ static inline hermes_status_t hermes_validate_header(const hermes_header_t* h) {
     // payload_len is trusted only when combined with a transport buffer length.
     return HERMES_OK;
 }
+
