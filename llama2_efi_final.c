@@ -3010,6 +3010,7 @@ static int g_oo_policy_allow_count = 0;
 static int g_oo_policy_deny_count = 0;
 static char g_oo_policy_allow[32][64]; // SAFE: bounded allow-list table (<=32 rules, each <=63 bytes + NUL)
 static char g_oo_policy_deny[32][64];  // SAFE: bounded deny-list table (<=32 rules, each <=63 bytes + NUL)
+static char g_oo_policy_loaded_name[32]; // SAFE: short policy filename (e.g., "policy.dplus") for diagnostics
 
 static int llmk_oo_policy_is_space(char c) {
     return (c == ' ' || c == '\t' || c == '\r' || c == '\n');
@@ -3097,13 +3098,25 @@ static void llmk_oo_policy_try_load_once(void) {
     g_oo_policy_allow_by_default = 0;
     g_oo_policy_allow_count = 0;
     g_oo_policy_deny_count = 0;
+    g_oo_policy_loaded_name[0] = 0;
 
     void *raw = NULL;
     UINTN raw_len = 0;
-    EFI_STATUS st = llmk_read_entire_file_best_effort(L"oo-policy.dplus", &raw, &raw_len);
-    if (EFI_ERROR(st) || !raw || raw_len == 0) {
+    int is_primary_dplus = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"policy.dplus", &raw, &raw_len);
+    if (!EFI_ERROR(st) && raw && raw_len) {
+        llmk_oo_policy_store_lower_cap(g_oo_policy_loaded_name, (int)sizeof(g_oo_policy_loaded_name), "policy.dplus");
+        is_primary_dplus = 1;
+    } else {
         if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
-        return;
+        raw = NULL;
+        raw_len = 0;
+        st = llmk_read_entire_file_best_effort(L"oo-policy.dplus", &raw, &raw_len);
+        if (EFI_ERROR(st) || !raw || raw_len == 0) {
+            if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+            return;
+        }
+        llmk_oo_policy_store_lower_cap(g_oo_policy_loaded_name, (int)sizeof(g_oo_policy_loaded_name), "oo-policy.dplus");
     }
 
     // Copy to NUL-terminated buffer so we can split lines in-place.
@@ -3118,6 +3131,11 @@ static void llmk_oo_policy_try_load_once(void) {
     uefi_call_wrapper(BS->FreePool, 1, raw);
 
     int mode_set = 0;
+    int saw_any_atat = 0;
+    int in_law = 0;
+    int saw_law = 0;
+    int saw_proof = 0;
+    int saw_any_allow_deny = 0;
 
     // Strip UTF-8 BOM if present.
     if ((unsigned char)txt[0] == 0xEF && (unsigned char)txt[1] == 0xBB && (unsigned char)txt[2] == 0xBF) {
@@ -3140,6 +3158,23 @@ static void llmk_oo_policy_try_load_once(void) {
         if (line[0] == '#' || line[0] == ';') continue;
         if (line[0] == '/' && line[1] == '/') continue;
 
+        if (line[0] == '@' && line[1] == '@') {
+            saw_any_atat = 1;
+            // Section markers
+            if (llmk_oo_policy_startswith_ci(line, "@@law")) {
+                in_law = 1;
+                saw_law = 1;
+                continue;
+            }
+            if (llmk_oo_policy_startswith_ci(line, "@@proof")) {
+                in_law = 0;
+                saw_proof = 1;
+                continue;
+            }
+            // Any other section ends LAW block.
+            in_law = 0;
+        }
+
         // Inline comment (best-effort)
         for (char *c = line; *c; c++) {
             if (*c == '#') { *c = 0; break; }
@@ -3147,17 +3182,56 @@ static void llmk_oo_policy_try_load_once(void) {
         llmk_oo_policy_trim(&line);
         if (line[0] == 0) continue;
 
-        // @@ALLOW /cmd
+        // D+ style inside @@LAW: allow/deny <token>  (we only care about /oo* tokens)
+        if (in_law) {
+            if (llmk_oo_policy_startswith_ci(line, "allow")) {
+                char *v = line + 5;
+                llmk_oo_policy_trim(&v);
+                // take first token
+                char tok[80]; // SAFE: token buffer; parsed with bounds checks
+                int tn = 0;
+                while (v[tn] && !llmk_oo_policy_is_space(v[tn]) && tn + 1 < (int)sizeof(tok)) {
+                    tok[tn] = v[tn];
+                    tn++;
+                }
+                tok[tn] = 0;
+                if (llmk_oo_policy_startswith_ci(tok, "/oo")) {
+                    llmk_oo_policy_add_rule(1, tok);
+                    saw_any_allow_deny = 1;
+                }
+                continue;
+            }
+            if (llmk_oo_policy_startswith_ci(line, "deny")) {
+                char *v = line + 4;
+                llmk_oo_policy_trim(&v);
+                char tok[80]; // SAFE: token buffer; parsed with bounds checks
+                int tn = 0;
+                while (v[tn] && !llmk_oo_policy_is_space(v[tn]) && tn + 1 < (int)sizeof(tok)) {
+                    tok[tn] = v[tn];
+                    tn++;
+                }
+                tok[tn] = 0;
+                if (llmk_oo_policy_startswith_ci(tok, "/oo")) {
+                    llmk_oo_policy_add_rule(0, tok);
+                    saw_any_allow_deny = 1;
+                }
+                continue;
+            }
+        }
+
+        // @@ALLOW /cmd (legacy convenience; accepted even outside @@LAW)
         if (llmk_oo_policy_startswith_ci(line, "@@allow")) {
             char *v = line + 7;
             llmk_oo_policy_trim(&v);
             llmk_oo_policy_add_rule(1, v);
+            saw_any_allow_deny = 1;
             continue;
         }
         if (llmk_oo_policy_startswith_ci(line, "@@deny")) {
             char *v = line + 6;
             llmk_oo_policy_trim(&v);
             llmk_oo_policy_add_rule(0, v);
+            saw_any_allow_deny = 1;
             continue;
         }
 
@@ -3182,24 +3256,40 @@ static void llmk_oo_policy_try_load_once(void) {
             }
         } else if (llmk_oo_policy_startswith_ci(key, "allow")) {
             llmk_oo_policy_add_rule(1, val);
+            saw_any_allow_deny = 1;
         } else if (llmk_oo_policy_startswith_ci(key, "deny")) {
             llmk_oo_policy_add_rule(0, val);
+            saw_any_allow_deny = 1;
         }
     }
 
     uefi_call_wrapper(BS->FreePool, 1, txt);
 
-    // If file existed but contained no actionable keys, treat as inactive.
-    if (!mode_set && g_oo_policy_allow_count == 0 && g_oo_policy_deny_count == 0) {
-        g_oo_policy_state = -1;
+    // Decide mode: strict D+ when policy.dplus is used OR file contains @@ markers.
+    int dplus_mode = (is_primary_dplus || saw_any_atat);
+
+    if (dplus_mode) {
+        // Hardened behavior: if policy file exists but is missing required structure/proof,
+        // still activate in deny-by-default mode (fail-closed for /oo*).
+        g_oo_policy_allow_by_default = 0;
+
+        // For primary OS-G-style policy.dplus, require @@LAW and @@PROOF markers.
+        // For oo-policy.dplus that "looks like D+" (has @@ markers), also require @@PROOF.
+        if (!saw_law || !saw_proof) {
+            // active, but with no allow rules => denies all /oo*
+            g_oo_policy_allow_count = 0;
+            g_oo_policy_deny_count = 0;
+        }
+        g_oo_policy_state = 1;
         return;
     }
 
-    // If active but mode not set, default to deny_by_default.
-    if (!mode_set) {
-        g_oo_policy_allow_by_default = 0;
+    // Legacy mode (key=value / @@ALLOW/@@DENY): if file existed but contained no actionable keys, treat as inactive.
+    if (!mode_set && !saw_any_allow_deny && g_oo_policy_allow_count == 0 && g_oo_policy_deny_count == 0) {
+        g_oo_policy_state = -1;
+        return;
     }
-
+    if (!mode_set) g_oo_policy_allow_by_default = 0;
     g_oo_policy_state = 1;
 }
 
@@ -3237,7 +3327,13 @@ static int llmk_oo_policy_check_prompt_and_warn(const char *prompt) {
     if (!llmk_oo_policy_is_allowed_cmd(cmd)) {
         Print(L"\r\n[policy] DENY: ");
         llmk_print_ascii(cmd);
-        Print(L" (oo-policy.dplus)\r\n\r\n");
+        if (g_oo_policy_loaded_name[0]) {
+            Print(L" (");
+            llmk_print_ascii(g_oo_policy_loaded_name);
+            Print(L")\r\n\r\n");
+        } else {
+            Print(L" (policy)\r\n\r\n");
+        }
         return 0;
     }
     return 1;

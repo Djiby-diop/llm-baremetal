@@ -166,10 +166,24 @@ cargo test --features std
 
 Optional OO policy gate:
 
-- If a file named `oo-policy.dplus` exists on the FAT root, the firmware can allow/deny `/oo*` commands.
-- If the file is absent, behavior is unchanged.
+- If a file named `policy.dplus` exists on the FAT root, the firmware treats it as a D+ policy (OS-G style) and gates `/oo*` commands from it.
+- Otherwise, it falls back to a simpler legacy file `oo-policy.dplus`.
+- If neither file is present, behavior is unchanged.
 
-Example (deny by default, allow only a few commands):
+Example `policy.dplus` (D+ style; deny-by-default; requires `@@LAW` + `@@PROOF`):
+
+```text
+@@LAW
+allow /oo_list
+allow /oo_new
+allow /oo_note
+deny /oo_exec*
+
+@@PROOF
+proof op:7
+```
+
+Legacy example `oo-policy.dplus` (best-effort):
 
 ```text
 mode=deny_by_default
