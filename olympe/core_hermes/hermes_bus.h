@@ -50,7 +50,7 @@ hermes_status_t hermes_bus_register(hermes_bus_t* bus, uint64_t pillar_id, herme
 void hermes_bus_set_flow_enforcement(hermes_bus_t* bus, uint8_t enabled);
 hermes_status_t hermes_bus_allow_flow(hermes_bus_t* bus, uint64_t source, uint64_t dest);
 
-hermes_status_t hermes_bus_dispatch(const hermes_bus_t* bus, const hermes_msg_t* msg, hermes_msg_t* out_response);
+hermes_status_t hermes_bus_dispatch(hermes_bus_t* bus, const hermes_msg_t* msg, hermes_msg_t* out_response);
 
 // Copies the internal stats to out_stats.
 hermes_status_t hermes_bus_get_stats(const hermes_bus_t* bus, hermes_bus_stats_t* out_stats);
