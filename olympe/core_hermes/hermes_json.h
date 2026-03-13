@@ -9,6 +9,12 @@
 // This is not a general-purpose JSON library; it only supports the Hermes schema.
 // Payload is treated as a UTF-8 string (NUL-terminated when decoded).
 
+// Sentinel guardrail: maximum payload length accepted by the JSON decoder.
+// Can be overridden at compile time (e.g. -DHERMES_JSON_MAX_PAYLOAD_LEN=1024).
+#ifndef HERMES_JSON_MAX_PAYLOAD_LEN
+#define HERMES_JSON_MAX_PAYLOAD_LEN 4096u
+#endif
+
 // Encode Hermes message to JSON into `out`.
 // Returns HERMES_OK and sets out_len on success.
 hermes_status_t hermes_json_encode_msg(

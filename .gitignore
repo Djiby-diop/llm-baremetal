@@ -26,6 +26,7 @@ release-artifacts/
 
 # Compiled OO policy blob (generated locally)
 OOPOLICY.BIN
+OOPOLICY.CRC
 
 # Tokenizer is required even for NO_MODEL images
 !tokenizer.bin
@@ -72,6 +73,7 @@ SESSION_*.md
 GITHUB_UPLOAD.md
 serve_model.py
 test-*.ps1
+!test-oo-complete.ps1
 
 # Local OO/OS-G notes and scratch (untracked by default)
 .ops/

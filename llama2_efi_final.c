@@ -3080,6 +3080,45 @@ static void llmk_oo_policy_add_rule(int is_allow, const char *val) {
     }
 }
 
+static UINT32 llmk_crc32_zlib(const void *data, UINTN len) {
+    // CRC-32 (zlib/PKZIP) polynomial, reflected.
+    const UINT8 *p = (const UINT8 *)data;
+    UINT32 crc = 0xFFFFFFFFu;
+    for (UINTN i = 0; i < len; i++) {
+        crc ^= (UINT32)p[i];
+        for (int b = 0; b < 8; b++) {
+            UINT32 m = (UINT32)-(INT32)(crc & 1u);
+            crc = (crc >> 1) ^ (0xEDB88320u & m);
+        }
+    }
+    return ~crc;
+}
+
+static int llmk_parse_crc32_hex_from_text(const char *s, UINTN n, UINT32 *out_crc) {
+    if (!s || !out_crc) return 0;
+    // Find a 0x???????? pattern and parse it.
+    for (UINTN i = 0; i + 10 <= n; i++) {
+        if (s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
+            UINT32 v = 0;
+            int ok = 1;
+            for (UINTN k = 0; k < 8; k++) {
+                char c = s[i + 2 + k];
+                UINT32 d = 0;
+                if (c >= '0' && c <= '9') d = (UINT32)(c - '0');
+                else if (c >= 'a' && c <= 'f') d = 10u + (UINT32)(c - 'a');
+                else if (c >= 'A' && c <= 'F') d = 10u + (UINT32)(c - 'A');
+                else { ok = 0; break; }
+                v = (v << 4) | d;
+            }
+            if (ok) {
+                *out_crc = v;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int llmk_oo_policy_match(const char *rule, const char *cmd) {
     if (!rule || !cmd) return 0;
     int rl = 0;
@@ -3130,6 +3169,30 @@ static void llmk_oo_policy_try_load_once(void) {
             }
             if (ok) {
                 if (b[4] != 1) ok = 0;
+            }
+
+            // Notary (optional): verify integrity against OOPOLICY.CRC if present.
+            // If CRC file exists but is malformed or mismatched, fail-closed.
+            {
+                void *crc_txt = NULL;
+                UINTN crc_len = 0;
+                EFI_STATUS sc = llmk_read_entire_file_best_effort(L"OOPOLICY.CRC", &crc_txt, &crc_len);
+                if (!EFI_ERROR(sc) && crc_txt && crc_len) {
+                    UINT32 expected = 0;
+                    if (!llmk_parse_crc32_hex_from_text((const char *)crc_txt, crc_len, &expected)) {
+                        ok = 0;
+                        Print(L"ERROR: OOPOLICY.CRC invalid; refusing OOPOLICY.BIN\r\n");
+                    } else {
+                        UINT32 actual = llmk_crc32_zlib(bin, bin_len);
+                        if (actual != expected) {
+                            ok = 0;
+                            Print(L"ERROR: OOPOLICY.BIN CRC mismatch (expected=0x%08x actual=0x%08x)\r\n", expected, actual);
+                        } else {
+                            Print(L"OK: OOPOLICY.BIN integrity verified (crc32=0x%08x)\r\n", actual);
+                        }
+                    }
+                }
+                if (crc_txt) uefi_call_wrapper(BS->FreePool, 1, crc_txt);
             }
 
             llmk_oo_policy_store_lower_cap(g_oo_policy_loaded_name, (int)sizeof(g_oo_policy_loaded_name), "OOPOLICY.BIN");
@@ -4253,6 +4316,8 @@ static int llmk_is_model_file_name16(const CHAR16 *name) {
     if (!name || !name[0]) return 0;
     // tokenizer.bin is a required runtime asset, but it is not a model.
     if (llmk_char16_endswith_ci(name, L"tokenizer.bin")) return 0;
+    // OO policy artifacts are not models (but are .BIN and may exist on no-model images).
+    if (llmk_char16_endswith_ci(name, L"OOPOLICY.BIN")) return 0;
     // OO persistence / recovery files are not models, but can end up as .BIN.
     if (llmk_char16_endswith_ci(name, L"OOSTATE.BIN")) return 0;
     if (llmk_char16_endswith_ci(name, L"OORECOV.BIN")) return 0;
@@ -12677,6 +12742,33 @@ snap_autoload_done:
             if (prompt[0] == 0 && g_orchestrion.mode != ORCHESTRION_MODE_OFF) {
                 const char *step = orchestrion_pipeline_next_step(&g_orchestrion);
                 if (step && step[0]) {
+                    // Flow Enforcer (Zone-OO): when Orchestrion is in ENFORCE mode,
+                    // only allow /oo* commands (and those are still subject to OO policy).
+                    // This prevents Orchestrion pipelines from executing arbitrary system commands.
+                    if (g_orchestrion.mode == ORCHESTRION_MODE_ENFORCE) {
+                        const char *s = step;
+                        while (*s == ' ' || *s == '\t') s++;
+                        if (*s == '/') {
+                            if (llmk_oo_policy_startswith_ci(s, "/oo")) {
+                                // If denied, do not inject into prompt; stop pipeline and mark error.
+                                if (!llmk_oo_policy_check_prompt_and_warn(s)) {
+                                    g_orchestrion.pipeline.state = ORCHESTRION_STATE_ERROR;
+                                    g_orchestrion.errors++;
+                                    llmk_tr_note("ORCH_ENFORCE: deny /oo");
+                                    continue;
+                                }
+                            } else {
+                                Print(L"\r\n[orch_enforce] DENY non-oo command: ");
+                                llmk_print_ascii(s);
+                                Print(L"\r\n\r\n");
+                                g_orchestrion.pipeline.state = ORCHESTRION_STATE_ERROR;
+                                g_orchestrion.errors++;
+                                llmk_tr_note("ORCH_ENFORCE: deny non-oo");
+                                continue;
+                            }
+                        }
+                    }
+
                     int i = 0;
                     for (; step[i] && i + 1 < (int)sizeof(prompt); i++) prompt[i] = step[i];
                     prompt[i] = 0;

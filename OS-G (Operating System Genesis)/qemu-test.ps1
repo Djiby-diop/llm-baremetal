@@ -194,7 +194,13 @@ if (-not $built) { throw "No .efi produced in $outDir" }
 $fatRoot = Join-Path $PSScriptRoot "qemu-fs"
 $bootDir = Join-Path $fatRoot "EFI\\BOOT"
 New-Item -ItemType Directory -Force -Path $bootDir | Out-Null
-Copy-Item -Force $built (Join-Path $bootDir "BOOTX64.EFI")
+$bootEfi = Join-Path $bootDir "BOOTX64.EFI"
+$bootBackup = $null
+if (Test-Path -LiteralPath $bootEfi) {
+  $bootBackup = Join-Path $env:TEMP ("osg-bootx64-{0:yyyyMMdd-HHmmss}.bak" -f (Get-Date))
+  Copy-Item -Force $bootEfi $bootBackup
+}
+Copy-Item -Force $built $bootEfi
 
 # Add WEIGHTS.BIN to FAT root
 $weightsSrc = Join-Path $PSScriptRoot "weights.bin"
@@ -275,6 +281,14 @@ function Restore-Policy {
 
   if (-not $hadPolicy) {
     Remove-Item -Force $policyPath -ErrorAction SilentlyContinue
+  }
+}
+
+function Restore-BootEfi {
+  if (-not $bootBackup) { return }
+  if (Test-Path -LiteralPath $bootBackup) {
+    Copy-Item -Force $bootBackup $bootEfi
+    Remove-Item -Force $bootBackup -ErrorAction SilentlyContinue
   }
 }
 
@@ -445,6 +459,7 @@ try {
   exit 2
 }
 finally {
+  Restore-BootEfi
   Restore-Policy
   Pop-Location
 }

@@ -20,6 +20,7 @@ typedef enum hermes_status {
     HERMES_ERR_INVALID_ARG = 1,
     HERMES_ERR_UNSUPPORTED_VERSION = 2,
     HERMES_ERR_BAD_LENGTH = 3,
+    HERMES_ERR_FORBIDDEN = 4,
 } hermes_status_t;
 
 typedef struct hermes_header {

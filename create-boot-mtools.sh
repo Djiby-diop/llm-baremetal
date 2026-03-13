@@ -343,6 +343,33 @@ fi
 if [ -f "OOPOLICY.BIN" ]; then
     mcopy "OOPOLICY.BIN" z:/OOPOLICY.BIN
     echo "  [OK] Copied OOPOLICY.BIN"
+
+    # Notary: write a simple integrity sidecar (crc32) and embed it too.
+    # Format (text):
+    #   crc32=0x????????
+    #   len=<bytes>
+    # Uses zlib CRC32 (same polynomial as common tooling).
+    if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+        py=python3
+        command -v python3 >/dev/null 2>&1 || py=python
+        "$py" - <<'PY'
+import pathlib, zlib
+
+p = pathlib.Path('OOPOLICY.BIN')
+data = p.read_bytes()
+crc = zlib.crc32(data) & 0xFFFFFFFF
+out = pathlib.Path('OOPOLICY.CRC')
+out.write_text(f"crc32=0x{crc:08x}\nlen={len(data)}\n", encoding='utf-8')
+PY
+        if [ -f "OOPOLICY.CRC" ]; then
+            mcopy "OOPOLICY.CRC" z:/OOPOLICY.CRC
+            echo "  [OK] Copied OOPOLICY.CRC"
+        else
+            echo "  [WARN] Failed to generate OOPOLICY.CRC"
+        fi
+    else
+        echo "  [WARN] python not found; skipping OOPOLICY.CRC generation"
+    fi
 fi
 
 # REPL config (key=value).

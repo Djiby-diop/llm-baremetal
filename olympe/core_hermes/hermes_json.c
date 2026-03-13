@@ -11,6 +11,78 @@ static const char* hermes_skip_ws(const char* p, const char* end) {
     return p;
 }
 
+static const char* hermes_find_key_in_object(const char* obj, const char* end, const char* key) {
+    // Find a key in the *current* JSON object only (depth==1 relative to obj '{').
+    // Returns pointer just after the closing quote of the key string.
+    if (!obj || !end || !key) return NULL;
+    obj = hermes_skip_ws(obj, end);
+    if (obj >= end || *obj != '{') return NULL;
+
+    const size_t klen = strlen(key);
+    int depth = 0;
+    for (const char* p = obj; p < end; ) {
+        char c = *p;
+        if (c == '"') {
+            // Parse a JSON string token and (only at depth==1) treat it as a potential object key.
+            const char* s = p + 1;
+            const char* q = s;
+            size_t n = 0;
+            int mismatch = 0;
+            while (q < end) {
+                char ch = *q++;
+                if (ch == '\\') {
+                    // Escapes are not expected in schema keys; treat as mismatch and skip string.
+                    mismatch = 1;
+                    if (q >= end) return NULL;
+                    q++;
+                    continue;
+                }
+                if (ch == '"') break;
+                if (!mismatch) {
+                    if (n >= klen || ch != key[n]) mismatch = 1;
+                }
+                n++;
+            }
+            if (q == end || *(q - 1) != '"') return NULL;
+
+            if (depth == 1 && !mismatch && n == klen) {
+                const char* after = hermes_skip_ws(q, end);
+                if (after < end && *after == ':') {
+                    return q;
+                }
+            }
+
+            p = q;
+            continue;
+        }
+
+        if (c == '{') {
+            depth++;
+            p++;
+            continue;
+        }
+        if (c == '}') {
+            depth--;
+            p++;
+            if (depth <= 0) break;
+            continue;
+        }
+        if (c == '[') {
+            depth++;
+            p++;
+            continue;
+        }
+        if (c == ']') {
+            depth--;
+            p++;
+            continue;
+        }
+
+        p++;
+    }
+    return NULL;
+}
+
 static hermes_status_t hermes_append_char(char** dst, size_t* left, char c) {
     if (*left < 1) return HERMES_ERR_BAD_LENGTH;
     **dst = c;
@@ -164,104 +236,6 @@ hermes_status_t hermes_json_encode_msg(
     return HERMES_OK;
 }
 
-static const char* hermes_find_key(const char* json, const char* end, const char* key) {
-    // Search for "key" token, but only when it appears as a JSON object key
-    // (i.e., a string immediately after "{" or "," and before a ":").
-    if (!json || !end || !key) return NULL;
-
-    size_t klen = strlen(key);
-    if (klen == 0) return NULL;
-
-    int in_string = 0;
-    int escaped = 0;
-    int object_depth = 0;
-    char last_structural = 0;
-
-    const char* p = json;
-    while (p < end) {
-        char c = *p;
-
-        if (in_string) {
-            if (escaped) {
-                // Current character is escaped; consume it without special meaning.
-                escaped = 0;
-            } else if (c == '\\') {
-                // Start of an escape sequence.
-                escaped = 1;
-            } else if (c == '"') {
-                // End of string literal.
-                in_string = 0;
-            }
-            p++;
-            continue;
-        }
-
-        switch (c) {
-        case '"':
-            // Potential start of a key name: only valid directly inside an object
-            // and after "{" or "," (i.e. where a key is allowed by JSON grammar).
-            if (object_depth > 0 && (last_structural == '{' || last_structural == ',')) {
-                const char* key_start = p + 1;
-                const char* key_end = key_start + klen;
-                if (key_end < end && memcmp(key_start, key, klen) == 0 && *key_end == '"') {
-                    // Found the string "key". Now ensure it's followed (after optional
-                    // whitespace) by a colon, as required for an object member.
-                    const char* q = key_end + 1;
-                    while (q < end && hermes_is_space(*q)) {
-                        q++;
-                    }
-                    if (q < end && *q == ':') {
-                        // To preserve existing behaviour, return a pointer just after the
-                        // closing quote of the key. Callers then skip whitespace and
-                        // expect to see the ':' character.
-                        return key_end + 1;
-                    }
-                }
-            }
-            in_string = 1;
-            p++;
-            break;
-
-        case '{':
-            object_depth++;
-            last_structural = '{';
-            p++;
-            break;
-
-        case '}':
-            if (object_depth > 0) {
-                object_depth--;
-            }
-            last_structural = '}';
-            p++;
-            break;
-
-        case ',':
-            last_structural = ',';
-            p++;
-            break;
-
-        case '[':
-        case ']':
-        case ':':
-            last_structural = c;
-            p++;
-            break;
-
-        default:
-            if (!hermes_is_space(c)) {
-                // Any other non-whitespace character outside of strings is not a
-                // structural delimiter we care about for key detection, but we
-                // record that we're no longer immediately after "{" or ",".
-                last_structural = c;
-            }
-            p++;
-            break;
-        }
-    }
-    return NULL;
-}
-
 static hermes_status_t hermes_parse_u64_after_colon(const char* p, const char* end, uint64_t* out) {
     if (!p || !out) return HERMES_ERR_INVALID_ARG;
     p = hermes_skip_ws(p, end);
@@ -338,18 +312,24 @@ hermes_status_t hermes_json_decode_msg(
 
     memset(out_msg, 0, sizeof(*out_msg));
 
-    // v.maj and v.min
-    const char* vpos = hermes_find_key(json, end, "v");
-    if (!vpos) return HERMES_ERR_INVALID_ARG;
-    vpos = hermes_skip_ws(vpos, end);
+    // Root object
+    const char* root = hermes_skip_ws(json, end);
+    if (root >= end || *root != '{') return HERMES_ERR_INVALID_ARG;
+
+    // v.maj and v.min (within the nested v object)
+    const char* vkey = hermes_find_key_in_object(root, end, "v");
+    if (!vkey) return HERMES_ERR_INVALID_ARG;
+    const char* vpos = hermes_skip_ws(vkey, end);
     if (vpos >= end || *vpos != ':') return HERMES_ERR_INVALID_ARG;
     vpos++;
     vpos = hermes_skip_ws(vpos, end);
     if (vpos >= end || *vpos != '{') return HERMES_ERR_INVALID_ARG;
 
+    const char* vobj = vpos;
+
     uint64_t maj = 0, min = 0;
-    const char* majpos = hermes_find_key(vpos, end, "maj");
-    const char* minpos = hermes_find_key(vpos, end, "min");
+    const char* majpos = hermes_find_key_in_object(vobj, end, "maj");
+    const char* minpos = hermes_find_key_in_object(vobj, end, "min");
     if (!majpos || !minpos) return HERMES_ERR_INVALID_ARG;
     if (hermes_parse_u64_after_colon(majpos, end, &maj) != HERMES_OK) return HERMES_ERR_INVALID_ARG;
     if (hermes_parse_u64_after_colon(minpos, end, &min) != HERMES_OK) return HERMES_ERR_INVALID_ARG;
@@ -357,7 +337,7 @@ hermes_status_t hermes_json_decode_msg(
     out_msg->header.version_minor = (uint16_t)min;
 
     // kind
-    const char* kpos = hermes_find_key(json, end, "kind");
+    const char* kpos = hermes_find_key_in_object(root, end, "kind");
     if (!kpos) return HERMES_ERR_INVALID_ARG;
     size_t klen = 0;
     char ktmp[16];
@@ -368,37 +348,42 @@ hermes_status_t hermes_json_decode_msg(
 
     // numeric fields
     uint64_t u = 0;
-    const char* fpos = hermes_find_key(json, end, "flags");
+    const char* fpos = hermes_find_key_in_object(root, end, "flags");
     if (!fpos) return HERMES_ERR_INVALID_ARG;
     if (hermes_parse_u64_after_colon(fpos, end, &u) != HERMES_OK) return HERMES_ERR_INVALID_ARG;
     out_msg->header.flags = (uint16_t)u;
 
-    const char* plpos = hermes_find_key(json, end, "payload_len");
+    const char* plpos = hermes_find_key_in_object(root, end, "payload_len");
     if (!plpos) return HERMES_ERR_INVALID_ARG;
     if (hermes_parse_u64_after_colon(plpos, end, &u) != HERMES_OK) return HERMES_ERR_INVALID_ARG;
+    if (u > 0xFFFFFFFFu) return HERMES_ERR_INVALID_ARG;
     uint32_t declared_payload_len = (uint32_t)u;
+    if (declared_payload_len > (uint32_t)HERMES_JSON_MAX_PAYLOAD_LEN) return HERMES_ERR_BAD_LENGTH;
     out_msg->header.payload_len = declared_payload_len;
 
-    const char* cpos = hermes_find_key(json, end, "correlation_id");
+    const char* cpos = hermes_find_key_in_object(root, end, "correlation_id");
     if (!cpos) return HERMES_ERR_INVALID_ARG;
     if (hermes_parse_u64_after_colon(cpos, end, &u) != HERMES_OK) return HERMES_ERR_INVALID_ARG;
     out_msg->header.correlation_id = (uint64_t)u;
 
-    const char* spos = hermes_find_key(json, end, "source");
+    const char* spos = hermes_find_key_in_object(root, end, "source");
     if (!spos) return HERMES_ERR_INVALID_ARG;
     if (hermes_parse_u64_after_colon(spos, end, &u) != HERMES_OK) return HERMES_ERR_INVALID_ARG;
     out_msg->header.source = (uint64_t)u;
 
-    const char* dpos = hermes_find_key(json, end, "dest");
+    const char* dpos = hermes_find_key_in_object(root, end, "dest");
     if (!dpos) return HERMES_ERR_INVALID_ARG;
     if (hermes_parse_u64_after_colon(dpos, end, &u) != HERMES_OK) return HERMES_ERR_INVALID_ARG;
     out_msg->header.dest = (uint64_t)u;
 
     // payload (optional)
-    const char* ppos = hermes_find_key(json, end, "payload");
+    const char* ppos = hermes_find_key_in_object(root, end, "payload");
     if (ppos) {
         size_t n = 0;
         if (!payload_buf || payload_buf_cap == 0) return HERMES_ERR_BAD_LENGTH;
+        // Ensure there's enough cap even before parsing the string.
+        // +1 for NUL terminator.
+        if (declared_payload_len + 1u > (uint32_t)payload_buf_cap) return HERMES_ERR_BAD_LENGTH;
         hermes_status_t st = hermes_parse_string_after_colon(ppos, end, payload_buf, payload_buf_cap, &n);
         if (st != HERMES_OK) return st;
         if (declared_payload_len != (uint32_t)n) return HERMES_ERR_INVALID_ARG;
