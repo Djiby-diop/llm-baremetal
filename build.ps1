@@ -150,7 +150,54 @@ function ConvertTo-WslPath([string]$winPath) {
 	throw "Failed to convert path to WSL path: $winPath (normalized=$norm)"
 }
 
+function Get-WslFileSha256([string]$winPath) {
+	$wslPath = ConvertTo-WslPath $winPath
+	$py = @"
+import hashlib
+from pathlib import Path
+p = Path(r'$wslPath')
+if not p.exists():
+    raise SystemExit(3)
+print(hashlib.sha256(p.read_bytes()).hexdigest())
+"@
+	$hash = & wsl python3 -c $py
+	if ($LASTEXITCODE -ne 0) {
+		throw "WSL could not hash file: $winPath (exit=$LASTEXITCODE)"
+	}
+	return ($hash | Out-String).Trim()
+}
+
+function Assert-WslSourceConsistency([string[]]$relativePaths) {
+	foreach ($rel in $relativePaths) {
+		$winPath = Join-Path $PSScriptRoot $rel
+		if (-not (Test-Path -LiteralPath $winPath)) { continue }
+		$winHash = (Get-FileHash -LiteralPath $winPath -Algorithm SHA256).Hash.ToLowerInvariant()
+		$wslHash = Get-WslFileSha256 $winPath
+		if (-not $wslHash) {
+			throw "WSL returned an empty hash for: $rel"
+		}
+		if ($winHash -ne $wslHash.ToLowerInvariant()) {
+			throw @"
+WSL source desync detected for '$rel'.
+Windows SHA256: $winHash
+WSL SHA256:     $wslHash
+
+The build would use stale content from /mnt/c (common with OneDrive-backed folders).
+Resave/sync the file, or move the repo out of OneDrive for deterministic WSL builds.
+"@
+		}
+	}
+}
+
 $wslRepo = ConvertTo-WslPath $PSScriptRoot
+
+Assert-WslSourceConsistency @(
+	'llama2_efi_final.c',
+	'Makefile',
+	'create-boot-mtools.sh',
+	'test-qemu-autorun.ps1',
+	'llmk-autorun-oo-smoke.txt'
+)
 
 $extra = ($ExtraModelBins | Where-Object { $_ -and $_.Trim().Length -gt 0 }) -join ';'
 

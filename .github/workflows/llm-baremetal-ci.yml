@@ -50,6 +50,44 @@ jobs:
         run: |
           cargo build --features std --bin dplus_compile_oo
 
+      - name: Compile policy.dplus -> OOPOLICY.BIN (strict)
+        working-directory: OS-G (Operating System Genesis)
+        run: |
+          cargo run --features std --bin dplus_compile_oo -- ../policy.dplus ../OOPOLICY.BIN
+          test -s ../OOPOLICY.BIN
+
+      - name: Negative policy compile rejects missing @@PROOF
+        working-directory: OS-G (Operating System Genesis)
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          src = Path('../policy.dplus').read_text(encoding='utf-8')
+          out = []
+          skip = False
+          for line in src.splitlines():
+              stripped = line.strip()
+              if stripped.lower().startswith('@@proof'):
+                  skip = True
+                  continue
+              if skip and stripped.startswith('@@'):
+                  skip = False
+              if not skip:
+                  out.append(line)
+          Path('../policy-missing-proof.dplus').write_text('\n'.join(out) + '\n', encoding='utf-8')
+          PY
+          if cargo run --features std --bin dplus_compile_oo -- ../policy-missing-proof.dplus ../policy-missing-proof.bin; then
+            echo 'ERROR: compile unexpectedly succeeded without @@PROOF' >&2
+            exit 1
+          fi
+          rm -f ../policy-missing-proof.dplus ../policy-missing-proof.bin
+
       - name: Create no-model boot image
         run: |
           NO_MODEL=1 EFI_BIN=llama2.efi ./create-boot-mtools.sh
+
+      - name: Verify image embeds OO policy artifacts
+        run: |
+          mdir -i llm-baremetal-boot.img :: | tee /tmp/mdir-root.txt
+          grep -qi 'OOPOLICY.BIN' /tmp/mdir-root.txt
+          grep -qi 'OOPOLICY.CRC' /tmp/mdir-root.txt
+          grep -qi 'policy.dplus' /tmp/mdir-root.txt

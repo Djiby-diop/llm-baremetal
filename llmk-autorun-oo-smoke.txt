@@ -1,0 +1,13 @@
+# llmk autorun (OO smoke, no-model friendly)
+# Expect: no model loaded; OO subsystem + journal should work.
+
+/help
+
+/wasm_info
+/wasm_apply
+
+/oo_new hello
+/oo_list
+/oo_jour
+
+/oo_infermini hello world

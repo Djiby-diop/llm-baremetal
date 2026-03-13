@@ -4574,6 +4574,7 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /models               List .bin/.gguf in root + models\\\r\n");
     Print(L"  /model_info [path]    Inspect a .bin/.gguf header/metadata\r\n");
     Print(L"  /cat <path>           Print a text file (e.g. repl.cfg)\r\n");
+    Print(L"  /oo_infermini [text]  Run tiny built-in inference selftest (no-model)\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
     Print(L"  exit                  Return to UEFI shell\r\n\r\n");
@@ -4596,6 +4597,7 @@ static int llmk_autorun_finish_if_eof(void);
 static void llmk_oo_print_oojour_tail_best_effort(int max_lines);
 static void llmk_oo_journal_cmd_best_effort(const char *cmd);
 static EFI_STATUS llmk_oo_save_to_file_best_effort(const CHAR16 *name, int *out_bytes);
+static void llmk_oo_infermini_no_model(const char *args);
 
 static void llmk_repl_no_model_loop(void) {
     // Minimal repl.cfg parsing for autorun in no-model mode.
@@ -4845,6 +4847,13 @@ static void llmk_repl_no_model_loop(void) {
                 continue;
             }
         }
+        if (my_strncmp(prompt, "/oo_infermini", 13) == 0) {
+            const char *args = prompt + 13;
+            while (*args == ' ' || *args == '\t') args++;
+            llmk_oo_infermini_no_model(args);
+            llmk_oo_journal_cmd_best_effort("oo_infermini");
+            continue;
+        }
         if (my_strncmp(prompt, "/oo_list", 8) == 0) {
             llmk_oo_list_print();
             llmk_oo_journal_cmd_best_effort("oo_list");
@@ -4922,6 +4931,49 @@ static void llmk_repl_no_model_loop(void) {
 
         Print(L"\r\nNo model loaded. Use /models then set repl.cfg: model=<file> and reboot.\r\n\r\n");
     }
+}
+
+static UINT32 llmk_infermini_lcg_step_u32(UINT32 *seed) {
+    if (!seed) return 0;
+    *seed = (*seed * 1664525u) + 1013904223u;
+    return *seed;
+}
+
+static float llmk_infermini_randf01(UINT32 *seed) {
+    UINT32 x = llmk_infermini_lcg_step_u32(seed);
+    return (float)(x >> 8) / 16777216.0f;
+}
+
+static void llmk_infermini_fill_f32(float *dst, UINTN n, UINT32 *seed) {
+    if (!dst || n == 0 || !seed) return;
+    for (UINTN i = 0; i < n; i++) {
+        float r = llmk_infermini_randf01(seed);
+        dst[i] = (r - 0.5f) * 0.06f;
+    }
+}
+
+static int llmk_infermini_map_char_to_tok(char c, int vocab_size) {
+    if (vocab_size <= 0) return 0;
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (c >= 'a' && c <= 'z') return 1 + (c - 'a');
+    if (c >= '0' && c <= '9') return 27 + (c - '0');
+    if (c == ' ') return 37;
+    if (c == '.') return 38;
+    if (c == ',') return 39;
+    if (c == '!') return 40;
+    if (c == '?') return 41;
+    return ((int)(unsigned char)c) % vocab_size;
+}
+
+static char llmk_infermini_tok_to_char(int tok) {
+    if (tok >= 1 && tok <= 26) return (char)('a' + (tok - 1));
+    if (tok >= 27 && tok <= 36) return (char)('0' + (tok - 27));
+    if (tok == 37) return ' ';
+    if (tok == 38) return '.';
+    if (tok == 39) return ',';
+    if (tok == 40) return '!';
+    if (tok == 41) return '?';
+    return '_';
 }
 
 // Diagnostic:displayGOP resolution, memory, build-id, detected models, CPU features
@@ -8867,6 +8919,200 @@ int sample(float* logits, int n) {
     return max_i;
 }
 
+static void llmk_oo_infermini_no_model(const char *args) {
+    const char *text = args;
+    if (!text || text[0] == 0) text = "hello";
+
+    Config cfg;
+    cfg.dim = 32;
+    cfg.hidden_dim = 64;
+    cfg.n_layers = 2;
+    cfg.n_heads = 4;
+    cfg.n_kv_heads = 4;
+    cfg.vocab_size = 64;
+    cfg.seq_len = 32;
+
+    int kv_dim = (cfg.dim * cfg.n_kv_heads) / cfg.n_heads;
+    if (kv_dim <= 0) {
+        Print(L"\r\n[oo_infermini] ERROR: invalid kv_dim\r\n\r\n");
+        return;
+    }
+
+    UINT32 h = 2166136261u;
+    h = llmk_fnv1a32_update(h, text, (UINTN)my_strlen(text));
+    UINT32 seed = (h == 0) ? 1u : h;
+
+    UINTN w_floats = 0;
+    w_floats += (UINTN)cfg.vocab_size * (UINTN)cfg.dim; // tok_embd
+    w_floats += (UINTN)cfg.n_layers * (UINTN)cfg.dim; // rms_att
+    w_floats += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)cfg.dim; // wq
+    w_floats += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)kv_dim; // wk
+    w_floats += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)kv_dim; // wv
+    w_floats += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)cfg.dim; // wo
+    w_floats += (UINTN)cfg.n_layers * (UINTN)cfg.dim; // rms_ffn
+    w_floats += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)cfg.hidden_dim; // w1
+    w_floats += (UINTN)cfg.n_layers * (UINTN)cfg.hidden_dim * (UINTN)cfg.dim; // w2
+    w_floats += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)cfg.hidden_dim; // w3
+    w_floats += (UINTN)cfg.dim; // rms_final
+    w_floats += (UINTN)cfg.dim * (UINTN)cfg.vocab_size; // wcls
+
+    float *wmem = NULL;
+    EFI_STATUS alloc_w = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, w_floats * sizeof(float), (void **)&wmem);
+    if (EFI_ERROR(alloc_w) || !wmem) {
+        Print(L"\r\n[oo_infermini] ERROR: OOM allocating weights\r\n\r\n");
+        return;
+    }
+
+    TransformerWeights w;
+    SetMem(&w, sizeof(w), 0);
+    w.kind = 0;
+
+    UINTN off = 0;
+    w.token_embedding_table = wmem + off; off += (UINTN)cfg.vocab_size * (UINTN)cfg.dim;
+    w.rms_att_weight = wmem + off; off += (UINTN)cfg.n_layers * (UINTN)cfg.dim;
+    w.wq = wmem + off; off += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)cfg.dim;
+    w.wk = wmem + off; off += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)kv_dim;
+    w.wv = wmem + off; off += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)kv_dim;
+    w.wo = wmem + off; off += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)cfg.dim;
+    w.rms_ffn_weight = wmem + off; off += (UINTN)cfg.n_layers * (UINTN)cfg.dim;
+    w.w1 = wmem + off; off += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)cfg.hidden_dim;
+    w.w2 = wmem + off; off += (UINTN)cfg.n_layers * (UINTN)cfg.hidden_dim * (UINTN)cfg.dim;
+    w.w3 = wmem + off; off += (UINTN)cfg.n_layers * (UINTN)cfg.dim * (UINTN)cfg.hidden_dim;
+    w.rms_final_weight = wmem + off; off += (UINTN)cfg.dim;
+    w.wcls = wmem + off; off += (UINTN)cfg.dim * (UINTN)cfg.vocab_size;
+
+    if (off != w_floats) {
+        Print(L"\r\n[oo_infermini] ERROR: internal weight layout mismatch\r\n\r\n");
+        uefi_call_wrapper(BS->FreePool, 1, wmem);
+        return;
+    }
+
+    UINT32 wseed = seed ^ 0x9E3779B9u;
+    llmk_infermini_fill_f32(wmem, w_floats, &wseed);
+
+    UINTN s_floats = 0;
+    s_floats += (UINTN)cfg.dim * 3U; // x, xb, xb2
+    s_floats += (UINTN)cfg.hidden_dim * 2U; // hb, hb2
+    s_floats += (UINTN)cfg.dim; // q
+    s_floats += (UINTN)kv_dim * 2U; // k, v
+    s_floats += (UINTN)cfg.n_heads * (UINTN)cfg.seq_len; // att
+    s_floats += (UINTN)cfg.vocab_size; // logits
+    s_floats += (UINTN)cfg.n_layers * (UINTN)cfg.seq_len * (UINTN)kv_dim * 2U; // key/value cache
+
+    float *smem = NULL;
+    EFI_STATUS alloc_s = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, s_floats * sizeof(float), (void **)&smem);
+    if (EFI_ERROR(alloc_s) || !smem) {
+        Print(L"\r\n[oo_infermini] ERROR: OOM allocating state\r\n\r\n");
+        uefi_call_wrapper(BS->FreePool, 1, wmem);
+        return;
+    }
+    for (UINTN i = 0; i < s_floats; i++) smem[i] = 0.0f;
+
+    RunState st;
+    SetMem(&st, sizeof(st), 0);
+    UINTN so = 0;
+    st.x = smem + so; so += (UINTN)cfg.dim;
+    st.xb = smem + so; so += (UINTN)cfg.dim;
+    st.xb2 = smem + so; so += (UINTN)cfg.dim;
+    st.hb = smem + so; so += (UINTN)cfg.hidden_dim;
+    st.hb2 = smem + so; so += (UINTN)cfg.hidden_dim;
+    st.q = smem + so; so += (UINTN)cfg.dim;
+    st.k = smem + so; so += (UINTN)kv_dim;
+    st.v = smem + so; so += (UINTN)kv_dim;
+    st.att = smem + so; so += (UINTN)cfg.n_heads * (UINTN)cfg.seq_len;
+    st.logits = smem + so; so += (UINTN)cfg.vocab_size;
+    st.key_cache = smem + so; so += (UINTN)cfg.n_layers * (UINTN)cfg.seq_len * (UINTN)kv_dim;
+    st.value_cache = smem + so; so += (UINTN)cfg.n_layers * (UINTN)cfg.seq_len * (UINTN)kv_dim;
+    if (so != s_floats) {
+        Print(L"\r\n[oo_infermini] ERROR: internal state layout mismatch\r\n\r\n");
+        uefi_call_wrapper(BS->FreePool, 1, smem);
+        uefi_call_wrapper(BS->FreePool, 1, wmem);
+        return;
+    }
+
+    const int max_prefill = 8;
+    int prompt_tokens[max_prefill]; // SAFE: bounded local prompt token buffer (max 8)
+    int n_prompt = 0;
+    for (int i = 0; text[i] && n_prompt < max_prefill; i++) {
+        prompt_tokens[n_prompt++] = llmk_infermini_map_char_to_tok(text[i], cfg.vocab_size);
+    }
+    if (n_prompt <= 0) prompt_tokens[n_prompt++] = llmk_infermini_map_char_to_tok('h', cfg.vocab_size);
+
+    int pos = 0;
+    for (int i = 0; i < n_prompt && pos < cfg.seq_len; i++) {
+        transformer_forward(&st, &w, &cfg, prompt_tokens[i], pos);
+        pos++;
+    }
+
+    Print(L"\r\n[oo_infermini] prompt='");
+    llmk_print_ascii(text);
+    Print(L"' seed=%u\r\n", (UINT32)seed);
+
+    int recent[16]; // SAFE: bounded recent-token ring buffer (fixed 16 entries)
+    int n_recent = 0;
+    for (int i = 0; i < n_prompt && n_recent < 16; i++) recent[n_recent++] = prompt_tokens[i];
+
+    const int gen = 12;
+    UINT32 out_hash = 2166136261u;
+    Print(L"[oo_infermini] out: ");
+    for (int step = 0; step < gen && pos < cfg.seq_len; step++) {
+        int next = sample_advanced(st.logits, cfg.vocab_size, 0.0f, 0.0f, 1.0f, 0, recent, n_recent, 1.0f);
+        char c = llmk_infermini_tok_to_char(next);
+        Print(L"%c", (CHAR16)c);
+        out_hash = llmk_fnv1a32_update(out_hash, &next, sizeof(next));
+        if (n_recent < 16) recent[n_recent++] = next;
+        else {
+            for (int i = 1; i < 16; i++) recent[i - 1] = recent[i];
+            recent[15] = next; // SAFE: fixed last slot of recent[16]
+        }
+        transformer_forward(&st, &w, &cfg, next, pos);
+        pos++;
+    }
+    Print(L"\r\n[oo_infermini] ok hash=%u\r\n\r\n", out_hash);
+    uefi_call_wrapper(BS->FreePool, 1, smem);
+    uefi_call_wrapper(BS->FreePool, 1, wmem);
+}
+
+static UINT32 llmk_infermini_hash_update(UINT32 h, const void *data, UINTN len) {
+    const UINT8 *p = (const UINT8 *)data;
+    for (UINTN i = 0; i < len; i++) {
+        h ^= (UINT32)p[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static UINT32 llmk_infermini_lcg_step(UINT32 *seed) {
+    if (!seed) return 0;
+    *seed = (*seed * 1664525u) + 1013904223u;
+    return *seed;
+}
+
+static float llmk_infermini_randf(UINT32 *seed) {
+    UINT32 x = llmk_infermini_lcg_step(seed);
+    return (float)(x >> 8) / 16777216.0f;
+}
+
+static void llmk_infermini_fill(float *dst, UINTN n, UINT32 *seed) {
+    if (!dst || !seed) return;
+    for (UINTN i = 0; i < n; i++) {
+        dst[i] = (llmk_infermini_randf(seed) - 0.5f) * 0.06f;
+    }
+}
+
+static int llmk_infermini_char_to_tok(char c, int vocab_size) {
+    if (vocab_size <= 0) return 0;
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (c >= 'a' && c <= 'z') return 1 + (c - 'a');
+    if (c >= '0' && c <= '9') return 27 + (c - '0');
+    if (c == ' ') return 37;
+    if (c == '.') return 38;
+    if (c == ',') return 39;
+    if (c == '!') return 40;
+    if (c == '?') return 41;
+    return ((int)(unsigned char)c) % vocab_size;
+}
+
 // ============================================================================
 // TOKENIZER
 // ============================================================================
@@ -12748,20 +12994,16 @@ snap_autoload_done:
                     if (g_orchestrion.mode == ORCHESTRION_MODE_ENFORCE) {
                         const char *s = step;
                         while (*s == ' ' || *s == '\t') s++;
-                        // In ENFORCE mode, deny any non-empty step that is not an /oo* command.
-                        // Note: The REPL later rewrites some bare commands (e.g. "reset") into "/reset".
-                        // We must therefore enforce on the raw step before rewrite.
-                        if (*s != 0) {
-                            if (*s != '/') {
-                                Print(L"\r\n[orch_enforce] DENY non-oo command (no leading slash): ");
-                                llmk_print_ascii(s);
-                                Print(L"\r\n\r\n");
-                                g_orchestrion.pipeline.state = ORCHESTRION_STATE_ERROR;
-                                g_orchestrion.errors++;
-                                llmk_tr_note("ORCH_ENFORCE: deny non-oo (no leading slash)");
-                                continue;
-                            }
-                            if (!llmk_oo_policy_startswith_ci(s, "/oo")) {
+                        if (*s == '/') {
+                            if (llmk_oo_policy_startswith_ci(s, "/oo")) {
+                                // If denied, do not inject into prompt; stop pipeline and mark error.
+                                if (!llmk_oo_policy_check_prompt_and_warn(s)) {
+                                    g_orchestrion.pipeline.state = ORCHESTRION_STATE_ERROR;
+                                    g_orchestrion.errors++;
+                                    llmk_tr_note("ORCH_ENFORCE: deny /oo");
+                                    continue;
+                                }
+                            } else {
                                 Print(L"\r\n[orch_enforce] DENY non-oo command: ");
                                 llmk_print_ascii(s);
                                 Print(L"\r\n\r\n");
@@ -12770,16 +13012,7 @@ snap_autoload_done:
                                 llmk_tr_note("ORCH_ENFORCE: deny non-oo");
                                 continue;
                             }
-                            // If denied by policy, do not inject into prompt; stop pipeline and mark error.
-                            if (!llmk_oo_policy_check_prompt_and_warn(s)) {
-                                g_orchestrion.pipeline.state = ORCHESTRION_STATE_ERROR;
-                                g_orchestrion.errors++;
-                                llmk_tr_note("ORCH_ENFORCE: deny /oo");
-                                continue;
-                            }
                         }
-                        // Inject trimmed step so it executes as a command (no leading whitespace).
-                        step = s;
                     }
 
                     int i = 0;

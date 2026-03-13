@@ -44,6 +44,7 @@ OVMF.fd
 *.txt
 qemu*.txt
 DIAGNOSTIC.md
+!llmk-autorun-oo-smoke.txt
 
 # Local REPL config (publish repl.cfg.example instead)
 repl.cfg
