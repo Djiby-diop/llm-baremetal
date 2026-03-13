@@ -12748,16 +12748,20 @@ snap_autoload_done:
                     if (g_orchestrion.mode == ORCHESTRION_MODE_ENFORCE) {
                         const char *s = step;
                         while (*s == ' ' || *s == '\t') s++;
-                        if (*s == '/') {
-                            if (llmk_oo_policy_startswith_ci(s, "/oo")) {
-                                // If denied, do not inject into prompt; stop pipeline and mark error.
-                                if (!llmk_oo_policy_check_prompt_and_warn(s)) {
-                                    g_orchestrion.pipeline.state = ORCHESTRION_STATE_ERROR;
-                                    g_orchestrion.errors++;
-                                    llmk_tr_note("ORCH_ENFORCE: deny /oo");
-                                    continue;
-                                }
-                            } else {
+                        // In ENFORCE mode, deny any non-empty step that is not an /oo* command.
+                        // Note: The REPL later rewrites some bare commands (e.g. "reset") into "/reset".
+                        // We must therefore enforce on the raw step before rewrite.
+                        if (*s != 0) {
+                            if (*s != '/') {
+                                Print(L"\r\n[orch_enforce] DENY non-oo command (no leading slash): ");
+                                llmk_print_ascii(s);
+                                Print(L"\r\n\r\n");
+                                g_orchestrion.pipeline.state = ORCHESTRION_STATE_ERROR;
+                                g_orchestrion.errors++;
+                                llmk_tr_note("ORCH_ENFORCE: deny non-oo (no leading slash)");
+                                continue;
+                            }
+                            if (!llmk_oo_policy_startswith_ci(s, "/oo")) {
                                 Print(L"\r\n[orch_enforce] DENY non-oo command: ");
                                 llmk_print_ascii(s);
                                 Print(L"\r\n\r\n");
@@ -12766,7 +12770,16 @@ snap_autoload_done:
                                 llmk_tr_note("ORCH_ENFORCE: deny non-oo");
                                 continue;
                             }
+                            // If denied by policy, do not inject into prompt; stop pipeline and mark error.
+                            if (!llmk_oo_policy_check_prompt_and_warn(s)) {
+                                g_orchestrion.pipeline.state = ORCHESTRION_STATE_ERROR;
+                                g_orchestrion.errors++;
+                                llmk_tr_note("ORCH_ENFORCE: deny /oo");
+                                continue;
+                            }
                         }
+                        // Inject trimmed step so it executes as a command (no leading whitespace).
+                        step = s;
                     }
 
                     int i = 0;
