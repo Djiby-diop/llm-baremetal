@@ -1,4 +1,5 @@
 #include "hermes_bus.h"
+#include <string.h>
 
 static void hermes_bus_stats_zero(hermes_bus_stats_t* s) {
     if (!s) return;
@@ -15,6 +16,7 @@ static void hermes_bus_stats_zero(hermes_bus_stats_t* s) {
 
 void hermes_bus_init(hermes_bus_t* bus) {
     if (!bus) return;
+    memset(bus, 0, sizeof(*bus));
     bus->route_count = 0;
     bus->flow_enforcement_enabled = 0;
     bus->flow_rule_count = 0;
