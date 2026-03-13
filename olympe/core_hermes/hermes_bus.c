@@ -81,10 +81,9 @@ hermes_status_t hermes_bus_register(hermes_bus_t* bus, uint64_t pillar_id, herme
     return HERMES_OK;
 }
 
-hermes_status_t hermes_bus_dispatch(const hermes_bus_t* bus, const hermes_msg_t* msg, hermes_msg_t* out_response) {
+hermes_status_t hermes_bus_dispatch(hermes_bus_t* bus, const hermes_msg_t* msg, hermes_msg_t* out_response) {
     if (!bus || !msg) return HERMES_ERR_INVALID_ARG;
-    // const bus but mutable counters: keep API small and avoid global state.
-    hermes_bus_stats_t* stats = (hermes_bus_stats_t*)&bus->stats;
+    hermes_bus_stats_t* stats = &bus->stats;
     stats->dispatch_total++;
 
     hermes_status_t st = hermes_validate_header(&msg->header);
