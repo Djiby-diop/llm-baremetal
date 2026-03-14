@@ -196,6 +196,7 @@ Assert-WslSourceConsistency @(
 	'Makefile',
 	'create-boot-mtools.sh',
 	'test-qemu-autorun.ps1',
+	'llmk-autorun-handoff-smoke.txt',
 	'llmk-autorun-oo-smoke.txt'
 )
 

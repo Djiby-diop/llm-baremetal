@@ -228,12 +228,19 @@ rm -f "$img"
 # Optional: llm-baremetal UEFI/QEMU autorun smoke (exercises llama2.efi built from llama2_efi_final.c)
 if (-not $SkipLlmkSmoke) {
   $autorun = Join-Path $PSScriptRoot 'test-qemu-autorun.ps1'
+  $handoff = Join-Path $PSScriptRoot 'test-qemu-handoff.ps1'
   Assert (Test-Path -LiteralPath $autorun) "test-qemu-autorun.ps1 not found: $autorun"
+  Assert (Test-Path -LiteralPath $handoff) "test-qemu-handoff.ps1 not found: $handoff"
 
   Info "Running llm-baremetal UEFI/QEMU autorun smoke (no-model)..."
   & $autorun -Mode oo_smoke -Accel tcg -MemMB 1024 -TimeoutSec $TimeoutSec
   if ($LASTEXITCODE -ne 0) { throw "llm-baremetal autorun smoke failed ($LASTEXITCODE)" }
   Ok "OK: llm-baremetal autorun smoke PASS"
+
+  Info "Running llm-baremetal host->sovereign handoff smoke..."
+  & $handoff -Accel tcg -MemMB 1024 -TimeoutSec $TimeoutSec
+  if ($LASTEXITCODE -ne 0) { throw "llm-baremetal handoff smoke failed ($LASTEXITCODE)" }
+  Ok "OK: llm-baremetal handoff smoke PASS"
 } else {
   Warn "llm-baremetal autorun smoke skipped (-SkipLlmkSmoke)"
 }

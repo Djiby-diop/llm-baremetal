@@ -443,6 +443,13 @@ for f in llmk-autorun*.txt; do
     echo "  [OK] Copied $f"
 done
 
+# Optional host -> sovereign handoff export. If present, copy to root so
+# firmware-side inspection commands can validate the bridge end-to-end.
+if [ -f sovereign_export.json ]; then
+    mcopy sovereign_export.json z:/
+    echo "  [OK] Copied sovereign_export.json"
+fi
+
 # Create startup.nsh for auto-boot.
 # Keep the UEFI shell alive after BOOTX64.EFI returns (avoids landing in the firmware boot manager UI).
 cat > startup.nsh <<'EOF'

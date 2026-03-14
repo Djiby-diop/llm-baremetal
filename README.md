@@ -4,6 +4,13 @@ UEFI x86_64 bare-metal LLM chat REPL (GNU-EFI). Boots from USB.
 
 By Djiby Diop
 
+## Architectural role
+
+`llm-baremetal` is the **sovereign runtime** of the larger Operating Organism vision.
+It is meant to be preserved and evolved as the bare-metal / survival / recovery pillar of the system, not replaced.
+
+See [OO_GLOBAL_ARCHITECTURE.md](OO_GLOBAL_ARCHITECTURE.md) for the global direction.
+
 ## Build (Windows + WSL)
 
 ### Model weights (not in git)
@@ -30,7 +37,7 @@ Then pass the model path to the build.
    - Supported today for inference: `.bin` (llama2.c export)
    - Supported today for inference: `.gguf` (F16/F32 + common quant types like Q4/Q5/Q8; see below)
    - You can also use a base name without extension (the image builder will copy `.bin` and/or `.gguf` if present)
-2) Build + create boot image:
+3) Build + create boot image:
 
 ```powershell
 ./build.ps1
@@ -129,6 +136,12 @@ Useful REPL commands:
 
 ```powershell
 ./run.ps1 -Preflight -Gui
+```
+
+Host -> sovereign handoff smoke:
+
+```powershell
+./test-qemu-handoff.ps1
 ```
 
 Validate everything (recommended after pulling updates):

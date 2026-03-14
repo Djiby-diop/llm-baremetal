@@ -4574,6 +4574,8 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /models               List .bin/.gguf in root + models\\\r\n");
     Print(L"  /model_info [path]    Inspect a .bin/.gguf header/metadata\r\n");
     Print(L"  /cat <path>           Print a text file (e.g. repl.cfg)\r\n");
+    Print(L"  /oo_handoff_info [f]  Inspect sovereign handoff JSON (default sovereign_export.json)\r\n");
+    Print(L"  /oo_handoff_apply [f] Apply safe host->sovereign handoff fields\r\n");
     Print(L"  /oo_infermini [text]  Run tiny built-in inference selftest (no-model)\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -4597,6 +4599,8 @@ static int llmk_autorun_finish_if_eof(void);
 static void llmk_oo_print_oojour_tail_best_effort(int max_lines);
 static void llmk_oo_journal_cmd_best_effort(const char *cmd);
 static EFI_STATUS llmk_oo_save_to_file_best_effort(const CHAR16 *name, int *out_bytes);
+static void llmk_oo_handoff_info_best_effort(const CHAR16 *path);
+static void llmk_oo_handoff_apply_best_effort(const CHAR16 *path);
 static void llmk_oo_infermini_no_model(const char *args);
 
 static void llmk_repl_no_model_loop(void) {
@@ -4833,6 +4837,42 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n");
             continue;
         }
+        if (my_strncmp(prompt, "/oo_handoff_info", 16) == 0) {
+            CHAR16 path16[256];
+            path16[0] = 0;
+            int i = 16;
+            while (prompt[i] == ' ') i++;
+            if (prompt[i] != 0) {
+                char p8[192];
+                int n = 0;
+                while (prompt[i] && n + 1 < (int)sizeof(p8)) p8[n++] = prompt[i++];
+                p8[n] = 0;
+                ascii_to_char16(path16, p8, (int)(sizeof(path16) / sizeof(path16[0])));
+            } else {
+                StrCpy(path16, L"sovereign_export.json");
+            }
+            llmk_oo_handoff_info_best_effort(path16);
+            llmk_oo_journal_cmd_best_effort("oo_handoff_info");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_handoff_apply", 17) == 0) {
+            CHAR16 path16[256];
+            path16[0] = 0;
+            int i = 17;
+            while (prompt[i] == ' ') i++;
+            if (prompt[i] != 0) {
+                char p8[192];
+                int n = 0;
+                while (prompt[i] && n + 1 < (int)sizeof(p8)) p8[n++] = prompt[i++];
+                p8[n] = 0;
+                ascii_to_char16(path16, p8, (int)(sizeof(path16) / sizeof(path16[0])));
+            } else {
+                StrCpy(path16, L"sovereign_export.json");
+            }
+            llmk_oo_handoff_apply_best_effort(path16);
+            llmk_oo_journal_cmd_best_effort("oo_handoff_apply");
+            continue;
+        }
 
         // Minimal autorun controls in no-model mode.
         if (my_strncmp(prompt, "/autorun_stop", 13) == 0) {
@@ -4931,6 +4971,410 @@ static void llmk_repl_no_model_loop(void) {
 
         Print(L"\r\nNo model loaded. Use /models then set repl.cfg: model=<file> and reboot.\r\n\r\n");
     }
+}
+
+typedef struct {
+    char kind[64]; // SAFE: bounded extracted event kind from sovereign handoff JSON
+    char severity[64]; // SAFE: bounded extracted event severity from sovereign handoff JSON
+    char summary[160];
+} LlmkHandoffEvent;
+
+static const char *llmk_json_skip_ws(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+    return p;
+}
+
+static int llmk_ascii_eq_n(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) {
+        if (a[i] != b[i]) return 0;
+    }
+    return 1;
+}
+
+static const char *llmk_json_find_key_value(const char *buf, UINTN len, const char *key, const char *start_at) {
+    if (!buf || !key) return NULL;
+    int key_len = 0;
+    while (key[key_len]) key_len++;
+    if (key_len <= 0) return NULL;
+    const char *start = start_at ? start_at : buf;
+    const char *end = buf + len;
+    for (const char *p = start; p + key_len + 3 < end; p++) {
+        if (*p != '"') continue;
+        if (!llmk_ascii_eq_n(p + 1, key, key_len)) continue;
+        if (p[1 + key_len] != '"') continue;
+        const char *v = llmk_json_skip_ws(p + 1 + key_len + 1, end);
+        if (v >= end || *v != ':') continue;
+        v = llmk_json_skip_ws(v + 1, end);
+        if (v >= end) return NULL;
+        return v;
+    }
+    return NULL;
+}
+
+static int llmk_json_extract_string_value(const char *value, const char *end, char *out, int out_cap) {
+    if (!value || !out || out_cap <= 0) return 0;
+    value = llmk_json_skip_ws(value, end);
+    if (value >= end || *value != '"') return 0;
+    value++;
+    int n = 0;
+    while (value < end && *value) {
+        if (*value == '"') break;
+        if (*value == '\\' && value + 1 < end) {
+            value++;
+        }
+        if (n + 1 < out_cap) out[n++] = *value;
+        value++;
+    }
+    out[n] = 0;
+    return (value < end && *value == '"');
+}
+
+static int llmk_json_extract_int_value(const char *value, const char *end, int *out) {
+    if (!value || !out) return 0;
+    value = llmk_json_skip_ws(value, end);
+    int sign = 1;
+    if (value < end && *value == '-') {
+        sign = -1;
+        value++;
+    }
+    if (value >= end || *value < '0' || *value > '9') return 0;
+    int acc = 0;
+    while (value < end && *value >= '0' && *value <= '9') {
+        acc = acc * 10 + (*value - '0');
+        value++;
+    }
+    *out = acc * sign;
+    return 1;
+}
+
+static int llmk_json_extract_string_key_range(const char *buf, UINTN len, const char *key, char *out, int out_cap) {
+    const char *v = llmk_json_find_key_value(buf, len, key, buf);
+    if (!v) return 0;
+    return llmk_json_extract_string_value(v, buf + len, out, out_cap);
+}
+
+static int llmk_json_extract_int_key_range(const char *buf, UINTN len, const char *key, int *out) {
+    const char *v = llmk_json_find_key_value(buf, len, key, buf);
+    if (!v) return 0;
+    return llmk_json_extract_int_value(v, buf + len, out);
+}
+
+static int llmk_json_extract_recent_events(const char *buf, UINTN len, LlmkHandoffEvent *out, int cap) {
+    if (!buf || !out || cap <= 0) return 0;
+    const char *v = llmk_json_find_key_value(buf, len, "recent_events", buf);
+    if (!v) return 0;
+    const char *end = buf + len;
+    v = llmk_json_skip_ws(v, end);
+    if (v >= end || *v != '[') return 0;
+    v++;
+    int count = 0;
+    while (v < end && count < cap) {
+        v = llmk_json_skip_ws(v, end);
+        if (v >= end || *v == ']') break;
+        if (*v != '{') {
+            v++;
+            continue;
+        }
+        const char *obj = v;
+        int depth = 0;
+        int in_string = 0;
+        while (v < end) {
+            char c = *v;
+            if (c == '"' && (v == obj || v[-1] != '\\')) in_string = !in_string;
+            if (!in_string) {
+                if (c == '{') depth++;
+                else if (c == '}') {
+                    depth--;
+                    if (depth == 0) {
+                        v++;
+                        break;
+                    }
+                }
+            }
+            v++;
+        }
+        UINTN obj_len = (UINTN)(v - obj);
+        out[count].kind[0] = 0;
+        out[count].severity[0] = 0;
+        out[count].summary[0] = 0;
+        if (llmk_json_extract_string_key_range(obj, obj_len, "kind", out[count].kind, (int)sizeof(out[count].kind)) &&
+            llmk_json_extract_string_key_range(obj, obj_len, "severity", out[count].severity, (int)sizeof(out[count].severity)) &&
+            llmk_json_extract_string_key_range(obj, obj_len, "summary", out[count].summary, (int)sizeof(out[count].summary))) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static const char *llmk_oo_mode_name_ascii(UINT32 mode) {
+    switch (mode) {
+        case LLMK_OO_MODE_NORMAL: return "normal";
+        case LLMK_OO_MODE_DEGRADED: return "degraded";
+        case LLMK_OO_MODE_SAFE: return "safe";
+        default: return "unknown";
+    }
+}
+
+static int llmk_oo_mode_from_ascii(const char *s, UINT32 *out_mode) {
+    if (!s || !out_mode) return 0;
+    if (my_strncmp(s, "normal", 6) == 0 && s[6] == 0) {
+        *out_mode = LLMK_OO_MODE_NORMAL;
+        return 1;
+    }
+    if (my_strncmp(s, "degraded", 8) == 0 && s[8] == 0) {
+        *out_mode = LLMK_OO_MODE_DEGRADED;
+        return 1;
+    }
+    if (my_strncmp(s, "safe", 4) == 0 && s[4] == 0) {
+        *out_mode = LLMK_OO_MODE_SAFE;
+        return 1;
+    }
+    return 0;
+}
+
+static const char *llmk_djibion_mode_name_ascii(DjibionMode mode) {
+    switch (mode) {
+        case DJIBION_MODE_OFF: return "off";
+        case DJIBION_MODE_OBSERVE: return "observe";
+        case DJIBION_MODE_ENFORCE: return "enforce";
+        default: return "unknown";
+    }
+}
+
+static int llmk_djibion_mode_from_ascii(const char *s, DjibionMode *out_mode) {
+    if (!s || !out_mode) return 0;
+    if (my_strncmp(s, "off", 3) == 0 && s[3] == 0) {
+        *out_mode = DJIBION_MODE_OFF;
+        return 1;
+    }
+    if (my_strncmp(s, "observe", 7) == 0 && s[7] == 0) {
+        *out_mode = DJIBION_MODE_OBSERVE;
+        return 1;
+    }
+    if (my_strncmp(s, "enforce", 7) == 0 && s[7] == 0) {
+        *out_mode = DJIBION_MODE_ENFORCE;
+        return 1;
+    }
+    return 0;
+}
+
+static void llmk_oo_handoff_info_best_effort(const CHAR16 *path) {
+    const CHAR16 *load_name = path && path[0] ? path : L"sovereign_export.json";
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(load_name, &raw, &raw_len);
+    if (EFI_ERROR(st) || !raw || raw_len == 0) {
+        if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+        Print(L"\r\n[oo_handoff] ERROR: read failed: %s (%r)\r\n\r\n", load_name, st);
+        return;
+    }
+
+    char *buf = NULL;
+    EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&buf);
+    if (EFI_ERROR(st2) || !buf) {
+        uefi_call_wrapper(BS->FreePool, 1, raw);
+        Print(L"\r\n[oo_handoff] ERROR: OOM\r\n\r\n");
+        return;
+    }
+    CopyMem(buf, raw, raw_len);
+    buf[raw_len] = 0;
+    uefi_call_wrapper(BS->FreePool, 1, raw);
+
+    int schema_version = 0;
+    int active_goal_count = 0;
+    char export_kind[64]; // SAFE: bounded handoff export kind buffer
+    char organism_id[96];
+    char mode[64]; // SAFE: bounded handoff mode buffer
+    char enforcement[64]; // SAFE: bounded handoff enforcement buffer
+    export_kind[0] = 0;
+    organism_id[0] = 0;
+    mode[0] = 0;
+    enforcement[0] = 0;
+
+    int ok = 1;
+    if (!llmk_json_extract_int_key_range(buf, raw_len, "schema_version", &schema_version)) ok = 0;
+    if (!llmk_json_extract_string_key_range(buf, raw_len, "export_kind", export_kind, (int)sizeof(export_kind))) ok = 0;
+    if (!llmk_json_extract_string_key_range(buf, raw_len, "organism_id", organism_id, (int)sizeof(organism_id))) ok = 0;
+    if (!llmk_json_extract_string_key_range(buf, raw_len, "mode", mode, (int)sizeof(mode))) ok = 0;
+    if (!llmk_json_extract_string_key_range(buf, raw_len, "enforcement", enforcement, (int)sizeof(enforcement))) ok = 0;
+    if (!llmk_json_extract_int_key_range(buf, raw_len, "active_goal_count", &active_goal_count)) ok = 0;
+
+    if (!ok || schema_version != 1 || my_strncmp(export_kind, "oo_sovereign_handoff", 20) != 0 || export_kind[20] != 0) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"\r\n[oo_handoff] ERROR: invalid or unsupported handoff format\r\n\r\n");
+        return;
+    }
+
+    LlmkHandoffEvent events[16]; // SAFE: bounded recent-event extraction buffer for handoff info
+    int n_events = llmk_json_extract_recent_events(buf, raw_len, events, (int)(sizeof(events) / sizeof(events[0])));
+
+    Print(L"\r\n[oo_handoff] file=%s\r\n", load_name);
+    Print(L"[oo_handoff] schema_version=%d\r\n", schema_version);
+    Print(L"[oo_handoff] export_kind="); llmk_print_ascii(export_kind); Print(L"\r\n");
+    Print(L"[oo_handoff] organism_id="); llmk_print_ascii(organism_id); Print(L"\r\n");
+    Print(L"[oo_handoff] mode="); llmk_print_ascii(mode); Print(L"\r\n");
+    Print(L"[oo_handoff] policy.enforcement="); llmk_print_ascii(enforcement); Print(L"\r\n");
+    Print(L"[oo_handoff] active_goal_count=%d\r\n", active_goal_count);
+    if (n_events > 0) {
+        int start = (n_events > 3) ? (n_events - 3) : 0;
+        Print(L"[oo_handoff] recent_events:\r\n");
+        for (int i = start; i < n_events; i++) {
+            Print(L"  - ");
+            llmk_print_ascii(events[i].kind);
+            Print(L" [");
+            llmk_print_ascii(events[i].severity);
+            Print(L"] ");
+            llmk_print_ascii(events[i].summary);
+            Print(L"\r\n");
+        }
+    } else {
+        Print(L"[oo_handoff] recent_events=(none)\r\n");
+    }
+    Print(L"\r\n");
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
+static void llmk_oo_handoff_apply_best_effort(const CHAR16 *path) {
+    const CHAR16 *load_name = path && path[0] ? path : L"sovereign_export.json";
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(load_name, &raw, &raw_len);
+    if (EFI_ERROR(st) || !raw || raw_len == 0) {
+        if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+        Print(L"\r\n[oo_handoff_apply] ERROR: read failed: %s (%r)\r\n\r\n", load_name, st);
+        return;
+    }
+
+    char *buf = NULL;
+    EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&buf);
+    if (EFI_ERROR(st2) || !buf) {
+        uefi_call_wrapper(BS->FreePool, 1, raw);
+        Print(L"\r\n[oo_handoff_apply] ERROR: OOM\r\n\r\n");
+        return;
+    }
+    CopyMem(buf, raw, raw_len);
+    buf[raw_len] = 0;
+    uefi_call_wrapper(BS->FreePool, 1, raw);
+
+    int schema_version = 0;
+    char export_kind[64];
+    char organism_id[96];
+    char mode[64];
+    char enforcement[64];
+    export_kind[0] = 0;
+    organism_id[0] = 0;
+    mode[0] = 0;
+    enforcement[0] = 0;
+
+    int ok = 1;
+    if (!llmk_json_extract_int_key_range(buf, raw_len, "schema_version", &schema_version)) ok = 0;
+    if (!llmk_json_extract_string_key_range(buf, raw_len, "export_kind", export_kind, (int)sizeof(export_kind))) ok = 0;
+    if (!llmk_json_extract_string_key_range(buf, raw_len, "organism_id", organism_id, (int)sizeof(organism_id))) ok = 0;
+    if (!llmk_json_extract_string_key_range(buf, raw_len, "mode", mode, (int)sizeof(mode))) ok = 0;
+    if (!llmk_json_extract_string_key_range(buf, raw_len, "enforcement", enforcement, (int)sizeof(enforcement))) ok = 0;
+
+    if (!ok || schema_version != 1 || my_strncmp(export_kind, "oo_sovereign_handoff", 20) != 0 || export_kind[20] != 0) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"\r\n[oo_handoff_apply] ERROR: invalid or unsupported handoff format\r\n\r\n");
+        return;
+    }
+
+    UINT32 host_mode = LLMK_OO_MODE_SAFE;
+    DjibionMode host_policy = DJIBION_MODE_OFF;
+    if (!llmk_oo_mode_from_ascii(mode, &host_mode)) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"\r\n[oo_handoff_apply] ERROR: unsupported mode='");
+        llmk_print_ascii(mode);
+        Print(L"'\r\n\r\n");
+        return;
+    }
+    if (!llmk_djibion_mode_from_ascii(enforcement, &host_policy)) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"\r\n[oo_handoff_apply] ERROR: unsupported policy.enforcement='");
+        llmk_print_ascii(enforcement);
+        Print(L"'\r\n\r\n");
+        return;
+    }
+
+    LlmkOoState s;
+    if (!llmk_oo_load_state_best_effort(&s)) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"\r\n[oo_handoff_apply] ERROR: local OO state unavailable\r\n\r\n");
+        return;
+    }
+
+    UINT32 local_mode_before = s.mode;
+    DjibionMode local_policy_before = g_djibion.mode;
+    int mode_changed = 0;
+    int mode_kept_safer = 0;
+    EFI_STATUS write_st = EFI_SUCCESS;
+
+    if (host_mode > s.mode) {
+        s.mode = host_mode;
+        s.magic = LLMK_OO_STATE_MAGIC;
+        s.version = LLMK_OO_STATE_VER;
+        s.size = (UINT32)sizeof(LlmkOoState);
+        s.checksum = llmk_oo_state_checksum(&s);
+        write_st = llmk_oo_write_state_best_effort(&s);
+        if (!EFI_ERROR(write_st)) {
+            (void)llmk_oo_write_recovery_best_effort(&s);
+            g_oo_last_mode = s.mode;
+            g_oo_last_mode_valid = 1;
+            mode_changed = 1;
+            llmk_oo_journal_append_best_effort(&s, "handoff_apply_mode_raise");
+        }
+    } else if (host_mode < s.mode) {
+        mode_kept_safer = 1;
+    }
+
+    int policy_changed = 0;
+    int policy_kept_stricter = 0;
+    if ((int)host_policy > (int)g_djibion.mode) {
+        djibion_set_mode(&g_djibion, host_policy);
+        policy_changed = 1;
+        llmk_oo_journal_event_load_state_best_effort("handoff_apply_policy_raise");
+    } else if ((int)host_policy < (int)g_djibion.mode) {
+        policy_kept_stricter = 1;
+    }
+
+    Print(L"\r\n[oo_handoff_apply] file=%s\r\n", load_name);
+    Print(L"[oo_handoff_apply] organism_id="); llmk_print_ascii(organism_id); Print(L"\r\n");
+    Print(L"[oo_handoff_apply] host.mode="); llmk_print_ascii(mode); Print(L"\r\n");
+    Print(L"[oo_handoff_apply] local.mode.before="); llmk_print_ascii(llmk_oo_mode_name_ascii(local_mode_before)); Print(L"\r\n");
+    if (mode_changed) {
+        Print(L"[oo_handoff_apply] mode_result=applied ");
+        llmk_print_ascii(llmk_oo_mode_name_ascii(s.mode));
+        Print(L"\r\n");
+    } else if (EFI_ERROR(write_st)) {
+        Print(L"[oo_handoff_apply] mode_result=write_failed (%r)\r\n", write_st);
+    } else if (mode_kept_safer) {
+        Print(L"[oo_handoff_apply] mode_result=kept_local_safer ");
+        llmk_print_ascii(llmk_oo_mode_name_ascii(local_mode_before));
+        Print(L"\r\n");
+    } else {
+        Print(L"[oo_handoff_apply] mode_result=unchanged ");
+        llmk_print_ascii(llmk_oo_mode_name_ascii(local_mode_before));
+        Print(L"\r\n");
+    }
+
+    Print(L"[oo_handoff_apply] host.policy.enforcement="); llmk_print_ascii(enforcement); Print(L"\r\n");
+    Print(L"[oo_handoff_apply] local.policy.before="); llmk_print_ascii(llmk_djibion_mode_name_ascii(local_policy_before)); Print(L"\r\n");
+    if (policy_changed) {
+        Print(L"[oo_handoff_apply] policy_result=applied ");
+        llmk_print_ascii(llmk_djibion_mode_name_ascii(g_djibion.mode));
+        Print(L"\r\n");
+    } else if (policy_kept_stricter) {
+        Print(L"[oo_handoff_apply] policy_result=kept_local_stricter ");
+        llmk_print_ascii(llmk_djibion_mode_name_ascii(local_policy_before));
+        Print(L"\r\n");
+    } else {
+        Print(L"[oo_handoff_apply] policy_result=unchanged ");
+        llmk_print_ascii(llmk_djibion_mode_name_ascii(local_policy_before));
+        Print(L"\r\n");
+    }
+    Print(L"\r\n");
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
 }
 
 static UINT32 llmk_infermini_lcg_step_u32(UINT32 *seed) {
@@ -9438,6 +9882,8 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/model", L"Show loaded model config" },
     { "/model_info", L"Show model header (bin) or metadata (gguf)" },
     { "/models", L"List available .bin/.gguf files (root + models\\)" },
+    { "/oo_handoff_info", L"Inspect host->sovereign handoff JSON (default sovereign_export.json)" },
+    { "/oo_handoff_apply", L"Apply only safe handoff fields (mode/policy, fail-closed)" },
     { "/cpu", L"Show CPU SIMD status" },
     { "/ram", L"Show RAM budget (weights/kv/scratch/acts)" },
     { "/zones", L"Dump allocator zones + sentinel" },
@@ -9718,6 +10164,8 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/model",
         "/model_info",
         "/models",
+        "/oo_handoff_info",
+        "/oo_handoff_apply",
         "/cpu",
         "/zones",
         "/budget",
@@ -14012,6 +14460,38 @@ snap_autoload_done:
                     llmk_models_ls_best_effort(L"models", 200);
                     Print(L"\r\n");
                 }
+                continue;
+            } else if (my_strncmp(prompt, "/oo_handoff_info", 16) == 0) {
+                CHAR16 path16[256];
+                path16[0] = 0;
+                int i = 16;
+                while (prompt[i] == ' ') i++;
+                if (prompt[i] != 0) {
+                    char p8[192];
+                    int n = 0;
+                    while (prompt[i] && n + 1 < (int)sizeof(p8)) p8[n++] = prompt[i++];
+                    p8[n] = 0;
+                    ascii_to_char16(path16, p8, (int)(sizeof(path16) / sizeof(path16[0])));
+                } else {
+                    StrCpy(path16, L"sovereign_export.json");
+                }
+                llmk_oo_handoff_info_best_effort(path16);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_handoff_apply", 17) == 0) {
+                CHAR16 path16[256];
+                path16[0] = 0;
+                int i = 17;
+                while (prompt[i] == ' ') i++;
+                if (prompt[i] != 0) {
+                    char p8[192];
+                    int n = 0;
+                    while (prompt[i] && n + 1 < (int)sizeof(p8)) p8[n++] = prompt[i++];
+                    p8[n] = 0;
+                    ascii_to_char16(path16, p8, (int)(sizeof(path16) / sizeof(path16[0])));
+                } else {
+                    StrCpy(path16, L"sovereign_export.json");
+                }
+                llmk_oo_handoff_apply_best_effort(path16);
                 continue;
             } else if (my_strncmp(prompt, "/cpu", 4) == 0) {
                 CPUFeatures f;

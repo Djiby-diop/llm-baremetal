@@ -1,0 +1,5 @@
+# llmk autorun (host -> sovereign handoff smoke)
+# Expect: sovereign_export.json present on FAT root.
+
+/oo_handoff_info
+/oo_handoff_apply
