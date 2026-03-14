@@ -243,6 +243,8 @@ Imported fields:
 
 - `mode`
 - `policy.enforcement`
+- `continuity_epoch` (recorded locally as the latest observed host continuity marker)
+- `last_recovery_reason` (recorded locally when present)
 
 Safety rules:
 
@@ -254,6 +256,11 @@ Safety rules:
   - a host request to weaken local enforcement is ignored
 - malformed or unsupported values are rejected
 - organism metadata is currently inspected and journaled, not trusted as an authority switch
+- continuity markers are currently persisted as a local handoff receipt, not as authoritative sovereign state replacement
+
+Operational note:
+
+- the persisted receipt can be inspected from sovereign runtime with `/oo_handoff_receipt`
 
 This means the host can warn or tighten, but cannot silently relax sovereign survival posture.
 
