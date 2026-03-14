@@ -261,6 +261,7 @@ Safety rules:
 Operational note:
 
 - the persisted receipt can be inspected from sovereign runtime with `/oo_handoff_receipt`
+- the sovereign/runtime comparison view is available with `/oo_continuity_status`
 
 This means the host can warn or tighten, but cannot silently relax sovereign survival posture.
 

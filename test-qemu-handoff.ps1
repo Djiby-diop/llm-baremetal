@@ -197,6 +197,12 @@ try {
   Assert-Match $serial ([regex]::Escape("[oo_handoff_receipt] policy_enforcement=$([string]$export.policy.enforcement)")) "Missing handoff receipt enforcement output. Serial: $serialPath"
   Assert-Match $serial ([regex]::Escape("[oo_handoff_receipt] continuity_epoch=$([uint64]$export.continuity_epoch)")) "Missing handoff receipt continuity output. Serial: $serialPath"
   Assert-Match $serial ([regex]::Escape("[oo_handoff_receipt] last_recovery_reason=$expectedRecovery")) "Missing handoff receipt recovery output. Serial: $serialPath"
+  Assert-Match $serial '(?m)^\[oo_continuity\] receipt\.present=1\s*$' "Missing continuity receipt presence output. Serial: $serialPath"
+  Assert-Match $serial ([regex]::Escape("[oo_continuity] receipt.mode=$([string]$export.mode)")) "Missing continuity receipt mode output. Serial: $serialPath"
+  Assert-Match $serial ([regex]::Escape('[oo_continuity] local.mode=safe')) "Missing continuity local mode output. Serial: $serialPath"
+  Assert-Match $serial ([regex]::Escape('[oo_continuity] recovery.mode=safe')) "Missing continuity recovery mode output. Serial: $serialPath"
+  Assert-Match $serial ([regex]::Escape('[oo_continuity] summary=aligned')) "Missing continuity summary output. Serial: $serialPath"
+  Assert-Match $serial ([regex]::Escape('[oo_continuity] reason=local_safer_than_receipt')) "Missing continuity reason output. Serial: $serialPath"
   Assert-Match $serial '(?m)^\[autorun\] done\s*$' "Missing autorun completion marker. Serial: $serialPath"
 
   Write-Host "[Handoff] PASS" -ForegroundColor Green
