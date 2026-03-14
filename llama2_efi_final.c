@@ -4577,6 +4577,7 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /oo_handoff_info [f]  Inspect sovereign handoff JSON (default sovereign_export.json)\r\n");
     Print(L"  /oo_handoff_apply [f] Apply safe host->sovereign handoff fields\r\n");
     Print(L"  /oo_handoff_receipt   Show persisted handoff continuity receipt\r\n");
+    Print(L"  /oo_continuity_status Compare handoff receipt vs local sovereign state\r\n");
     Print(L"  /oo_infermini [text]  Run tiny built-in inference selftest (no-model)\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -4603,6 +4604,7 @@ static EFI_STATUS llmk_oo_save_to_file_best_effort(const CHAR16 *name, int *out_
 static void llmk_oo_handoff_info_best_effort(const CHAR16 *path);
 static void llmk_oo_handoff_apply_best_effort(const CHAR16 *path);
 static void llmk_oo_handoff_receipt_best_effort(const CHAR16 *path);
+static void llmk_oo_continuity_status_best_effort(const CHAR16 *path);
 static void llmk_oo_infermini_no_model(const char *args);
 
 static void llmk_repl_no_model_loop(void) {
@@ -4891,6 +4893,24 @@ static void llmk_repl_no_model_loop(void) {
             }
             llmk_oo_handoff_receipt_best_effort(path16);
             llmk_oo_journal_cmd_best_effort("oo_handoff_receipt");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_continuity_status", 21) == 0) {
+            CHAR16 path16[256];
+            path16[0] = 0;
+            int i = 21;
+            while (prompt[i] == ' ') i++;
+            if (prompt[i] != 0) {
+                char p8[192];
+                int n = 0;
+                while (prompt[i] && n + 1 < (int)sizeof(p8)) p8[n++] = prompt[i++];
+                p8[n] = 0;
+                ascii_to_char16(path16, p8, (int)(sizeof(path16) / sizeof(path16[0])));
+            } else {
+                StrCpy(path16, L"OOHANDOFF.TXT");
+            }
+            llmk_oo_continuity_status_best_effort(path16);
+            llmk_oo_journal_cmd_best_effort("oo_continuity_status");
             continue;
         }
 
@@ -5336,6 +5356,104 @@ static void llmk_oo_handoff_receipt_best_effort(const CHAR16 *path) {
     Print(L"[oo_handoff_receipt] last_recovery_reason="); llmk_print_ascii(last_recovery_reason); Print(L"\r\n\r\n");
 
     uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
+static void llmk_oo_continuity_status_best_effort(const CHAR16 *path) {
+    const CHAR16 *load_name = path && path[0] ? path : L"OOHANDOFF.TXT";
+
+    char receipt_organism_id[96];
+    char receipt_mode[64];
+    char receipt_policy[64];
+    char receipt_epoch[64];
+    char receipt_recovery_reason[128];
+    int receipt_ok = 0;
+    receipt_organism_id[0] = 0;
+    receipt_mode[0] = 0;
+    receipt_policy[0] = 0;
+    receipt_epoch[0] = 0;
+    receipt_recovery_reason[0] = 0;
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS receipt_st = llmk_read_entire_file_best_effort(load_name, &raw, &raw_len);
+    if (!EFI_ERROR(receipt_st) && raw && raw_len > 0) {
+        char *buf = NULL;
+        EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&buf);
+        if (!EFI_ERROR(st2) && buf) {
+            CopyMem(buf, raw, raw_len);
+            buf[raw_len] = 0;
+            if (llmk_handoff_receipt_extract_value(buf, "organism_id", receipt_organism_id, (int)sizeof(receipt_organism_id)) &&
+                llmk_handoff_receipt_extract_value(buf, "mode", receipt_mode, (int)sizeof(receipt_mode)) &&
+                llmk_handoff_receipt_extract_value(buf, "policy_enforcement", receipt_policy, (int)sizeof(receipt_policy)) &&
+                llmk_handoff_receipt_extract_value(buf, "continuity_epoch", receipt_epoch, (int)sizeof(receipt_epoch)) &&
+                llmk_handoff_receipt_extract_value(buf, "last_recovery_reason", receipt_recovery_reason, (int)sizeof(receipt_recovery_reason))) {
+                receipt_ok = 1;
+            }
+            uefi_call_wrapper(BS->FreePool, 1, buf);
+        }
+    }
+    if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+
+    LlmkOoState local;
+    LlmkOoState recovery;
+    int local_ok = llmk_oo_load_state_best_effort(&local);
+    int recovery_ok = llmk_oo_load_recovery_best_effort(&recovery);
+
+    const char *summary = "aligned";
+    const char *reason = "exact";
+    UINT32 receipt_mode_value = LLMK_OO_MODE_SAFE;
+    int receipt_mode_valid = 0;
+
+    if (!receipt_ok) {
+        summary = "stale";
+        reason = "no_receipt";
+    } else if (!local_ok) {
+        summary = "stale";
+        reason = "no_local_state";
+    } else if (!recovery_ok) {
+        summary = "stale";
+        reason = "no_recovery_checkpoint";
+    } else if (!llmk_oo_mode_from_ascii(receipt_mode, &receipt_mode_value)) {
+        summary = "divergent";
+        reason = "invalid_receipt_mode";
+    } else {
+        receipt_mode_valid = 1;
+        if (local.mode < receipt_mode_value) {
+            summary = "divergent";
+            reason = "local_weaker_than_receipt";
+        } else if (recovery.mode != local.mode || recovery.boot_count != local.boot_count) {
+            summary = "divergent";
+            reason = "recovery_mismatch";
+        } else if (local.mode > receipt_mode_value) {
+            summary = "aligned";
+            reason = "local_safer_than_receipt";
+        }
+    }
+
+    Print(L"\r\n[oo_continuity] receipt.file=%s\r\n", load_name);
+    Print(L"[oo_continuity] receipt.present=%d\r\n", receipt_ok ? 1 : 0);
+    if (receipt_ok) {
+        Print(L"[oo_continuity] receipt.organism_id="); llmk_print_ascii(receipt_organism_id); Print(L"\r\n");
+        Print(L"[oo_continuity] receipt.mode="); llmk_print_ascii(receipt_mode); Print(L"\r\n");
+        Print(L"[oo_continuity] receipt.policy="); llmk_print_ascii(receipt_policy); Print(L"\r\n");
+        Print(L"[oo_continuity] receipt.epoch="); llmk_print_ascii(receipt_epoch); Print(L"\r\n");
+        Print(L"[oo_continuity] receipt.last_recovery_reason="); llmk_print_ascii(receipt_recovery_reason); Print(L"\r\n");
+    }
+    Print(L"[oo_continuity] local.present=%d\r\n", local_ok ? 1 : 0);
+    if (local_ok) {
+        Print(L"[oo_continuity] local.boot_count=%lu\r\n", (UINT64)local.boot_count);
+        Print(L"[oo_continuity] local.mode="); llmk_print_ascii(llmk_oo_mode_name_ascii(local.mode)); Print(L"\r\n");
+    }
+    Print(L"[oo_continuity] recovery.present=%d\r\n", recovery_ok ? 1 : 0);
+    if (recovery_ok) {
+        Print(L"[oo_continuity] recovery.boot_count=%lu\r\n", (UINT64)recovery.boot_count);
+        Print(L"[oo_continuity] recovery.mode="); llmk_print_ascii(llmk_oo_mode_name_ascii(recovery.mode)); Print(L"\r\n");
+    }
+    if (receipt_ok && receipt_mode_valid) {
+        Print(L"[oo_continuity] receipt_mode_rank=%lu\r\n", (UINT64)receipt_mode_value);
+    }
+    Print(L"[oo_continuity] summary="); llmk_print_ascii(summary); Print(L"\r\n");
+    Print(L"[oo_continuity] reason="); llmk_print_ascii(reason); Print(L"\r\n\r\n");
 }
 
 static void llmk_oo_handoff_info_best_effort(const CHAR16 *path) {
@@ -10105,6 +10223,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/oo_handoff_info", L"Inspect host->sovereign handoff JSON (default sovereign_export.json)" },
     { "/oo_handoff_apply", L"Apply only safe handoff fields (mode/policy, fail-closed)" },
     { "/oo_handoff_receipt", L"Inspect persisted sovereign handoff receipt (default OOHANDOFF.TXT)" },
+    { "/oo_continuity_status", L"Compare handoff receipt vs local state/recovery checkpoint" },
     { "/cpu", L"Show CPU SIMD status" },
     { "/ram", L"Show RAM budget (weights/kv/scratch/acts)" },
     { "/zones", L"Dump allocator zones + sentinel" },
@@ -10388,6 +10507,7 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/oo_handoff_info",
         "/oo_handoff_apply",
         "/oo_handoff_receipt",
+        "/oo_continuity_status",
         "/cpu",
         "/zones",
         "/budget",
@@ -14730,6 +14850,22 @@ snap_autoload_done:
                     StrCpy(path16, L"OOHANDOFF.TXT");
                 }
                 llmk_oo_handoff_receipt_best_effort(path16);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_continuity_status", 21) == 0) {
+                CHAR16 path16[256];
+                path16[0] = 0;
+                int i = 21;
+                while (prompt[i] == ' ') i++;
+                if (prompt[i] != 0) {
+                    char p8[192];
+                    int n = 0;
+                    while (prompt[i] && n + 1 < (int)sizeof(p8)) p8[n++] = prompt[i++];
+                    p8[n] = 0;
+                    ascii_to_char16(path16, p8, (int)(sizeof(path16) / sizeof(path16[0])));
+                } else {
+                    StrCpy(path16, L"OOHANDOFF.TXT");
+                }
+                llmk_oo_continuity_status_best_effort(path16);
                 continue;
             } else if (my_strncmp(prompt, "/cpu", 4) == 0) {
                 CPUFeatures f;
