@@ -12,7 +12,9 @@ param(
   [switch]$SkipPrebuild,
   [switch]$SkipExport,
 
-  [string]$ExportPath
+  [string]$ExportPath,
+
+  [string]$OoHostRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,7 +27,16 @@ $autorunSource = Join-Path $root 'llmk-autorun-handoff-smoke.txt'
 $autorunTarget = Join-Path $root 'llmk-autorun.txt'
 $replCfg = Join-Path $root 'repl.cfg'
 $handoffTarget = Join-Path $root 'sovereign_export.json'
-$ooHostRoot = Join-Path $workspaceRoot 'oo-host'
+
+if (-not $PSBoundParameters.ContainsKey('OoHostRoot')) {
+  if ($env:OO_HOST_ROOT) {
+    $OoHostRoot = $env:OO_HOST_ROOT
+  } else {
+    $OoHostRoot = Join-Path $workspaceRoot 'oo-host'
+  }
+}
+
+$ooHostRoot = [System.IO.Path]::GetFullPath($OoHostRoot)
 $dataDir = Join-Path $ooHostRoot 'data'
 
 if (-not (Test-Path -LiteralPath $build)) { throw "Missing: $build" }

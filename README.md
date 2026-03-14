@@ -142,7 +142,12 @@ Host -> sovereign handoff smoke:
 
 ```powershell
 ./test-qemu-handoff.ps1
+
+# optional if oo-host is not in the default sibling path
+./test-qemu-handoff.ps1 -OoHostRoot ..\oo-host
 ```
+
+The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.
 
 Validate everything (recommended after pulling updates):
 
