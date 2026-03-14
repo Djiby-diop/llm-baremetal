@@ -87,7 +87,7 @@ jobs:
 
       - name: Verify image embeds OO policy artifacts
         run: |
-          mdir -i llm-baremetal-boot.img :: | tee /tmp/mdir-root.txt
+          mdir -i llm-baremetal-boot.img@@1M :: | tee /tmp/mdir-root.txt
           grep -qi 'OOPOLICY.BIN' /tmp/mdir-root.txt
           grep -qi 'OOPOLICY.CRC' /tmp/mdir-root.txt
           grep -qi 'policy.dplus' /tmp/mdir-root.txt
