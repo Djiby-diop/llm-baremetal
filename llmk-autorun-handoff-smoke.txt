@@ -3,3 +3,4 @@
 
 /oo_handoff_info
 /oo_handoff_apply
+/oo_handoff_receipt
