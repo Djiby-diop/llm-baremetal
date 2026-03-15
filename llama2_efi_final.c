@@ -5533,6 +5533,104 @@ static void llmk_oo_continuity_status_best_effort(const CHAR16 *path) {
     Print(L"[oo_continuity] reason="); llmk_print_ascii(reason); Print(L"\r\n\r\n");
 }
 
+static void llmk_oo_print_persistence_status_best_effort(void) {
+    LlmkOoState local;
+    LlmkOoState recovery;
+    int local_ok = llmk_oo_load_state_best_effort(&local);
+    int recovery_ok = llmk_oo_load_recovery_best_effort(&recovery);
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    UINTN consult_len = 0;
+    UINTN jour_len = 0;
+    UINTN outcome_len = 0;
+    int consult_ok = 0;
+    int jour_ok = 0;
+    int outcome_ok = 0;
+
+    if (!EFI_ERROR(llmk_read_entire_file_best_effort(L"OOCONSULT.LOG", &raw, &raw_len))) {
+        consult_ok = 1;
+        consult_len = raw_len;
+    }
+    if (raw) { uefi_call_wrapper(BS->FreePool, 1, raw); raw = NULL; }
+
+    raw_len = 0;
+    if (!EFI_ERROR(llmk_read_entire_file_best_effort(L"OOJOUR.LOG", &raw, &raw_len))) {
+        jour_ok = 1;
+        jour_len = raw_len;
+    }
+    if (raw) { uefi_call_wrapper(BS->FreePool, 1, raw); raw = NULL; }
+
+    raw_len = 0;
+    if (!EFI_ERROR(llmk_read_entire_file_best_effort(L"OOOUTCOME.LOG", &raw, &raw_len))) {
+        outcome_ok = 1;
+        outcome_len = raw_len;
+    }
+    if (raw) { uefi_call_wrapper(BS->FreePool, 1, raw); raw = NULL; }
+
+    char receipt_mode[64];
+    char receipt_epoch[64];
+    int receipt_ok = 0;
+    int receipt_mode_valid = 0;
+    UINT32 receipt_mode_value = LLMK_OO_MODE_SAFE;
+    receipt_mode[0] = 0;
+    receipt_epoch[0] = 0;
+
+    raw_len = 0;
+    if (!EFI_ERROR(llmk_read_entire_file_best_effort(L"OOHANDOFF.TXT", &raw, &raw_len)) && raw && raw_len > 0) {
+        char *buf = NULL;
+        EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&buf);
+        if (!EFI_ERROR(st2) && buf) {
+            CopyMem(buf, raw, raw_len);
+            buf[raw_len] = 0;
+            if (llmk_handoff_receipt_extract_value(buf, "mode", receipt_mode, (int)sizeof(receipt_mode)) &&
+                llmk_handoff_receipt_extract_value(buf, "continuity_epoch", receipt_epoch, (int)sizeof(receipt_epoch))) {
+                receipt_ok = 1;
+                receipt_mode_valid = llmk_oo_mode_from_ascii(receipt_mode, &receipt_mode_value);
+            }
+            uefi_call_wrapper(BS->FreePool, 1, buf);
+        }
+    }
+    if (raw) { uefi_call_wrapper(BS->FreePool, 1, raw); raw = NULL; }
+
+    const char *continuity = "stale";
+    if (receipt_ok && local_ok && recovery_ok && receipt_mode_valid) {
+        if (local.mode < receipt_mode_value) continuity = "divergent";
+        else if (recovery.mode != local.mode || recovery.boot_count != local.boot_count) continuity = "divergent";
+        else continuity = "aligned";
+    } else if (!receipt_ok) {
+        continuity = "no_receipt";
+    } else if (!local_ok) {
+        continuity = "no_local_state";
+    } else if (!recovery_ok) {
+        continuity = "no_recovery";
+    } else if (!receipt_mode_valid) {
+        continuity = "invalid_receipt";
+    }
+
+    Print(L"[OO Persistence]\r\n");
+    Print(L"  OOSTATE.BIN    present=%d", local_ok ? 1 : 0);
+    if (local_ok) {
+        Print(L" boot_count=%lu mode=%s", (UINT64)local.boot_count, llmk_oo_mode_name(local.mode));
+    }
+    Print(L"\r\n");
+    Print(L"  OORECOV.BIN    present=%d", recovery_ok ? 1 : 0);
+    if (recovery_ok) {
+        Print(L" boot_count=%lu mode=%s", (UINT64)recovery.boot_count, llmk_oo_mode_name(recovery.mode));
+    }
+    Print(L"\r\n");
+    Print(L"  OOJOUR.LOG     present=%d bytes=%lu\r\n", jour_ok ? 1 : 0, (UINT64)jour_len);
+    Print(L"  OOCONSULT.LOG  present=%d bytes=%lu\r\n", consult_ok ? 1 : 0, (UINT64)consult_len);
+    Print(L"  OOOUTCOME.LOG  present=%d bytes=%lu\r\n", outcome_ok ? 1 : 0, (UINT64)outcome_len);
+    Print(L"  OOHANDOFF.TXT  present=%d", receipt_ok ? 1 : 0);
+    if (receipt_ok) {
+        Print(L" epoch="); llmk_print_ascii(receipt_epoch);
+        Print(L" mode="); llmk_print_ascii(receipt_mode);
+    }
+    Print(L"\r\n");
+    Print(L"  continuity="); llmk_print_ascii(continuity); Print(L"\r\n\r\n");
+}
+
 static void llmk_oo_handoff_info_best_effort(const CHAR16 *path) {
     const CHAR16 *load_name = path && path[0] ? path : L"sovereign_export.json";
     void *raw = NULL;
@@ -16084,6 +16182,7 @@ snap_autoload_done:
                 Print(L"  metabion   %s tok_s=%lu samples=%d\r\n", metabion_mode_name_ascii(g_metabion.mode), (unsigned long)g_metabion.last.tokens_per_sec, (int)g_metabion.samples_count);
                 Print(L"  morphion   %s\r\n", morphion_mode_name_ascii(g_morphion.mode));
                 Print(L"  pheromion  %s top_path=%u\r\n\r\n", pheromion_mode_name_ascii(g_pheromion.mode), (unsigned)pheromion_top_path(&g_pheromion));
+                llmk_oo_print_persistence_status_best_effort();
                 continue;
 
             } else if (my_strncmp(prompt, "/gop", 4) == 0) {
@@ -17027,6 +17126,7 @@ snap_autoload_done:
                 Print(L"  state_file=%s\r\n", oo_state_file);
                 Print(L"  llm_consult=%d multi_actions=%d\r\n", consult_enabled, multi_enabled);
                 Print(L"  conf_gate=%d conf_threshold=%d\r\n", g_cfg_oo_conf_gate, g_cfg_oo_conf_threshold);
+                llmk_oo_print_persistence_status_best_effort();
                 Print(L"\r\nHint: /oo_list, /oo_show <id>, /oo_agenda <id>, /oo_save\r\n\r\n");
                 llmk_oo_journal_cmd_best_effort("oo_status");
                 continue;
