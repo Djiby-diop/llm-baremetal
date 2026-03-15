@@ -23,3 +23,8 @@ Scope: host ↔ sovereign handoff loop validated end to end
 ## Operator note
 
 If `oo-host` is present as a sibling repository, `validate.ps1` should be treated as the default release gate before producing a boot image or handing off a continuity receipt.
+
+## Release publication
+
+- Draft notes: [RELEASE_NOTES_rc-2026-03-15.md](RELEASE_NOTES_rc-2026-03-15.md)
+- Tag: `rc-2026-03-15`
