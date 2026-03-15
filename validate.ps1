@@ -27,9 +27,35 @@ Set-Location -LiteralPath $PSScriptRoot
 function Info([string]$msg) { Write-Host $msg -ForegroundColor Cyan }
 function Warn([string]$msg) { Write-Host $msg -ForegroundColor Yellow }
 
+function Resolve-WorkspacePath([string]$PathValue) {
+  if ([string]::IsNullOrWhiteSpace($PathValue)) {
+    return $null
+  }
+
+  $candidates = [System.Collections.Generic.List[string]]::new()
+
+  if ([System.IO.Path]::IsPathRooted($PathValue)) {
+    $candidates.Add([System.IO.Path]::GetFullPath($PathValue))
+  } else {
+    $candidates.Add([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot $PathValue)))
+    $candidates.Add([System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $PSScriptRoot) $PathValue)))
+    $candidates.Add([System.IO.Path]::GetFullPath($PathValue))
+  }
+
+  foreach ($candidate in ($candidates | Select-Object -Unique)) {
+    if (Test-Path -LiteralPath $candidate) {
+      return $candidate
+    }
+  }
+
+  return ($candidates | Select-Object -First 1)
+}
+
 if (-not $PSBoundParameters.ContainsKey('OoHostRoot')) {
   $OoHostRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'oo-host'
 }
+
+$OoHostRoot = Resolve-WorkspacePath $OoHostRoot
 
 function Invoke-OoBotSyncCheck([string]$ooHostRoot) {
   $ooBotExe = Join-Path $ooHostRoot 'target\debug\oo-bot.exe'
@@ -118,7 +144,7 @@ if (-not $SkipOsgSmoke) {
 # 4) Handoff + sync loop
 if (-not $SkipHandoff) {
   $handoff = Join-Path $PSScriptRoot 'test-qemu-handoff.ps1'
-  $resolvedOoHostRoot = [System.IO.Path]::GetFullPath($OoHostRoot)
+  $resolvedOoHostRoot = Resolve-WorkspacePath $OoHostRoot
   if (-not (Test-Path -LiteralPath $handoff)) {
     throw "test-qemu-handoff.ps1 not found: $handoff"
   }
@@ -126,6 +152,7 @@ if (-not $SkipHandoff) {
     if ($Strict) { throw "oo-host workspace not found: $resolvedOoHostRoot" }
     Warn "[4/4] Handoff sync-check: oo-host workspace not found (skipping)"
   } else {
+    Info "[4/4] Handoff target: $resolvedOoHostRoot"
     Info "[4/4] Handoff smoke + sync-check"
     & $handoff -OoHostRoot $resolvedOoHostRoot
     if ($LASTEXITCODE -ne 0) { throw "Handoff smoke failed ($LASTEXITCODE)" }

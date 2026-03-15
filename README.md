@@ -153,9 +153,16 @@ Validate everything (recommended after pulling updates):
 
 ```powershell
 ./validate.ps1
+
+# explicit override also works with a relative sibling path
+./validate.ps1 -OoHostRoot ..\oo-host
 ```
 
-When the sibling [oo-host](../oo-host/README.md) workspace is present, validation also runs the handoff smoke plus `oo-bot sync-check` end to end.
+When the sibling [oo-host](../oo-host/README.md) workspace is present, validation also runs the handoff smoke plus `oo-bot sync-check` end to end. Relative `-OoHostRoot` overrides are resolved against the repo root first, so sibling-path invocations stay stable.
+
+## Release candidate
+
+The current release-candidate status is tracked in [RELEASE_CANDIDATE.md](RELEASE_CANDIDATE.md).
 
 ## OS-G (Operating System Genesis) — pillar
 
