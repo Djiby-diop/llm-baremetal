@@ -127,9 +127,12 @@ Useful REPL commands:
 - `/models` to list `.gguf`/`.bin` found in the root and `models\\`
 - `/model_info <file>` to inspect a model before loading, including files in root, `models\\`, and FAT 8.3-resolved names
 - `/oo_status` to inspect runtime engine state plus persistence/continuity artifacts (`OOSTATE.BIN`, `OORECOV.BIN`, `OOJOUR.LOG`, `OOCONSULT.LOG`, `OOHANDOFF.TXT`)
+- `/oo_reboot_probe` to arm a reboot continuity check, reboot, then verify that OO state came back aligned on the next boot
 - `/cfg` to confirm effective `repl.cfg` settings
 
 For a first real-machine no-model check, the image also ships with [llmk-autorun-real-hw-oo-smoke.txt](llmk-autorun-real-hw-oo-smoke.txt). Run it with `/autorun llmk-autorun-real-hw-oo-smoke.txt` or point `autorun_file` to it in `repl.cfg`.
+
+For a real-machine reboot continuity check, the image also ships with [llmk-autorun-real-hw-oo-reboot-smoke.txt](llmk-autorun-real-hw-oo-reboot-smoke.txt). Run it with `/autorun llmk-autorun-real-hw-oo-reboot-smoke.txt`; the first `/oo_reboot_probe` arms the check and reboots, then the next boot verifies continuity and continues the script.
 
 ### Flashing from Windows
 

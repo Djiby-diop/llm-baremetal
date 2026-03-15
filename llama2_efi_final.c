@@ -4683,6 +4683,8 @@ static void llmk_oo_handoff_apply_best_effort(const CHAR16 *path);
 static void llmk_oo_handoff_receipt_best_effort(const CHAR16 *path);
 static void llmk_oo_continuity_status_best_effort(const CHAR16 *path);
 static void llmk_oo_print_persistence_status_best_effort(void);
+static void llmk_oo_reboot_probe_best_effort(void);
+static int llmk_cfg_parse_u64(const char *s, UINT64 *out);
 static void llmk_oo_infermini_no_model(const char *args);
 
 static void llmk_repl_no_model_loop(void) {
@@ -4991,6 +4993,10 @@ static void llmk_repl_no_model_loop(void) {
             llmk_oo_journal_cmd_best_effort("oo_continuity_status");
             continue;
         }
+        if (my_strncmp(prompt, "/oo_reboot_probe", 16) == 0) {
+            llmk_oo_reboot_probe_best_effort();
+            continue;
+        }
 
         // Minimal autorun controls in no-model mode.
         if (my_strncmp(prompt, "/autorun_stop", 13) == 0) {
@@ -5028,7 +5034,7 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"  llm_consult=%d multi_actions=%d\r\n", consult_enabled, multi_enabled);
             Print(L"  conf_gate=%d conf_threshold=%d\r\n", g_cfg_oo_conf_gate, g_cfg_oo_conf_threshold);
             llmk_oo_print_persistence_status_best_effort();
-            Print(L"\r\nHint: /oo_new <goal>, /oo_list, /oo_jour, /oo_continuity_status\r\n\r\n");
+            Print(L"\r\nHint: /oo_new <goal>, /oo_list, /oo_jour, /oo_continuity_status, /oo_reboot_probe\r\n\r\n");
             llmk_oo_journal_cmd_best_effort("oo_status");
             continue;
         }
@@ -5645,6 +5651,119 @@ static void llmk_oo_print_persistence_status_best_effort(void) {
     }
     Print(L"\r\n");
     Print(L"  continuity="); llmk_print_ascii(continuity); Print(L"\r\n\r\n");
+}
+
+static void llmk_oo_reboot_probe_best_effort(void) {
+    const CHAR16 *probe_name = L"OOREBOOT.TXT";
+    LlmkOoState local;
+    LlmkOoState recovery;
+    int local_ok = llmk_oo_load_state_best_effort(&local);
+    int recovery_ok = llmk_oo_load_recovery_best_effort(&recovery);
+
+    if (!local_ok || !recovery_ok) {
+        Print(L"\r\n[oo_reboot_probe] ERROR: missing OO state (local=%d recovery=%d)\r\n\r\n",
+              local_ok ? 1 : 0, recovery_ok ? 1 : 0);
+        llmk_oo_journal_event_load_state_best_effort("reboot_probe_missing_state");
+        return;
+    }
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(probe_name, &raw, &raw_len);
+    if (!EFI_ERROR(st) && raw && raw_len > 0) {
+        char *buf = NULL;
+        EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&buf);
+        if (EFI_ERROR(st2) || !buf) {
+            if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+            Print(L"\r\n[oo_reboot_probe] ERROR: OOM\r\n\r\n");
+            return;
+        }
+
+        CopyMem(buf, raw, raw_len);
+        buf[raw_len] = 0;
+        uefi_call_wrapper(BS->FreePool, 1, raw);
+        raw = NULL;
+
+        char armed_boot_txt[64]; // SAFE: decimal boot_count text extracted from a short key=value file
+        char armed_mode_txt[32]; // SAFE: mode token is one of normal|degraded|safe
+        UINT64 armed_boot = 0;
+        UINT32 armed_mode = LLMK_OO_MODE_SAFE;
+        int got_boot = llmk_handoff_receipt_extract_value(buf, "armed_boot_count", armed_boot_txt, (int)sizeof(armed_boot_txt));
+        int got_mode = llmk_handoff_receipt_extract_value(buf, "armed_mode", armed_mode_txt, (int)sizeof(armed_mode_txt));
+        int boot_ok = got_boot && llmk_cfg_parse_u64(armed_boot_txt, &armed_boot);
+        int mode_ok = got_mode && llmk_oo_mode_from_ascii(armed_mode_txt, &armed_mode);
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+
+        int boot_advanced = boot_ok && local.boot_count > armed_boot;
+        int recovery_match = (recovery.mode == local.mode && recovery.boot_count == local.boot_count) ? 1 : 0;
+        int mode_ok_now = mode_ok ? (local.mode >= armed_mode) : 0;
+        int verified = boot_advanced && recovery_match && mode_ok_now;
+
+        Print(L"\r\n[oo_reboot_probe] armed.present=1\r\n");
+        if (boot_ok) {
+            Print(L"[oo_reboot_probe] armed.boot_count=%lu\r\n", armed_boot);
+        } else {
+            Print(L"[oo_reboot_probe] armed.boot_count=invalid\r\n");
+        }
+        if (mode_ok) {
+            Print(L"[oo_reboot_probe] armed.mode="); llmk_print_ascii(armed_mode_txt); Print(L"\r\n");
+        } else {
+            Print(L"[oo_reboot_probe] armed.mode=invalid\r\n");
+        }
+        Print(L"[oo_reboot_probe] current.boot_count=%lu\r\n", (UINT64)local.boot_count);
+        Print(L"[oo_reboot_probe] current.mode="); llmk_print_ascii(llmk_oo_mode_name_ascii(local.mode)); Print(L"\r\n");
+        Print(L"[oo_reboot_probe] boot_advanced=%d\r\n", boot_advanced ? 1 : 0);
+        Print(L"[oo_reboot_probe] recovery_match=%d\r\n", recovery_match ? 1 : 0);
+        Print(L"[oo_reboot_probe] mode_ok=%d\r\n", mode_ok_now ? 1 : 0);
+        Print(L"[oo_reboot_probe] verified=%d\r\n", verified ? 1 : 0);
+
+        if (verified) {
+            (void)llmk_delete_file_best_effort(probe_name);
+            Print(L"[oo_reboot_probe] summary=pass\r\n\r\n");
+            llmk_oo_journal_event_load_state_best_effort("reboot_probe_verified");
+        } else {
+            Print(L"[oo_reboot_probe] summary=fail\r\n\r\n");
+            llmk_oo_journal_event_load_state_best_effort("reboot_probe_failed");
+        }
+        return;
+    }
+    if (raw) {
+        uefi_call_wrapper(BS->FreePool, 1, raw);
+        raw = NULL;
+    }
+
+    char out[160];
+    int p = 0;
+    out[0] = 0;
+    llmk_ascii_append_str(out, (int)sizeof(out), &p, "armed_boot_count=");
+    llmk_ascii_append_u64(out, (int)sizeof(out), &p, local.boot_count);
+    llmk_ascii_append_str(out, (int)sizeof(out), &p, "\r\narmed_mode=");
+    llmk_ascii_append_str(out, (int)sizeof(out), &p, llmk_oo_mode_name_ascii(local.mode));
+    llmk_ascii_append_str(out, (int)sizeof(out), &p, "\r\n");
+
+    EFI_FILE_HANDLE f = NULL;
+    st = llmk_open_binary_file(&f, probe_name);
+    if (EFI_ERROR(st) || !f) {
+        Print(L"\r\n[oo_reboot_probe] ERROR: cannot arm probe (%r)\r\n\r\n", st);
+        llmk_oo_journal_event_load_state_best_effort("reboot_probe_arm_failed");
+        return;
+    }
+
+    st = llmk_file_write_bytes(f, out, (UINTN)p);
+    EFI_STATUS flush_st = uefi_call_wrapper(f->Flush, 1, f);
+    uefi_call_wrapper(f->Close, 1, f);
+    if (EFI_ERROR(st) || EFI_ERROR(flush_st)) {
+        Print(L"\r\n[oo_reboot_probe] ERROR: cannot flush probe (%r/%r)\r\n\r\n", st, flush_st);
+        llmk_oo_journal_event_load_state_best_effort("reboot_probe_arm_failed");
+        return;
+    }
+
+    Print(L"\r\n[oo_reboot_probe] armed.present=0\r\n");
+    Print(L"[oo_reboot_probe] armed.boot_count=%lu\r\n", (UINT64)local.boot_count);
+    Print(L"[oo_reboot_probe] armed.mode="); llmk_print_ascii(llmk_oo_mode_name_ascii(local.mode)); Print(L"\r\n");
+    Print(L"[oo_reboot_probe] action=rebooting\r\n\r\n");
+    llmk_oo_journal_event_load_state_best_effort("reboot_probe_arm");
+    uefi_call_wrapper(RT->ResetSystem, 4, EfiResetCold, EFI_SUCCESS, 0, NULL);
 }
 
 static void llmk_oo_handoff_info_best_effort(const CHAR16 *path) {
@@ -10656,6 +10775,7 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/oo_new", L"Create an entity (long-lived intention)" },
     { "/oo_list", L"List entities" },
     { "/oo_status", L"Show OO config + persistence status" },
+    { "/oo_reboot_probe", L"Arm or verify OO continuity across reboot" },
     { "/oo_step", L"Advance one entity by one step" },
     { "/oo_run", L"Run n cooperative steps across entities" },
     { "/oo_kill", L"Kill an entity" },
@@ -15239,6 +15359,9 @@ snap_autoload_done:
                     StrCpy(path16, L"OOHANDOFF.TXT");
                 }
                 llmk_oo_continuity_status_best_effort(path16);
+                continue;
+            } else if (my_strncmp(prompt, "/oo_reboot_probe", 16) == 0) {
+                llmk_oo_reboot_probe_best_effort();
                 continue;
             } else if (my_strncmp(prompt, "/cpu", 4) == 0) {
                 CPUFeatures f;
