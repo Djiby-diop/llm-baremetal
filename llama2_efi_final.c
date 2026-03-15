@@ -4670,6 +4670,7 @@ static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries);
 static void llmk_fs_cat_best_effort(const CHAR16 *path, UINTN max_bytes);
 static void llmk_print_diag(void);
+static EFI_STATUS llmk_file_write_u16(EFI_FILE_HANDLE f, const CHAR16 *s);
 static int llmk_autorun_start(const CHAR16 *name, int shutdown_when_done);
 static int llmk_autorun_next_line(char *out, int out_cap);
 static void llmk_autorun_stop(void);
@@ -5996,6 +5997,113 @@ static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries) {
         llmk_print_u64(total_bytes);
         Print(L"\r\n");
     }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+}
+
+static void llmk_diag_write_models_inventory_to_file(EFI_FILE_HANDLE f,
+                                                     const CHAR16 *path,
+                                                     const CHAR16 *label,
+                                                     int max_entries) {
+    if (!f) return;
+    if (max_entries <= 0) max_entries = 200;
+    if (max_entries > 500) max_entries = 500;
+
+    llmk_file_write_u16(f, label ? label : L"Models");
+    llmk_file_write_u16(f, L":\r\n");
+
+    if (!g_root) {
+        llmk_file_write_u16(f, L"  (file system not ready)\r\n\r\n");
+        return;
+    }
+
+    EFI_FILE_HANDLE dir = NULL;
+    int close_dir = 0;
+    if (!path || path[0] == 0 || llmk_char16_streq(path, L".") || llmk_char16_streq(path, L"\\")) {
+        dir = g_root;
+        close_dir = 0;
+    } else {
+        EFI_STATUS open_st = llmk_open_read_with_fat83_fallback(g_root, path, &dir, NULL, 0, L"diag_models_dir");
+        if (EFI_ERROR(open_st) || !dir) {
+            CHAR16 line[160]; // SAFE: bounded one-line diagnostic message
+            SPrint(line, sizeof(line), L"  (cannot open %s: %r)\r\n\r\n", (CHAR16 *)path, open_st);
+            llmk_file_write_u16(f, line);
+            return;
+        }
+        close_dir = 1;
+    }
+
+    uefi_call_wrapper(dir->SetPosition, 2, dir, 0);
+
+    UINTN buf_cap = 1024;
+    void *buf = NULL;
+    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, buf_cap, &buf);
+    if (EFI_ERROR(st) || !buf) {
+        if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
+        llmk_file_write_u16(f, L"  (OOM)\r\n\r\n");
+        return;
+    }
+
+    UINTN printed = 0;
+    UINTN matched = 0;
+    UINTN bin_count = 0;
+    UINTN gguf_count = 0;
+    UINT64 total_bytes = 0;
+
+    while (printed < (UINTN)max_entries) {
+        UINTN sz = buf_cap;
+        st = uefi_call_wrapper(dir->Read, 3, dir, &sz, buf);
+        if (EFI_ERROR(st)) {
+            CHAR16 line[128]; // SAFE: bounded error line buffer
+            SPrint(line, sizeof(line), L"  (read failed: %r)\r\n", st);
+            llmk_file_write_u16(f, line);
+            break;
+        }
+        if (sz == 0) break;
+
+        EFI_FILE_INFO *info = (EFI_FILE_INFO *)buf;
+        if (!info->FileName) continue;
+        if (llmk_char16_streq(info->FileName, L".") || llmk_char16_streq(info->FileName, L"..")) continue;
+        if (info->Attribute & EFI_FILE_DIRECTORY) continue;
+        if (!llmk_is_model_file_name16(info->FileName)) continue;
+
+        CHAR16 alias_leaf[32]; // SAFE: FAT 8.3 alias display buffer
+        alias_leaf[0] = 0;
+        int have_alias = llmk_try_guess_existing_fat83_alias(g_root, path, info->FileName,
+                                                             alias_leaf, (int)(sizeof(alias_leaf) / sizeof(alias_leaf[0])));
+
+        CHAR16 line[320]; // SAFE: bounded model inventory line
+        const CHAR16 *type = llmk_model_type_name16(info->FileName);
+        if (have_alias && !llmk_char16_streq_ci(alias_leaf, info->FileName)) {
+            SPrint(line, sizeof(line), L"  %s | %lu bytes | %s | 8.3=%s\r\n",
+                   type, (UINT64)info->FileSize, info->FileName, alias_leaf);
+        } else {
+            SPrint(line, sizeof(line), L"  %s | %lu bytes | %s\r\n",
+                   type, (UINT64)info->FileSize, info->FileName);
+        }
+        llmk_file_write_u16(f, line);
+
+        if (llmk_char16_streq(type, L"BIN")) bin_count++;
+        else if (llmk_char16_streq(type, L"GGUF")) gguf_count++;
+        total_bytes += info->FileSize;
+        printed++;
+        matched++;
+    }
+
+    if (matched == 0) {
+        llmk_file_write_u16(f, L"  (no .bin/.gguf found)\r\n");
+    }
+    if (printed >= (UINTN)max_entries) {
+        llmk_file_write_u16(f, L"  ... (truncated)\r\n");
+    }
+    if (matched > 0) {
+        CHAR16 line[192]; // SAFE: bounded summary line
+        SPrint(line, sizeof(line), L"  summary: total=%lu bin=%lu gguf=%lu bytes=%lu\r\n",
+               (UINT64)matched, (UINT64)bin_count, (UINT64)gguf_count, total_bytes);
+        llmk_file_write_u16(f, line);
+    }
+    llmk_file_write_u16(f, L"\r\n");
 
     uefi_call_wrapper(BS->FreePool, 1, buf);
     if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
@@ -15289,7 +15397,44 @@ snap_autoload_done:
                 // Human-friendly report header (UTF-16)
                 {
                     CHAR16 line[256];
+                    UINT64 total_mem = llmk_get_conventional_ram_bytes_best_effort();
+                    CPUFeatures cpu_features;
+                    djiblas_detect_cpu(&cpu_features);
+                    sgemm_kernel_t k = djiblas_get_best_kernel(&cpu_features);
+                    const CHAR16 *kernel_name = L"SCALAR";
+                    if (k == djiblas_sgemm_avx512) kernel_name = L"AVX512";
+                    else if (k == djiblas_sgemm_avx2) kernel_name = (cpu_features.has_fma ? L"AVX2+FMA" : L"AVX2");
+                    else if (k == djiblas_sgemm_sse2) kernel_name = L"SSE2";
+
                     llmk_file_write_u16(f, L"LLMK DIAGNOSTIC REPORT\r\n\r\n");
+                    llmk_file_write_u16(f, L"System:\r\n");
+                    SPrint(line, sizeof(line), L"  build=%s\r\n", LLMB_BUILD_ID);
+                    llmk_file_write_u16(f, line);
+                    if (g_gop && g_gop_fb32) {
+                        SPrint(line, sizeof(line), L"  gop=%dx%d ppsl=%d fb=0x%lx\r\n",
+                               (int)g_gop_w, (int)g_gop_h, (int)g_gop_ppsl, (UINT64)(UINTN)g_gop_fb32);
+                    } else {
+                        SPrint(line, sizeof(line), L"  gop=(not available)\r\n");
+                    }
+                    llmk_file_write_u16(f, line);
+                    if (total_mem > 0) {
+                        SPrint(line, sizeof(line), L"  ram_mib=%lu\r\n", total_mem / (1024ULL * 1024ULL));
+                    } else {
+                        SPrint(line, sizeof(line), L"  ram_mib=(unknown)\r\n");
+                    }
+                    llmk_file_write_u16(f, line);
+                    SPrint(line, sizeof(line), L"  cpu: sse2=%d avx=%d avx2=%d fma=%d kernel=%s attn=%s\r\n\r\n",
+                           (int)cpu_features.has_sse2,
+                           (int)cpu_features.has_avx,
+                           (int)cpu_features.has_avx2,
+                           (int)cpu_features.has_fma,
+                           kernel_name,
+                           g_attn_use_avx2 ? L"AVX2" : L"SSE2");
+                    llmk_file_write_u16(f, line);
+
+                    llmk_diag_write_models_inventory_to_file(f, NULL, L"Models root", 64);
+                    llmk_diag_write_models_inventory_to_file(f, L"models", L"Models models\\", 64);
+
                     SPrint(line, sizeof(line), L"  model=%s\r\n", model_filename ? model_filename : L"(unknown)");
                     llmk_file_write_u16(f, line);
                     SPrint(line, sizeof(line), L"  dim=%d layers=%d heads=%d kv=%d vocab=%d seq=%d\r\n",

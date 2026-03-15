@@ -123,6 +123,7 @@ Suggested first-run settings:
 Useful REPL commands:
 
 - `/diag` to inspect GOP, RAM, CPU features, and detected model paths
+- `/diag_report` to save the same diagnostic view plus model inventory to `llmk-diag.txt`
 - `/models` to list `.gguf`/`.bin` found in the root and `models\\`
 - `/model_info <file>` to inspect a model before loading
 - `/cfg` to confirm effective `repl.cfg` settings
