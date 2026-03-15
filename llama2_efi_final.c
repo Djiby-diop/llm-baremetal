@@ -4682,6 +4682,7 @@ static void llmk_oo_handoff_info_best_effort(const CHAR16 *path);
 static void llmk_oo_handoff_apply_best_effort(const CHAR16 *path);
 static void llmk_oo_handoff_receipt_best_effort(const CHAR16 *path);
 static void llmk_oo_continuity_status_best_effort(const CHAR16 *path);
+static void llmk_oo_print_persistence_status_best_effort(void);
 static void llmk_oo_infermini_no_model(const char *args);
 
 static void llmk_repl_no_model_loop(void) {
@@ -5014,6 +5015,21 @@ static void llmk_repl_no_model_loop(void) {
         if (my_strncmp(prompt, "/oo_list", 8) == 0) {
             llmk_oo_list_print();
             llmk_oo_journal_cmd_best_effort("oo_list");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_status", 10) == 0) {
+            int consult_enabled = g_cfg_oo_llm_consult;
+            if (consult_enabled < 0) consult_enabled = g_cfg_oo_enable ? 1 : 0;
+            int multi_enabled = g_cfg_oo_multi_actions;
+            if (multi_enabled < 0) multi_enabled = (consult_enabled > 0) ? 1 : 0;
+
+            Print(L"\r\nOO status (no model):\r\n");
+            Print(L"  oo_enable=%d\r\n", g_cfg_oo_enable);
+            Print(L"  llm_consult=%d multi_actions=%d\r\n", consult_enabled, multi_enabled);
+            Print(L"  conf_gate=%d conf_threshold=%d\r\n", g_cfg_oo_conf_gate, g_cfg_oo_conf_threshold);
+            llmk_oo_print_persistence_status_best_effort();
+            Print(L"\r\nHint: /oo_new <goal>, /oo_list, /oo_jour, /oo_continuity_status\r\n\r\n");
+            llmk_oo_journal_cmd_best_effort("oo_status");
             continue;
         }
         if (my_strncmp(prompt, "/oo_new", 7) == 0) {

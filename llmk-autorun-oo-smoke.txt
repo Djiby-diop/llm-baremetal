@@ -8,6 +8,8 @@
 
 /oo_new hello
 /oo_list
+/oo_status
+/oo_continuity_status
 /oo_jour
 
 /oo_infermini hello world
