@@ -129,6 +129,8 @@ Useful REPL commands:
 - `/oo_status` to inspect runtime engine state plus persistence/continuity artifacts (`OOSTATE.BIN`, `OORECOV.BIN`, `OOJOUR.LOG`, `OOCONSULT.LOG`, `OOHANDOFF.TXT`)
 - `/cfg` to confirm effective `repl.cfg` settings
 
+For a first real-machine no-model check, the image also ships with [llmk-autorun-real-hw-oo-smoke.txt](llmk-autorun-real-hw-oo-smoke.txt). Run it with `/autorun llmk-autorun-real-hw-oo-smoke.txt` or point `autorun_file` to it in `repl.cfg`.
+
 ### Flashing from Windows
 
 - Use Rufus: select the `.img` (or extract from `.img.xz` first), partition scheme **GPT**, target **UEFI (non CSM)**.

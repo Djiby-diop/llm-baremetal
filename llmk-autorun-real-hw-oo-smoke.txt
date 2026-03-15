@@ -1,0 +1,11 @@
+# real hardware OO smoke (no-model friendly)
+# Intended for USB/UEFI validation before loading any model.
+# Run manually with /autorun llmk-autorun-real-hw-oo-smoke.txt
+# or set repl.cfg: autorun_autostart=1 + autorun_file=llmk-autorun-real-hw-oo-smoke.txt
+
+/diag
+/models
+/oo_status
+/oo_continuity_status
+/diag_report
+/cfg
