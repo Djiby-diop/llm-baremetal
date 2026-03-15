@@ -589,6 +589,82 @@ static EFI_STATUS llmk_open_read_with_fat83_fallback(EFI_FILE_HANDLE Root,
     return st;
 }
 
+static int llmk_try_guess_existing_fat83_alias(EFI_FILE_HANDLE Root,
+                                               const CHAR16 *dir_path,
+                                               const CHAR16 *leaf,
+                                               CHAR16 *out_alias,
+                                               int out_alias_cap) {
+    if (out_alias && out_alias_cap > 0) out_alias[0] = 0;
+    if (!Root || !leaf || !leaf[0] || !out_alias || out_alias_cap <= 1) return 0;
+    if (llmk_char16_has_tilde(leaf)) return 0;
+
+    const CHAR16 *dot = NULL;
+    for (const CHAR16 *p = leaf; *p; p++) {
+        if (*p == L'.') dot = p;
+    }
+
+    const CHAR16 *leaf_base = leaf;
+    const CHAR16 *leaf_ext = NULL;
+    int base_len = 0;
+    if (dot && dot > leaf) {
+        base_len = (int)(dot - leaf);
+        leaf_ext = dot + 1;
+    } else {
+        base_len = (int)StrLen(leaf);
+    }
+    if (base_len <= 0) return 0;
+
+    CHAR16 base_s[64]; // SAFE: sanitized base name scratch buffer; bounded by sizeof(base_s)-1
+    CHAR16 ext_s[16]; // SAFE: sanitized extension scratch buffer; bounded to 3 chars + NUL
+    int bn = 0;
+    int en = 0;
+    for (int i = 0; i < base_len && bn < (int)(sizeof(base_s) / sizeof(base_s[0])) - 1; i++) {
+        CHAR16 c = leaf_base[i];
+        if (llmk_char16_is_alnum(c)) base_s[bn++] = llmk_char16_toupper(c);
+    }
+    base_s[bn] = 0;
+    if (leaf_ext) {
+        for (const CHAR16 *p = leaf_ext; *p && en < (int)(sizeof(ext_s) / sizeof(ext_s[0])) - 1; p++) {
+            CHAR16 c = *p;
+            if (llmk_char16_is_alnum(c)) ext_s[en++] = llmk_char16_toupper(c);
+            if (en >= 3) break;
+        }
+    }
+    ext_s[en] = 0;
+    if (bn <= 0) return 0;
+
+    CHAR16 prefix6[8]; // SAFE: FIRST6 prefix + NUL
+    int p6 = 0;
+    for (int i = 0; i < bn && p6 < 6; i++) {
+        prefix6[p6++] = base_s[i];
+    }
+    prefix6[p6] = 0;
+    if (p6 <= 0) return 0;
+
+    for (int n = 1; n <= 9; n++) {
+        CHAR16 alias_leaf[32]; // SAFE: FAT 8.3 alias leaf (FIRST6~N[.EXT]) fits easily
+        alias_leaf[0] = 0;
+        StrCpy(alias_leaf, prefix6);
+        StrCat(alias_leaf, L"~");
+        {
+            CHAR16 digit[2]; // SAFE: single digit + NUL
+            digit[0] = (CHAR16)(L'0' + n);
+            digit[1] = 0; // SAFE: terminator write within digit[2]
+            StrCat(alias_leaf, digit);
+        }
+        if (en > 0) {
+            StrCat(alias_leaf, L".");
+            StrCat(alias_leaf, ext_s);
+        }
+
+        if (llmk_dir_contains_leaf_ci(Root, dir_path, alias_leaf)) {
+            llmk_char16_copy_cap(out_alias, out_alias_cap, alias_leaf);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void llmk_char16_copy_cap(CHAR16 *dst, int cap, const CHAR16 *src) {
     if (!dst || cap <= 0) return;
     if (!src) { dst[0] = 0; return; }
@@ -5871,6 +5947,11 @@ static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries) {
         if (info->Attribute & EFI_FILE_DIRECTORY) continue;
         if (!llmk_is_model_file_name16(info->FileName)) continue;
 
+        CHAR16 alias_leaf[32]; // SAFE: FAT 8.3 alias leaf buffer for display only
+        alias_leaf[0] = 0;
+        int have_alias = llmk_try_guess_existing_fat83_alias(g_root, path, info->FileName,
+                                                             alias_leaf, (int)(sizeof(alias_leaf) / sizeof(alias_leaf[0])));
+
         if (matched == 0) {
             Print(L"  size      type  name\r\n");
         }
@@ -5888,7 +5969,11 @@ static void llmk_models_ls_best_effort(const CHAR16 *path, int max_entries) {
         } else {
             Print(L"    ");
         }
-        Print(L"%s\r\n", info->FileName);
+        Print(L"%s", info->FileName);
+        if (have_alias && !llmk_char16_streq_ci(alias_leaf, info->FileName)) {
+            Print(L"  [8.3: %s]", alias_leaf);
+        }
+        Print(L"\r\n");
         printed++;
         matched++;
         total_bytes += info->FileSize;
