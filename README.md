@@ -155,6 +155,8 @@ Validate everything (recommended after pulling updates):
 ./validate.ps1
 ```
 
+When the sibling [oo-host](../oo-host/README.md) workspace is present, validation also runs the handoff smoke plus `oo-bot sync-check` end to end.
+
 ## OS-G (Operating System Genesis) — pillar
 
 OS-G is included as a self-contained kernel-governor prototype (Memory Warden + D+ pipeline) under:

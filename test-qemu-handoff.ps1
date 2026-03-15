@@ -90,8 +90,11 @@ function Export-ImageFile([string]$imagePath, [string]$sourceName, [string]$dest
   if (-not (Test-Path -LiteralPath $destinationDir)) {
     New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
   }
+  if (Test-Path -LiteralPath $destinationFull) {
+    Remove-Item -LiteralPath $destinationFull -Force
+  }
   $destinationWsl = Convert-WindowsPathToWsl $destinationFull
-  $bashCommand = "mcopy -o -i '$imageWsl@@1M' '::$sourceName' '$destinationWsl'"
+  $bashCommand = "rm -f '$destinationWsl'; mcopy -o -i '$imageWsl@@1M' '::$sourceName' '$destinationWsl'"
   & wsl bash -lc $bashCommand
   if ($LASTEXITCODE -ne 0) {
     throw "failed to extract $sourceName from image: $imagePath"

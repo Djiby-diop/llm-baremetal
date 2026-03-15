@@ -11,7 +11,13 @@ param(
 
   # Pass-through to OS-G smoke runner.
   [ValidateSet('debug','release')][string]$OsgProfile = 'release',
-  [int]$TimeoutSec = 180
+  [int]$TimeoutSec = 180,
+
+  # When set, skip host->sovereign handoff smoke and sync verification.
+  [switch]$SkipHandoff,
+
+  # Optional override for sibling oo-host workspace.
+  [string]$OoHostRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,15 +27,43 @@ Set-Location -LiteralPath $PSScriptRoot
 function Info([string]$msg) { Write-Host $msg -ForegroundColor Cyan }
 function Warn([string]$msg) { Write-Host $msg -ForegroundColor Yellow }
 
+if (-not $PSBoundParameters.ContainsKey('OoHostRoot')) {
+  $OoHostRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'oo-host'
+}
+
+function Invoke-OoBotSyncCheck([string]$ooHostRoot) {
+  $ooBotExe = Join-Path $ooHostRoot 'target\debug\oo-bot.exe'
+  if (Test-Path -LiteralPath $ooBotExe) {
+    & $ooBotExe --data-dir (Join-Path $ooHostRoot 'data') sync-check --workspace $PSScriptRoot | Out-Host
+    return [int]$LASTEXITCODE
+  }
+
+  $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+  if (-not $cargo) {
+    if ($Strict) { throw "cargo not found and oo-bot.exe missing; cannot run sync-check" }
+    Warn "[4/4] Handoff sync-check: cargo not found (skipping)"
+    return $null
+  }
+
+  Push-Location -LiteralPath $ooHostRoot
+  try {
+    & cargo run --quiet --bin oo-bot -- --data-dir data sync-check --workspace ..\llm-baremetal | Out-Host
+    return [int]$LASTEXITCODE
+  }
+  finally {
+    Pop-Location
+  }
+}
+
 Info "=== Validate (llm-baremetal) ==="
 
 # 1) Host preflight (WSL/QEMU/OVMF)
 $preflight = Join-Path $PSScriptRoot 'preflight-host.ps1'
 if (Test-Path -LiteralPath $preflight) {
-  Info "[1/3] Host preflight"
+  Info "[1/4] Host preflight"
   & $preflight
 } else {
-  Warn "[1/3] Host preflight: missing preflight-host.ps1 (skipping)"
+  Warn "[1/4] Host preflight: missing preflight-host.ps1 (skipping)"
 }
 
 # 2) OS-G host-side checks
@@ -37,14 +71,14 @@ if (-not $SkipOsgHost) {
   $osgRoot = Join-Path $PSScriptRoot 'OS-G (Operating System Genesis)'
   if (-not (Test-Path -LiteralPath $osgRoot)) {
     if ($Strict) { throw "OS-G folder not found: $osgRoot" }
-    Warn "[2/3] OS-G host checks: OS-G folder not found (skipping)"
+    Warn "[2/4] OS-G host checks: OS-G folder not found (skipping)"
   } else {
     $cargo = Get-Command cargo -ErrorAction SilentlyContinue
     if (-not $cargo) {
       if ($Strict) { throw "cargo not found (install Rust toolchain)" }
-      Warn "[2/3] OS-G host checks: cargo not found (skipping)"
+      Warn "[2/4] OS-G host checks: cargo not found (skipping)"
     } else {
-      Info "[2/3] OS-G host checks: cargo test --features std"
+      Info "[2/4] OS-G host checks: cargo test --features std"
       Push-Location -LiteralPath $osgRoot
       try {
         & cargo test --features std
@@ -55,7 +89,7 @@ if (-not $SkipOsgHost) {
           throw "OS-G smoke policy not found: $policyForSmoke"
         }
 
-        Info "[2/3] OS-G host checks: dplus_check qemu-fs/policy.dplus"
+        Info "[2/4] OS-G host checks: dplus_check qemu-fs/policy.dplus"
         & cargo run --quiet --features std --bin dplus_check -- $policyForSmoke
         if ($LASTEXITCODE -ne 0) { throw "dplus_check failed ($LASTEXITCODE)" }
       }
@@ -65,12 +99,12 @@ if (-not $SkipOsgHost) {
     }
   }
 } else {
-  Warn "[2/3] OS-G host checks: skipped (-SkipOsgHost)"
+  Warn "[2/4] OS-G host checks: skipped (-SkipOsgHost)"
 }
 
 # 3) OS-G QEMU/UEFI smoke
 if (-not $SkipOsgSmoke) {
-  Info "[3/3] OS-G smoke (UEFI/QEMU)"
+  Info "[3/4] OS-G smoke (UEFI/QEMU)"
   $smoke = Join-Path $PSScriptRoot 'run-osg-smoke.ps1'
   if (-not (Test-Path -LiteralPath $smoke)) {
     throw "run-osg-smoke.ps1 not found: $smoke"
@@ -78,7 +112,31 @@ if (-not $SkipOsgSmoke) {
   & $smoke -Profile $OsgProfile -TimeoutSec $TimeoutSec
   if ($LASTEXITCODE -ne 0) { throw "OS-G smoke failed ($LASTEXITCODE)" }
 } else {
-  Warn "[3/3] OS-G smoke: skipped (-SkipOsgSmoke)"
+  Warn "[3/4] OS-G smoke: skipped (-SkipOsgSmoke)"
+}
+
+# 4) Handoff + sync loop
+if (-not $SkipHandoff) {
+  $handoff = Join-Path $PSScriptRoot 'test-qemu-handoff.ps1'
+  $resolvedOoHostRoot = [System.IO.Path]::GetFullPath($OoHostRoot)
+  if (-not (Test-Path -LiteralPath $handoff)) {
+    throw "test-qemu-handoff.ps1 not found: $handoff"
+  }
+  if (-not (Test-Path -LiteralPath $resolvedOoHostRoot)) {
+    if ($Strict) { throw "oo-host workspace not found: $resolvedOoHostRoot" }
+    Warn "[4/4] Handoff sync-check: oo-host workspace not found (skipping)"
+  } else {
+    Info "[4/4] Handoff smoke + sync-check"
+    & $handoff -OoHostRoot $resolvedOoHostRoot
+    if ($LASTEXITCODE -ne 0) { throw "Handoff smoke failed ($LASTEXITCODE)" }
+
+    $syncExit = Invoke-OoBotSyncCheck -ooHostRoot $resolvedOoHostRoot
+    if ($null -ne $syncExit -and $syncExit -ne 0) {
+      throw "oo-bot sync-check failed ($syncExit)"
+    }
+  }
+} else {
+  Warn "[4/4] Handoff sync-check: skipped (-SkipHandoff)"
 }
 
 Info "Validate: OK"
