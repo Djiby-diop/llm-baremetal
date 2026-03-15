@@ -9,8 +9,6 @@ By Djiby Diop
 `llm-baremetal` is the **sovereign runtime** of the larger Operating Organism vision.
 It is meant to be preserved and evolved as the bare-metal / survival / recovery pillar of the system, not replaced.
 
-See [OO_GLOBAL_ARCHITECTURE.md](OO_GLOBAL_ARCHITECTURE.md) for the global direction.
-
 ## Build (Windows + WSL)
 
 ### Model weights (not in git)
