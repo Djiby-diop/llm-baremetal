@@ -6109,6 +6109,73 @@ static void llmk_diag_write_models_inventory_to_file(EFI_FILE_HANDLE f,
     if (close_dir) uefi_call_wrapper(dir->Close, 1, dir);
 }
 
+static int llmk_char16_has_path_sep(const CHAR16 *s) {
+    if (!s) return 0;
+    for (const CHAR16 *p = s; *p; p++) {
+        if (*p == L'\\' || *p == L'/') return 1;
+    }
+    return 0;
+}
+
+static int llmk_try_open_model_spec_best_effort(EFI_FILE_HANDLE Root,
+                                                const CHAR16 *spec,
+                                                EFI_FILE_HANDLE *out_file,
+                                                CHAR16 *out_picked,
+                                                int out_picked_cap) {
+    if (out_file) *out_file = NULL;
+    if (out_picked && out_picked_cap > 0) out_picked[0] = 0;
+    if (!Root || !spec || !spec[0] || !out_file) return 0;
+
+    const int has_sep = llmk_char16_has_path_sep(spec);
+    const int has_ext = llmk_char16_has_dot_ext(spec);
+    CHAR16 candidates[8][192]; // SAFE: bounded candidate path list for model resolution
+    int n_candidates = 0;
+
+    llmk_char16_copy_cap(candidates[n_candidates++], 192, spec);
+    if (!has_sep) {
+        CHAR16 p[192]; // SAFE: bounded prefixed path buffer
+        StrCpy(p, L"models\\");
+        StrCat(p, spec);
+        llmk_char16_copy_cap(candidates[n_candidates++], 192, p);
+    }
+    if (!has_ext) {
+        CHAR16 p[192]; // SAFE: bounded extension candidate buffer
+        llmk_char16_copy_cap(p, 192, spec);
+        StrCat(p, L".bin");
+        llmk_char16_copy_cap(candidates[n_candidates++], 192, p);
+        llmk_char16_copy_cap(p, 192, spec);
+        StrCat(p, L".gguf");
+        llmk_char16_copy_cap(candidates[n_candidates++], 192, p);
+        if (!has_sep) {
+            StrCpy(p, L"models\\");
+            StrCat(p, spec);
+            StrCat(p, L".bin");
+            llmk_char16_copy_cap(candidates[n_candidates++], 192, p);
+            StrCpy(p, L"models\\");
+            StrCat(p, spec);
+            StrCat(p, L".gguf");
+            llmk_char16_copy_cap(candidates[n_candidates++], 192, p);
+        }
+    }
+
+    for (int ci = 0; ci < n_candidates; ci++) {
+        EFI_FILE_HANDLE f = NULL;
+        CHAR16 picked[192]; // SAFE: bounded picked path buffer
+        picked[0] = 0;
+        EFI_STATUS st = llmk_open_read_with_fat83_fallback(Root, candidates[ci], &f, picked,
+                                                          (int)(sizeof(picked) / sizeof(picked[0])),
+                                                          L"model_spec");
+        if (!EFI_ERROR(st) && f) {
+            *out_file = f;
+            if (out_picked && out_picked_cap > 0) {
+                llmk_char16_copy_cap(out_picked, out_picked_cap, picked[0] ? picked : candidates[ci]);
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void llmk_fs_cat_best_effort(const CHAR16 *path, UINTN max_bytes) {
     if (max_bytes == 0) max_bytes = (256U * 1024U);
     if (max_bytes > (1024U * 1024U)) max_bytes = (1024U * 1024U);
@@ -14909,11 +14976,10 @@ snap_autoload_done:
                 EFI_FILE_HANDLE f = NULL;
                 CHAR16 picked[192];
                 picked[0] = 0;
-                EFI_STATUS st = llmk_open_read_with_fat83_fallback(Root, path16, &f, picked,
-                                                                  (int)(sizeof(picked) / sizeof(picked[0])),
-                                                                  L"model_info");
-                if (EFI_ERROR(st) || !f) {
-                    Print(L"\r\nERROR: open failed: %s (%r)\r\n\r\n", path16, st);
+                if (!llmk_try_open_model_spec_best_effort(Root, path16, &f, picked,
+                                                          (int)(sizeof(picked) / sizeof(picked[0])))) {
+                    Print(L"\r\nERROR: open failed: %s\r\n", path16);
+                    Print(L"Hint: try /models, then /model_info <name>, <name>.bin, or models\\<name>.gguf\r\n\r\n");
                     continue;
                 }
 
