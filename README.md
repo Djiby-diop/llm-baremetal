@@ -155,6 +155,8 @@ Host -> sovereign handoff smoke:
 
 This smoke flow also extracts OOHANDOFF.TXT beside the repo so [oo-host/sync-check](../oo-host/README.md) can verify the aligned host/export/receipt state.
 
+For a real UEFI/USB handoff check, copy `sovereign_export.json` from the host runtime onto the FAT root of the USB image, then run [llmk-autorun-real-hw-handoff-smoke.txt](llmk-autorun-real-hw-handoff-smoke.txt) with `/autorun llmk-autorun-real-hw-handoff-smoke.txt`.
+
 The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.
 
 Validate everything (recommended after pulling updates):
