@@ -145,6 +145,8 @@ Host -> sovereign handoff smoke:
 ./test-qemu-handoff.ps1 -OoHostRoot ..\oo-host
 ```
 
+This smoke flow also extracts OOHANDOFF.TXT beside the repo so [oo-host/sync-check](../oo-host/README.md) can verify the aligned host/export/receipt state.
+
 The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.
 
 Validate everything (recommended after pulling updates):

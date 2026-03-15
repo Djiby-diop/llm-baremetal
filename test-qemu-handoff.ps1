@@ -14,6 +14,8 @@ param(
 
   [string]$ExportPath,
 
+  [string]$ReceiptPath,
+
   [string]$OoHostRoot
 )
 
@@ -48,6 +50,10 @@ if (-not $PSBoundParameters.ContainsKey('ExportPath')) {
   $ExportPath = Join-Path $dataDir 'sovereign_export.json'
 }
 
+if (-not $PSBoundParameters.ContainsKey('ReceiptPath')) {
+  $ReceiptPath = Join-Path $root 'OOHANDOFF.TXT'
+}
+
 function Backup-File([string]$path) {
   if (-not (Test-Path -LiteralPath $path)) { return $null }
   $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
@@ -67,6 +73,31 @@ function Restore-File([string]$path, [string]$backup) {
 function Assert-Match([string]$text, [string]$pattern, [string]$message) {
   if ($text -notmatch $pattern) {
     throw $message
+  }
+}
+
+function Convert-WindowsPathToWsl([string]$path) {
+  $full = [System.IO.Path]::GetFullPath($path)
+  $drive = $full.Substring(0, 1).ToLowerInvariant()
+  $rest = $full.Substring(2) -replace '\\', '/'
+  return "/mnt/$drive$rest"
+}
+
+function Export-ImageFile([string]$imagePath, [string]$sourceName, [string]$destinationPath) {
+  $imageWsl = Convert-WindowsPathToWsl $imagePath
+  $destinationFull = [System.IO.Path]::GetFullPath($destinationPath)
+  $destinationDir = Split-Path -Parent $destinationFull
+  if (-not (Test-Path -LiteralPath $destinationDir)) {
+    New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+  }
+  $destinationWsl = Convert-WindowsPathToWsl $destinationFull
+  $bashCommand = "mcopy -o -i '$imageWsl@@1M' '::$sourceName' '$destinationWsl'"
+  & wsl bash -lc $bashCommand
+  if ($LASTEXITCODE -ne 0) {
+    throw "failed to extract $sourceName from image: $imagePath"
+  }
+  if (-not (Test-Path -LiteralPath $destinationFull)) {
+    throw "missing extracted file: $destinationFull"
   }
 }
 
@@ -215,6 +246,8 @@ try {
   Assert-Match $serial ([regex]::Escape('[oo_continuity] summary=aligned')) "Missing continuity summary output. Serial: $serialPath"
   Assert-Match $serial ([regex]::Escape('[oo_continuity] reason=local_safer_than_receipt')) "Missing continuity reason output. Serial: $serialPath"
   Assert-Match $serial '(?m)^\[autorun\] done\s*$' "Missing autorun completion marker. Serial: $serialPath"
+
+  Export-ImageFile -imagePath (Join-Path $root 'llm-baremetal-boot.img') -sourceName 'OOHANDOFF.TXT' -destinationPath $ReceiptPath
 
   Write-Host "[Handoff] PASS" -ForegroundColor Green
 }
