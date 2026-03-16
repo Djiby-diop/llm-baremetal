@@ -155,6 +155,14 @@ Host -> sovereign handoff smoke:
 
 This smoke flow also extracts OOHANDOFF.TXT beside the repo so [oo-host/sync-check](../oo-host/README.md) can verify the aligned host/export/receipt state.
 
+Model-backed OO consult smoke in QEMU:
+
+```powershell
+./test-qemu-autorun.ps1 -Mode oo_consult_smoke -ModelBin stories15M.q8_0.gguf -SkipPrebuild
+```
+
+This validates `/oo_consult`, `/oo_log`, and `OOCONSULT.LOG` creation with a small bundled model before moving to real hardware.
+
 For a real UEFI/USB handoff check, copy `sovereign_export.json` from the host runtime onto the FAT root of the USB image, then run [llmk-autorun-real-hw-handoff-smoke.txt](llmk-autorun-real-hw-handoff-smoke.txt) with `/autorun llmk-autorun-real-hw-handoff-smoke.txt`.
 
 To stage that file from the sibling host workspace, use [llm-baremetal/prepare-real-hw-handoff.ps1](prepare-real-hw-handoff.ps1). It refreshes `oo-host/data/sovereign_export.json`, can copy both the export and the real-hardware handoff autorun script onto a mounted FAT/USB root, and can also build a dedicated `llm-baremetal-boot-real-hw-handoff.img` image with the export already injected.

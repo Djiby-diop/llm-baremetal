@@ -45,6 +45,7 @@ OVMF.fd
 qemu*.txt
 DIAGNOSTIC.md
 !llmk-autorun-oo-smoke.txt
+!llmk-autorun-oo-consult-smoke.txt
 !llmk-autorun-oo-reboot-smoke.txt
 !llmk-autorun-real-hw-handoff-smoke.txt
 !llmk-autorun-real-hw-oo-consult-smoke.txt
@@ -80,6 +81,7 @@ SESSION_*.md
 GITHUB_UPLOAD.md
 serve_model.py
 test-*.ps1
+!test-qemu-autorun.ps1
 !test-oo-complete.ps1
 
 # Local OO/OS-G notes and scratch (untracked by default)

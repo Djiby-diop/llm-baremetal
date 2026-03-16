@@ -1,0 +1,9 @@
+# llmk autorun (OO consult smoke, model-backed)
+# Expect: model bundled, oo_enable=1, oo_llm_consult=1.
+
+/help oo_consult
+/cfg
+/oo_status
+/oo_consult
+/oo_log
+/oo_status
