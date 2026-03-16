@@ -218,6 +218,18 @@ If you want a single entrypoint for the whole real-machine consult milestone, us
 
 The `prepare` phase builds the image with `-AutoOoConsultSmoke`; the `collect` phase chains collection plus validation automatically.
 
+For the real-machine host -> sovereign handoff milestone, use [run-real-hw-handoff-validation.ps1](run-real-hw-handoff-validation.ps1):
+
+```powershell
+# phase 1: refresh host export + build the dedicated handoff image
+./run-real-hw-handoff-validation.ps1 -Phase prepare
+
+# phase 2: after the physical boot, collect + validate from the mounted USB FAT root
+./run-real-hw-handoff-validation.ps1 -Phase collect -UsbRoot E:\
+```
+
+The `prepare` phase refreshes `oo-host/data/sovereign_export.json` and builds `llm-baremetal-boot-real-hw-handoff.img`; the `collect` phase requires `OOHANDOFF.TXT`, allows a missing consult log, writes a handoff-focused validation report, and runs `oo-bot sync-check` when the sibling [oo-host](../oo-host/README.md) workspace is available.
+
 The chained `collect` phase also writes `oo-real-validation-report.md` into the artifact folder so the real-machine milestone has a human-readable receipt with artifact sizes, consult decision, confidence fields, and parsed journal events.
 
 The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.

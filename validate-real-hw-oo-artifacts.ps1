@@ -13,11 +13,11 @@ $artifactsRoot = Join-Path $root 'artifacts'
 
 if (-not $PSBoundParameters.ContainsKey('ArtifactsDir') -or -not $ArtifactsDir) {
   $latest = Get-ChildItem -LiteralPath $artifactsRoot -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like 'real-hw-oo-*' } |
+    Where-Object { $_.Name -like 'real-hw-oo-*' -or $_.Name -like 'real-hw-handoff-*' } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
   if (-not $latest) {
-    throw "No real-hw-oo-* artifact directory found under $artifactsRoot"
+    throw "No real-hw-oo-* or real-hw-handoff-* artifact directory found under $artifactsRoot"
   }
   $ArtifactsDir = $latest.FullName
 }
