@@ -206,6 +206,18 @@ Then validate the collected folder with [validate-real-hw-oo-artifacts.ps1](vali
 
 By default it expects `OOSTATE.BIN`, `OORECOV.BIN`, `OOJOUR.LOG`, and a consult trace in `OOCONSULT.LOG`. Optional stricter checks are available with `-RequireDiag` and `-RequireHandoff`.
 
+If you want a single entrypoint for the whole real-machine consult milestone, use [run-real-hw-oo-consult-validation.ps1](run-real-hw-oo-consult-validation.ps1):
+
+```powershell
+# phase 1: prepare the real-hardware image
+./run-real-hw-oo-consult-validation.ps1 -Phase prepare -ModelBin stories110M.bin
+
+# phase 2: after the physical boot, collect + validate from the mounted USB FAT root
+./run-real-hw-oo-consult-validation.ps1 -Phase collect -UsbRoot E:\
+```
+
+The `prepare` phase builds the image with `-AutoOoConsultSmoke`; the `collect` phase chains collection plus validation automatically.
+
 The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.
 
 Validate everything (recommended after pulling updates):
