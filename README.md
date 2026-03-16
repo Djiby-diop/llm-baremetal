@@ -195,6 +195,17 @@ After the real-machine run, collect the produced OO artifacts from the mounted F
 
 It gathers `OOCONSULT.LOG`, `OOJOUR.LOG`, `OOSTATE.BIN`, `OORECOV.BIN`, `OOHANDOFF.TXT`, and `llmk-diag.txt` into a timestamped folder under `artifacts/` and writes a small summary file for review.
 
+Then validate the collected folder with [validate-real-hw-oo-artifacts.ps1](validate-real-hw-oo-artifacts.ps1):
+
+```powershell
+./validate-real-hw-oo-artifacts.ps1
+
+# explicit folder also works
+./validate-real-hw-oo-artifacts.ps1 -ArtifactsDir .\artifacts\real-hw-oo-20260316-012323
+```
+
+By default it expects `OOSTATE.BIN`, `OORECOV.BIN`, `OOJOUR.LOG`, and a consult trace in `OOCONSULT.LOG`. Optional stricter checks are available with `-RequireDiag` and `-RequireHandoff`.
+
 The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.
 
 Validate everything (recommended after pulling updates):
