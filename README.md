@@ -159,6 +159,17 @@ For a real UEFI/USB handoff check, copy `sovereign_export.json` from the host ru
 
 To stage that file from the sibling host workspace, use [llm-baremetal/prepare-real-hw-handoff.ps1](prepare-real-hw-handoff.ps1). It refreshes `oo-host/data/sovereign_export.json`, can copy both the export and the real-hardware handoff autorun script onto a mounted FAT/USB root, and can also build a dedicated `llm-baremetal-boot-real-hw-handoff.img` image with the export already injected.
 
+For the next milestone — model-backed sovereign chat on a real machine — use [prepare-real-hw-chat.ps1](prepare-real-hw-chat.ps1). It generates a dedicated `llm-baremetal-boot-real-hw-chat.img` with a bundled model, a generated `repl.cfg`, and conversational defaults already set:
+
+```powershell
+./prepare-real-hw-chat.ps1 -ModelBin stories110M.bin
+
+# optional: boot straight into a tiny chat smoke
+./prepare-real-hw-chat.ps1 -ModelBin stories110M.bin -AutoSmoke
+```
+
+The helper keeps the image interactive by default. With `-AutoSmoke`, it points `autorun_file` at [llmk-autorun-real-hw-model-chat-smoke.txt](llmk-autorun-real-hw-model-chat-smoke.txt) so the machine can prove model load + first response automatically.
+
 The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.
 
 Validate everything (recommended after pulling updates):

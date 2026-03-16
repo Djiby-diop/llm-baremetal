@@ -47,6 +47,7 @@ DIAGNOSTIC.md
 !llmk-autorun-oo-smoke.txt
 !llmk-autorun-oo-reboot-smoke.txt
 !llmk-autorun-real-hw-handoff-smoke.txt
+!llmk-autorun-real-hw-model-chat-smoke.txt
 !llmk-autorun-real-hw-oo-smoke.txt
 !llmk-autorun-real-hw-oo-reboot-smoke.txt
 
