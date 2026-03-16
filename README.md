@@ -184,6 +184,17 @@ To continue the OO path with a real model, the same helper also supports `-AutoO
 ./prepare-real-hw-chat.ps1 -ModelBin stories110M.bin -AutoOoConsultSmoke
 ```
 
+After the real-machine run, collect the produced OO artifacts from the mounted FAT partition or from an image copy with [collect-real-hw-oo-artifacts.ps1](collect-real-hw-oo-artifacts.ps1):
+
+```powershell
+./collect-real-hw-oo-artifacts.ps1 -UsbRoot E:\
+
+# or directly from an image file
+./collect-real-hw-oo-artifacts.ps1 -ImagePath .\llm-baremetal-boot-real-hw-chat.img
+```
+
+It gathers `OOCONSULT.LOG`, `OOJOUR.LOG`, `OOSTATE.BIN`, `OORECOV.BIN`, `OOHANDOFF.TXT`, and `llmk-diag.txt` into a timestamped folder under `artifacts/` and writes a small summary file for review.
+
 The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.
 
 Validate everything (recommended after pulling updates):
@@ -256,5 +267,6 @@ allow=/oo_new
 allow=/oo_note
 deny=/oo_exec*
 ```
+
 
 
