@@ -1,0 +1,11 @@
+# llmk autorun (real hardware OO consult smoke)
+# Expect: a bundled model plus oo_enable=1 and oo_llm_consult=1 in repl.cfg.
+
+/diag
+/cfg
+/oo_status
+/oo_consult
+/oo_log
+/oo_status
+/diag_report
+exit

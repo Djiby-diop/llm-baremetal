@@ -19,6 +19,7 @@ param(
   [double]$RepeatPenalty = 1.15,
   [switch]$EnableOo,
   [switch]$AutoSmoke,
+  [switch]$AutoOoConsultSmoke,
   [switch]$SkipPrebuild,
   [string]$OutImagePath
 )
@@ -29,6 +30,7 @@ $root = Split-Path -Parent $PSCommandPath
 $buildScript = Join-Path $root 'build.ps1'
 $generatedImage = Join-Path $root 'llm-baremetal-boot.img'
 $smokeScript = Join-Path $root 'llmk-autorun-real-hw-model-chat-smoke.txt'
+$ooConsultSmokeScript = Join-Path $root 'llmk-autorun-real-hw-oo-consult-smoke.txt'
 $replCfgPath = Join-Path $root 'repl.cfg'
 
 if (-not (Test-Path -LiteralPath $buildScript)) {
@@ -36,6 +38,9 @@ if (-not (Test-Path -LiteralPath $buildScript)) {
 }
 if (-not (Test-Path -LiteralPath $smokeScript)) {
   throw "Missing model chat smoke script: $smokeScript"
+}
+if (-not (Test-Path -LiteralPath $ooConsultSmokeScript)) {
+  throw "Missing OO consult smoke script: $ooConsultSmokeScript"
 }
 
 if (-not $PSBoundParameters.ContainsKey('OutImagePath')) {
@@ -51,6 +56,7 @@ function Get-SystemPromptText([string]$value) {
 function New-GeneratedReplCfg {
   $prompt = Get-SystemPromptText $SystemPrompt
   $lines = [System.Collections.Generic.List[string]]::new()
+  $enableOoEffective = $EnableOo -or $AutoOoConsultSmoke
   $lines.Add("chat_format=$ChatFormat")
   if ($prompt) {
     $lines.Add("system_prompt=$prompt")
@@ -63,10 +69,15 @@ function New-GeneratedReplCfg {
   $lines.Add(("repeat_penalty={0}" -f $RepeatPenalty.ToString([System.Globalization.CultureInfo]::InvariantCulture)))
   $lines.Add('stats=1')
   $lines.Add('stop_you=1')
-  if ($EnableOo) {
+  if ($enableOoEffective) {
     $lines.Add('oo_enable=1')
   }
-  if ($AutoSmoke) {
+  if ($AutoOoConsultSmoke) {
+    $lines.Add('oo_llm_consult=1')
+    $lines.Add('autorun_autostart=1')
+    $lines.Add('autorun_shutdown_when_done=0')
+    $lines.Add('autorun_file=llmk-autorun-real-hw-oo-consult-smoke.txt')
+  } elseif ($AutoSmoke) {
     $lines.Add('autorun_autostart=1')
     $lines.Add('autorun_shutdown_when_done=0')
     $lines.Add('autorun_file=llmk-autorun-real-hw-model-chat-smoke.txt')
@@ -87,7 +98,10 @@ try {
   Write-Host "[ChatPrep] Building model-backed image" -ForegroundColor Cyan
   Write-Host "  Model: $ModelBin" -ForegroundColor Gray
   Write-Host "  Chat:  $ChatFormat (ctx=$CtxLen, max_tokens=$MaxTokens)" -ForegroundColor Gray
-  if ($AutoSmoke) {
+  if ($AutoOoConsultSmoke) {
+    Write-Host "  OO:    enabled (LLM consult smoke)" -ForegroundColor Gray
+    Write-Host "  Autorun: llmk-autorun-real-hw-oo-consult-smoke.txt" -ForegroundColor Gray
+  } elseif ($AutoSmoke) {
     Write-Host "  Autorun: llmk-autorun-real-hw-model-chat-smoke.txt" -ForegroundColor Gray
   } else {
     Write-Host "  Autorun: disabled (interactive boot)" -ForegroundColor Gray

@@ -170,6 +170,12 @@ For the next milestone — model-backed sovereign chat on a real machine — use
 
 The helper keeps the image interactive by default. With `-AutoSmoke`, it points `autorun_file` at [llmk-autorun-real-hw-model-chat-smoke.txt](llmk-autorun-real-hw-model-chat-smoke.txt) so the machine can prove model load + first response automatically.
 
+To continue the OO path with a real model, the same helper also supports `-AutoOoConsultSmoke`. That enables `oo_enable=1`, `oo_llm_consult=1`, and boots into [llmk-autorun-real-hw-oo-consult-smoke.txt](llmk-autorun-real-hw-oo-consult-smoke.txt) to prove model-backed `/oo_consult` plus `OOCONSULT.LOG` creation:
+
+```powershell
+./prepare-real-hw-chat.ps1 -ModelBin stories110M.bin -AutoOoConsultSmoke
+```
+
 The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.
 
 Validate everything (recommended after pulling updates):
