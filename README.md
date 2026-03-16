@@ -22,6 +22,15 @@ Windows:
 ./scripts/get-weights.ps1 -Url "https://huggingface.co/<org>/<repo>/resolve/main/<file>.gguf" -OutName "<file>.gguf"
 ```
 
+Stable public test models for this project are also published at [djibydiop/llm-baremetal](https://huggingface.co/djibydiop/llm-baremetal). To fetch one directly into `models/`:
+
+```powershell
+./scripts/get-stable-model.ps1 -File stories15M.q8_0.gguf
+
+# example for the larger legacy llama2.c export
+./scripts/get-stable-model.ps1 -File stories110M.bin
+```
+
 Linux:
 
 ```bash
@@ -163,6 +172,20 @@ Model-backed OO consult smoke in QEMU:
 
 This validates `/oo_consult`, `/oo_log`, and `OOCONSULT.LOG` creation with a small bundled model before moving to real hardware.
 
+For faster iteration, use the unified QEMU wrapper [run-qemu-oo-validation.ps1](run-qemu-oo-validation.ps1):
+
+```powershell
+# run one focused lane
+./run-qemu-oo-validation.ps1 -Mode consult -ModelBin stories15M.q8_0.gguf -Accel tcg -SkipPrebuild
+./run-qemu-oo-validation.ps1 -Mode reboot -Accel tcg
+./run-qemu-oo-validation.ps1 -Mode handoff -Accel tcg
+
+# or run the core QEMU matrix end to end
+./run-qemu-oo-validation.ps1 -Mode all-core -ModelBin stories15M.q8_0.gguf -Accel tcg -SkipPrebuild
+```
+
+The wrapper keeps QEMU as the primary iteration loop for no-model smoke, reboot continuity, host -> sovereign handoff, and model-backed OO consult so hardware reboots are reserved for larger milestones only.
+
 For a real UEFI/USB handoff check, copy `sovereign_export.json` from the host runtime onto the FAT root of the USB image, then run [llmk-autorun-real-hw-handoff-smoke.txt](llmk-autorun-real-hw-handoff-smoke.txt) with `/autorun llmk-autorun-real-hw-handoff-smoke.txt`.
 
 To stage that file from the sibling host workspace, use [llm-baremetal/prepare-real-hw-handoff.ps1](prepare-real-hw-handoff.ps1). It refreshes `oo-host/data/sovereign_export.json`, can copy both the export and the real-hardware handoff autorun script onto a mounted FAT/USB root, and can also build a dedicated `llm-baremetal-boot-real-hw-handoff.img` image with the export already injected.
@@ -240,7 +263,7 @@ For the real-machine reboot continuity milestone, use [run-real-hw-oo-reboot-val
 ./run-real-hw-oo-reboot-validation.ps1 -Phase collect -UsbRoot E:\
 ```
 
-The `prepare` phase builds `llm-baremetal-boot-real-hw-oo-reboot.img` with `oo_enable=1` and the reboot smoke autorun; the `collect` phase requires the `reboot_probe_arm` and `reboot_probe_verified` journal markers, allows a missing consult log, and writes a reboot-focused validation report.
+The `prepare` phase builds `llm-baremetal-boot-real-hw-oo-reboot.img` with `oo_enable=1` and the reboot smoke autorun; the firmware also makes a best-effort attempt to set UEFI `BootNext` to the current USB boot entry before resetting so the second boot returns to the USB device more reliably. The `collect` phase requires the `reboot_probe_arm` and `reboot_probe_verified` journal markers, allows a missing consult log, and writes a reboot-focused validation report.
 
 The chained `collect` phase also writes `oo-real-validation-report.md` into the artifact folder so the real-machine milestone has a human-readable receipt with artifact sizes, consult decision, confidence fields, and parsed journal events.
 

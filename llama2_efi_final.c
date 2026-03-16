@@ -4684,6 +4684,7 @@ static void llmk_oo_handoff_receipt_best_effort(const CHAR16 *path);
 static void llmk_oo_continuity_status_best_effort(const CHAR16 *path);
 static void llmk_oo_print_persistence_status_best_effort(void);
 static void llmk_oo_reboot_probe_best_effort(void);
+static int llmk_best_effort_set_bootnext_to_bootcurrent(UINT16 *boot_current_out, EFI_STATUS *status_out);
 static int llmk_cfg_parse_u64(const char *s, UINT64 *out);
 static void llmk_oo_infermini_no_model(const char *args);
 
@@ -5761,9 +5762,48 @@ static void llmk_oo_reboot_probe_best_effort(void) {
     Print(L"\r\n[oo_reboot_probe] armed.present=0\r\n");
     Print(L"[oo_reboot_probe] armed.boot_count=%lu\r\n", (UINT64)local.boot_count);
     Print(L"[oo_reboot_probe] armed.mode="); llmk_print_ascii(llmk_oo_mode_name_ascii(local.mode)); Print(L"\r\n");
+    {
+        UINT16 boot_current = 0;
+        EFI_STATUS bootnext_st = EFI_NOT_FOUND;
+        int bootnext_ok = llmk_best_effort_set_bootnext_to_bootcurrent(&boot_current, &bootnext_st);
+        if (bootnext_ok) {
+            Print(L"[oo_reboot_probe] bootnext.current=%u\r\n", (unsigned int)boot_current);
+            Print(L"[oo_reboot_probe] bootnext.armed=1\r\n");
+        } else {
+            Print(L"[oo_reboot_probe] bootnext.armed=0 status=%r\r\n", bootnext_st);
+        }
+    }
     Print(L"[oo_reboot_probe] action=rebooting\r\n\r\n");
     llmk_oo_journal_event_load_state_best_effort("reboot_probe_arm");
     uefi_call_wrapper(RT->ResetSystem, 4, EfiResetCold, EFI_SUCCESS, 0, NULL);
+}
+
+static int llmk_best_effort_set_bootnext_to_bootcurrent(UINT16 *boot_current_out, EFI_STATUS *status_out) {
+    EFI_GUID global_guid = EFI_GLOBAL_VARIABLE;
+    UINT16 boot_current = 0;
+    UINTN data_size = sizeof(boot_current);
+    UINT32 attrs = 0;
+    EFI_STATUS st = uefi_call_wrapper(RT->GetVariable, 5,
+                                      L"BootCurrent",
+                                      &global_guid,
+                                      &attrs,
+                                      &data_size,
+                                      &boot_current);
+    if (boot_current_out) *boot_current_out = 0;
+    if (status_out) *status_out = st;
+    if (EFI_ERROR(st) || data_size != sizeof(boot_current)) {
+        return 0;
+    }
+
+    st = uefi_call_wrapper(RT->SetVariable, 5,
+                           L"BootNext",
+                           &global_guid,
+                           EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
+                           sizeof(boot_current),
+                           &boot_current);
+    if (boot_current_out) *boot_current_out = boot_current;
+    if (status_out) *status_out = st;
+    return EFI_ERROR(st) ? 0 : 1;
 }
 
 static void llmk_oo_handoff_info_best_effort(const CHAR16 *path) {

@@ -207,6 +207,8 @@ try {
 
   if ($Mode -eq 'oo_reboot_smoke') {
     if ($serial -notmatch '(?m)^\[oo_reboot_probe\] action=rebooting\s*$') { throw "Missing reboot arm marker. Serial: $serialPath" }
+    if ($serial -notmatch '(?m)^\[oo_reboot_probe\] bootnext\.current=\d+\s*$') { throw "Missing bootnext.current marker. Serial: $serialPath" }
+    if ($serial -notmatch '(?m)^\[oo_reboot_probe\] bootnext\.armed=1\s*$') { throw "Missing bootnext.armed=1 marker. Serial: $serialPath" }
     if ($serial -notmatch '(?m)^\[oo_reboot_probe\] armed\.present=1\s*$') { throw "Missing reboot verify marker. Serial: $serialPath" }
     if ($serial -notmatch '(?m)^\[oo_reboot_probe\] boot_advanced=1\s*$') { throw "Missing boot_advanced=1 marker. Serial: $serialPath" }
     if ($serial -notmatch '(?m)^\[oo_reboot_probe\] recovery_match=1\s*$') { throw "Missing recovery_match=1 marker. Serial: $serialPath" }
