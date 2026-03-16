@@ -3,6 +3,10 @@ param(
   [string]$OoHostRoot,
   [string]$ExportPath,
   [string]$UsbRoot,
+  [switch]$CreateBootImage,
+  [string]$BaseImagePath,
+  [string]$OutImagePath,
+  [switch]$NoAutoAutorun,
   [switch]$SkipExport
 )
 
@@ -35,6 +39,16 @@ if (-not $PSBoundParameters.ContainsKey('ExportPath')) {
 }
 $ExportPath = [System.IO.Path]::GetFullPath($ExportPath)
 
+if (-not $PSBoundParameters.ContainsKey('BaseImagePath')) {
+  $BaseImagePath = Join-Path $root 'llm-baremetal-boot.img'
+}
+$BaseImagePath = [System.IO.Path]::GetFullPath($BaseImagePath)
+
+if (-not $PSBoundParameters.ContainsKey('OutImagePath')) {
+  $OutImagePath = Join-Path $root 'llm-baremetal-boot-real-hw-handoff.img'
+}
+$OutImagePath = [System.IO.Path]::GetFullPath($OutImagePath)
+
 function Write-HandoffExport {
   if ($SkipExport) { return }
 
@@ -60,6 +74,63 @@ function Write-HandoffExport {
   }
 }
 
+function Convert-WindowsPathToWsl([string]$path) {
+  $full = [System.IO.Path]::GetFullPath($path)
+  $drive = $full.Substring(0, 1).ToLowerInvariant()
+  $rest = $full.Substring(2) -replace '\\', '/'
+  return "/mnt/$drive$rest"
+}
+
+function New-HandoffAutorunConfig([string]$path) {
+  $cfg = @(
+    'autorun_autostart=1',
+    'autorun_shutdown_when_done=0',
+    'autorun_file=llmk-autorun-real-hw-handoff-smoke.txt',
+    'oo_enable=1'
+  ) -join "`n"
+  Set-Content -LiteralPath $path -Value $cfg -Encoding ASCII -NoNewline
+}
+
+function New-HandoffBootImage {
+  if (-not (Test-Path -LiteralPath $BaseImagePath)) {
+    throw "Missing base image: $BaseImagePath"
+  }
+
+  $outDir = Split-Path -Parent $OutImagePath
+  if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+  }
+
+  Copy-Item -LiteralPath $BaseImagePath -Destination $OutImagePath -Force
+
+  $imgWsl = Convert-WindowsPathToWsl $OutImagePath
+  $exportWsl = Convert-WindowsPathToWsl $ExportPath
+
+  $cfgPath = $null
+  try {
+    if ($NoAutoAutorun) {
+      $bashCommand = "mcopy -o -i '$imgWsl@@1M' '$exportWsl' '::sovereign_export.json'"
+    } else {
+      $cfgPath = Join-Path ([System.IO.Path]::GetTempPath()) 'llmk-repl-handoff-auto.cfg'
+      New-HandoffAutorunConfig -path $cfgPath
+      $cfgWsl = Convert-WindowsPathToWsl $cfgPath
+      $bashCommand = "mcopy -o -i '$imgWsl@@1M' '$exportWsl' '::sovereign_export.json' && mcopy -o -i '$imgWsl@@1M' '$cfgWsl' '::repl.cfg'"
+    }
+
+    & wsl bash -lc $bashCommand
+    if ($LASTEXITCODE -ne 0) {
+      throw "failed to inject handoff files into image: $OutImagePath"
+    }
+  }
+  finally {
+    if ($cfgPath -and (Test-Path -LiteralPath $cfgPath)) {
+      Remove-Item -LiteralPath $cfgPath -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  Write-Host "[Handoff] Boot image ready: $OutImagePath" -ForegroundColor Green
+}
+
 Write-HandoffExport
 
 if (-not (Test-Path -LiteralPath $ExportPath)) {
@@ -82,4 +153,8 @@ if ($PSBoundParameters.ContainsKey('UsbRoot') -and $UsbRoot) {
 
   Write-Host "[Handoff] Copied export: $usbExportPath" -ForegroundColor Green
   Write-Host "[Handoff] Copied autorun helper: $usbScriptPath" -ForegroundColor Green
+}
+
+if ($CreateBootImage) {
+  New-HandoffBootImage
 }
