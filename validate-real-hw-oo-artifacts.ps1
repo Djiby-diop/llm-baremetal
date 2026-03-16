@@ -3,7 +3,8 @@ param(
   [string]$ArtifactsDir,
   [switch]$RequireDiag,
   [switch]$RequireHandoff,
-  [switch]$AllowNoConsult
+  [switch]$AllowNoConsult,
+  [switch]$RequireRebootProbe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,11 +14,11 @@ $artifactsRoot = Join-Path $root 'artifacts'
 
 if (-not $PSBoundParameters.ContainsKey('ArtifactsDir') -or -not $ArtifactsDir) {
   $latest = Get-ChildItem -LiteralPath $artifactsRoot -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like 'real-hw-oo-*' -or $_.Name -like 'real-hw-handoff-*' } |
+    Where-Object { $_.Name -like 'real-hw-oo-*' -or $_.Name -like 'real-hw-handoff-*' -or $_.Name -like 'real-hw-reboot-*' } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
   if (-not $latest) {
-    throw "No real-hw-oo-* or real-hw-handoff-* artifact directory found under $artifactsRoot"
+    throw "No real-hw-oo-*, real-hw-handoff-*, or real-hw-reboot-* artifact directory found under $artifactsRoot"
   }
   $ArtifactsDir = $latest.FullName
 }
@@ -79,6 +80,12 @@ Assert-Condition ($summary -match 'OOJOUR\.LOG: present=1') 'Summary missing OOJ
 
 $jour = Get-Content -LiteralPath $jourPath -Raw
 Assert-Condition ($jour -match 'oo event=') 'OOJOUR.LOG has no journal events'
+
+if ($RequireRebootProbe) {
+  Assert-Condition ($jour -match 'oo event=reboot_probe_arm') 'OOJOUR.LOG missing reboot_probe_arm marker'
+  Assert-Condition ($jour -match 'oo event=reboot_probe_verified') 'OOJOUR.LOG missing reboot_probe_verified marker'
+  Assert-Condition (-not ($jour -match 'oo event=reboot_probe_failed')) 'OOJOUR.LOG contains reboot_probe_failed marker'
+}
 
 if ($consultPresent) {
   Assert-Condition ($summary -match 'OOCONSULT\.LOG: present=1') 'Summary missing OOCONSULT.LOG present=1'

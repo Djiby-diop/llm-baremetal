@@ -4,7 +4,7 @@ param(
   [string]$OutPath,
   [string]$ModelBin = '',
   [string]$SourceLabel = '',
-  [ValidateSet('consult','handoff','auto')]
+  [ValidateSet('consult','handoff','reboot','auto')]
   [string]$Scenario = 'auto'
 )
 
@@ -15,11 +15,11 @@ $artifactsRoot = Join-Path $root 'artifacts'
 
 if (-not $PSBoundParameters.ContainsKey('ArtifactsDir') -or -not $ArtifactsDir) {
   $latest = Get-ChildItem -LiteralPath $artifactsRoot -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like 'real-hw-oo-*' -or $_.Name -like 'real-hw-handoff-*' } |
+    Where-Object { $_.Name -like 'real-hw-oo-*' -or $_.Name -like 'real-hw-handoff-*' -or $_.Name -like 'real-hw-reboot-*' } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
   if (-not $latest) {
-    throw "No real-hw-oo-* or real-hw-handoff-* artifact directory found under $artifactsRoot"
+    throw "No real-hw-oo-*, real-hw-handoff-*, or real-hw-reboot-* artifact directory found under $artifactsRoot"
   }
   $ArtifactsDir = $latest.FullName
 }
@@ -99,6 +99,8 @@ $effectiveScenario = $Scenario
 if ($effectiveScenario -eq 'auto') {
   if ($handoffMap.Count -gt 0 -and -not $consult) {
     $effectiveScenario = 'handoff'
+  } elseif ($journalEvents -contains 'reboot_probe_arm' -or $journalEvents -contains 'reboot_probe_verified') {
+    $effectiveScenario = 'reboot'
   } else {
     $effectiveScenario = 'consult'
   }
@@ -131,6 +133,17 @@ $handoffLines = if ($handoffMap.Count -gt 0) {
   @('- (missing OOHANDOFF.TXT)')
 }
 
+$rebootArmSeen = ($journalEvents -contains 'reboot_probe_arm')
+$rebootVerifiedSeen = ($journalEvents -contains 'reboot_probe_verified')
+$rebootFailedSeen = ($journalEvents -contains 'reboot_probe_failed')
+$rebootVerdict = if ($rebootVerifiedSeen -and -not $rebootFailedSeen) { 'pass' } elseif ($rebootFailedSeen) { 'fail' } else { 'unknown' }
+$rebootLines = @(
+  "- Arm marker seen: $([int]$rebootArmSeen)",
+  "- Verified marker seen: $([int]$rebootVerifiedSeen)",
+  "- Failed marker seen: $([int]$rebootFailedSeen)",
+  "- Verdict: $rebootVerdict"
+)
+
 $report = @(
   '# OO Real Hardware Validation Report',
   '',
@@ -162,6 +175,16 @@ if ($effectiveScenario -eq 'handoff' -or $handoffMap.Count -gt 0) {
   '## Handoff Summary',
   ''
   ) + $handoffLines + @(
+  ''
+  )
+}
+
+if ($effectiveScenario -eq 'reboot') {
+  $report += @(
+  '',
+  '## Reboot Summary',
+  ''
+  ) + $rebootLines + @(
   ''
   )
 }

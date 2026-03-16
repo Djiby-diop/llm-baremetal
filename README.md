@@ -230,6 +230,18 @@ For the real-machine host -> sovereign handoff milestone, use [run-real-hw-hando
 
 The `prepare` phase refreshes `oo-host/data/sovereign_export.json` and builds `llm-baremetal-boot-real-hw-handoff.img`; the `collect` phase requires `OOHANDOFF.TXT`, allows a missing consult log, writes a handoff-focused validation report, and runs `oo-bot sync-check` when the sibling [oo-host](../oo-host/README.md) workspace is available.
 
+For the real-machine reboot continuity milestone, use [run-real-hw-oo-reboot-validation.ps1](run-real-hw-oo-reboot-validation.ps1):
+
+```powershell
+# phase 1: build the dedicated reboot continuity image
+./run-real-hw-oo-reboot-validation.ps1 -Phase prepare
+
+# phase 2: after the physical reboot cycle, collect + validate from the mounted USB FAT root
+./run-real-hw-oo-reboot-validation.ps1 -Phase collect -UsbRoot E:\
+```
+
+The `prepare` phase builds `llm-baremetal-boot-real-hw-oo-reboot.img` with `oo_enable=1` and the reboot smoke autorun; the `collect` phase requires the `reboot_probe_arm` and `reboot_probe_verified` journal markers, allows a missing consult log, and writes a reboot-focused validation report.
+
 The chained `collect` phase also writes `oo-real-validation-report.md` into the artifact folder so the real-machine milestone has a human-readable receipt with artifact sizes, consult decision, confidence fields, and parsed journal events.
 
 The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.
