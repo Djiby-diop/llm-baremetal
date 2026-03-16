@@ -18,8 +18,9 @@ $root = Split-Path -Parent $PSCommandPath
 $prepareScript = Join-Path $root 'prepare-real-hw-chat.ps1'
 $collectScript = Join-Path $root 'collect-real-hw-oo-artifacts.ps1'
 $validateScript = Join-Path $root 'validate-real-hw-oo-artifacts.ps1'
+$reportScript = Join-Path $root 'write-real-hw-oo-validation-report.ps1'
 
-foreach ($path in @($prepareScript, $collectScript, $validateScript)) {
+foreach ($path in @($prepareScript, $collectScript, $validateScript, $reportScript)) {
   if (-not (Test-Path -LiteralPath $path)) {
     throw "Missing required helper: $path"
   }
@@ -93,6 +94,18 @@ if ($RequireHandoff) {
 }
 
 & $validateScript @validateArgs
+
+$reportArgs = @{
+  ArtifactsDir = $targetArtifacts
+  ModelBin = $ModelBin
+}
+if ($UsbRoot) {
+  $reportArgs['SourceLabel'] = [System.IO.Path]::GetFullPath($UsbRoot)
+} elseif ($ImagePath) {
+  $reportArgs['SourceLabel'] = [System.IO.Path]::GetFullPath($ImagePath)
+}
+
+& $reportScript @reportArgs
 
 Write-Host ''
 Write-Host "[OO Real] Validation complete: $targetArtifacts" -ForegroundColor Green

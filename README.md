@@ -218,6 +218,8 @@ If you want a single entrypoint for the whole real-machine consult milestone, us
 
 The `prepare` phase builds the image with `-AutoOoConsultSmoke`; the `collect` phase chains collection plus validation automatically.
 
+The chained `collect` phase also writes `oo-real-validation-report.md` into the artifact folder so the real-machine milestone has a human-readable receipt with artifact sizes, consult decision, confidence fields, and parsed journal events.
+
 The host runtime lives in the separate `oo-host` repository and is expected by default as a sibling clone beside this repo.
 
 Validate everything (recommended after pulling updates):
