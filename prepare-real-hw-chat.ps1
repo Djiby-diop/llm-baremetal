@@ -18,6 +18,7 @@ param(
   [ValidateRange(1.0, 2.0)]
   [double]$RepeatPenalty = 1.15,
   [switch]$EnableOo,
+  [switch]$EnableOoConsult,
   [switch]$AutoSmoke,
   [switch]$AutoOoConsultSmoke,
   [switch]$SkipPrebuild,
@@ -56,7 +57,7 @@ function Get-SystemPromptText([string]$value) {
 function New-GeneratedReplCfg {
   $prompt = Get-SystemPromptText $SystemPrompt
   $lines = [System.Collections.Generic.List[string]]::new()
-  $enableOoEffective = $EnableOo -or $AutoOoConsultSmoke
+  $enableOoEffective = $EnableOo -or $EnableOoConsult -or $AutoOoConsultSmoke
   $lines.Add("chat_format=$ChatFormat")
   if ($prompt) {
     $lines.Add("system_prompt=$prompt")
@@ -72,8 +73,10 @@ function New-GeneratedReplCfg {
   if ($enableOoEffective) {
     $lines.Add('oo_enable=1')
   }
-  if ($AutoOoConsultSmoke) {
+  if ($EnableOoConsult -or $AutoOoConsultSmoke) {
     $lines.Add('oo_llm_consult=1')
+  }
+  if ($AutoOoConsultSmoke) {
     $lines.Add('autorun_autostart=1')
     $lines.Add('autorun_shutdown_when_done=0')
     $lines.Add('autorun_file=llmk-autorun-real-hw-oo-consult-smoke.txt')
@@ -101,8 +104,14 @@ try {
   if ($AutoOoConsultSmoke) {
     Write-Host "  OO:    enabled (LLM consult smoke)" -ForegroundColor Gray
     Write-Host "  Autorun: llmk-autorun-real-hw-oo-consult-smoke.txt" -ForegroundColor Gray
+  } elseif ($EnableOoConsult) {
+    Write-Host "  OO:    enabled (LLM consult interactive)" -ForegroundColor Gray
+    Write-Host "  Autorun: disabled (interactive boot)" -ForegroundColor Gray
   } elseif ($AutoSmoke) {
     Write-Host "  Autorun: llmk-autorun-real-hw-model-chat-smoke.txt" -ForegroundColor Gray
+  } elseif ($EnableOo) {
+    Write-Host "  OO:    enabled (interactive)" -ForegroundColor Gray
+    Write-Host "  Autorun: disabled (interactive boot)" -ForegroundColor Gray
   } else {
     Write-Host "  Autorun: disabled (interactive boot)" -ForegroundColor Gray
   }
