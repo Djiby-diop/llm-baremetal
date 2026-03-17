@@ -226,6 +226,27 @@ To continue the OO path with a real model, the same helper also supports `-AutoO
 ./prepare-real-hw-chat.ps1 -ModelBin stories110M.bin -AutoOoConsultSmoke
 ```
 
+For an interactive real-hardware OO image without autorun or auto-shutdown, use `-EnableOoConsult` instead. This keeps the boot in the REPL while pre-enabling `oo_enable=1` and `oo_llm_consult=1`:
+
+```powershell
+./prepare-real-hw-chat.ps1 -ModelBin stories110M.bin -EnableOoConsult -OutImagePath ..\llm-baremetal-boot-real-hw-oo-consult-interactive.img
+```
+
+Validated demo image:
+
+```powershell
+./prepare-real-hw-chat.ps1 -ModelBin stories110M.bin -EnableOoConsult -SkipPrebuild -CtxLen 256 -MaxTokens 96 -Temperature 0.75 -TopP 0.95 -TopK 80 -RepeatPenalty 1.15 -OutImagePath ..\llm-baremetal-boot-demo-stories110M.img
+```
+
+This produces a clean interactive USB/demo image with the bundled `stories110M.bin` model, conversational defaults, OO consult enabled, and no autorun shutdown path. After boot, a short live demo can be:
+
+- `/cfg`
+- `/diag`
+- `hi`
+- `/oo_status`
+- `/oo_consult`
+- `/oo_explain`
+
 After the real-machine run, collect the produced OO artifacts from the mounted FAT partition or from an image copy with [collect-real-hw-oo-artifacts.ps1](collect-real-hw-oo-artifacts.ps1):
 
 ```powershell
