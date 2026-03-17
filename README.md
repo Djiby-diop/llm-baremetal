@@ -9,11 +9,6 @@ By Djiby Diop
 `llm-baremetal` is the **sovereign runtime** of the larger Operating Organism vision.
 It is meant to be preserved and evolved as the bare-metal / survival / recovery pillar of the system, not replaced.
 
-Strategic planning notes:
-
-- [ORGANISM_ARCHITECTURE.md](ORGANISM_ARCHITECTURE.md): master architecture for the host + sovereign organism model
-- [HOST_RUNTIME_90_DAYS.md](HOST_RUNTIME_90_DAYS.md): concrete 90-day execution plan for the first host runtime
-
 ## Build (Windows + WSL)
 
 ### Model weights (not in git)
