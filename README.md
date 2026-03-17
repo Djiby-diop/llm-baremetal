@@ -247,6 +247,13 @@ This produces a clean interactive USB/demo image with the bundled `stories110M.b
 - `/oo_consult`
 - `/oo_explain`
 
+Published demo artifacts on Hugging Face now include both the raw and compressed forms:
+
+- `llm-baremetal-boot-demo-stories110M.img`
+- `llm-baremetal-boot-demo-stories110M.img.xz`
+- `SHA256SUMS-demo-stories110M.txt`
+- `SHA256SUMS-demo-stories110M-xz.txt`
+
 After the real-machine run, collect the produced OO artifacts from the mounted FAT partition or from an image copy with [collect-real-hw-oo-artifacts.ps1](collect-real-hw-oo-artifacts.ps1):
 
 ```powershell

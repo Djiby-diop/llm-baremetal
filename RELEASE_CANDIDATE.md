@@ -37,5 +37,7 @@ For model-backed demo use, the current validated image is `llm-baremetal-boot-de
 - Hugging Face model repo: `djibydiop/llm-baremetal`
 - Published demo assets:
 	- `llm-baremetal-boot-demo-stories110M.img`
+	- `llm-baremetal-boot-demo-stories110M.img.xz`
 	- `SHA256SUMS-demo-stories110M.txt`
+	- `SHA256SUMS-demo-stories110M-xz.txt`
 - Tag: `rc-2026-03-17-demo`

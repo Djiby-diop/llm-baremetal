@@ -39,7 +39,9 @@ Status: draft for GitHub Release publication
 - `llm-baremetal-boot-nomodel-x86_64.img.xz`
 - `SHA256SUMS.txt`
 - `llm-baremetal-boot-demo-stories110M.img`
+- `llm-baremetal-boot-demo-stories110M.img.xz`
 - `SHA256SUMS-demo-stories110M.txt`
+- `SHA256SUMS-demo-stories110M-xz.txt`
 - optional operator artifact bundle generated from `oo-host handoff-pack`
 
 ## Operator guidance
@@ -52,4 +54,4 @@ Status: draft for GitHub Release publication
 ## Known constraints
 
 - Hardware virtualization is still reported disabled on the current validation host, so QEMU validation is running in a compatible non-accelerated path.
-- The demo artifact is a raw `.img`; if a compressed release asset is needed, produce an `.img.xz` companion before wider distribution.
+- Both raw `.img` and compressed `.img.xz` demo artifacts are now published; prefer the compressed artifact for distribution and keep the raw image for direct local flashing workflows.
