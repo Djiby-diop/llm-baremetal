@@ -47,6 +47,7 @@ DIAGNOSTIC.md
 !llmk-autorun-oo-smoke.txt
 !llmk-autorun-oo-consult-smoke.txt
 !llmk-autorun-oo-reboot-smoke.txt
+!llmk-autorun-oo-outcome-smoke.txt
 !llmk-autorun-real-hw-handoff-smoke.txt
 !llmk-autorun-real-hw-oo-consult-smoke.txt
 !llmk-autorun-real-hw-model-chat-smoke.txt
@@ -183,7 +184,6 @@ olympe/build/
 # Keep repo minimal: non-essential docs/notes are local only
 ROADMAP.md
 REPERE.md
-COMMANDES.md
 OO_SPEC.md
 OO_GLOBAL_ARCHITECTURE.md
 OO_HOST_RUNTIME_V0.md

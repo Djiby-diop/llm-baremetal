@@ -1,0 +1,17 @@
+# llmk autorun (OO outcome smoke, no-model)
+# Expect: oo_enable=1, oo_llm_consult=1, oo_auto_apply=1.
+
+/cfg
+/oo_status
+/oo_consult_mock reduce context to 256
+/oo_outcome
+/oo_jour
+/oo_reboot_probe
+/oo_status
+/oo_outcome
+/oo_consult_mock reduce context and reduce sequence
+/oo_status
+/oo_explain verbose
+/oo_explain boot
+/oo_log
+/oo_jour

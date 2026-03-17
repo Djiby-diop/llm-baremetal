@@ -136,8 +136,19 @@ Useful REPL commands:
 - `/models` to list `.gguf`/`.bin` found in the root and `models\\`
 - `/model_info <file>` to inspect a model before loading, including files in root, `models\\`, and FAT 8.3-resolved names
 - `/oo_status` to inspect runtime engine state plus persistence/continuity artifacts (`OOSTATE.BIN`, `OORECOV.BIN`, `OOJOUR.LOG`, `OOCONSULT.LOG`, `OOHANDOFF.TXT`)
+- `/oo_outcome` to inspect `OOOUTCOME.LOG`, pending next-boot checks, and confirmed adaptation outcomes
+- `/oo_explain` to explain the latest consult decision, with `/oo_explain verbose` for confidence/plan/dynamics details and `/oo_explain boot` for latest confirmed boot comparison plus recent confirmed history
 - `/oo_reboot_probe` to arm a reboot continuity check, reboot, then verify that OO state came back aligned on the next boot
 - `/cfg` to confirm effective `repl.cfg` settings
+
+Recent OO consult builds also expose higher-level operator fields in `/oo_status`, `/oo_log`, and `/oo_explain verbose`, including:
+
+- `last.consult.boot_relation` / `boot_bias`
+- `last.consult.trend` / `trend_bias`
+- `last.consult.saturation` / `saturation_bias`
+- `last.consult.operator_summary`
+
+This makes it easier to see cases such as `positive_but_saturated`, where a previously successful action is still favored by history but is no longer directly applicable because the target is already at its bound.
 
 For a first real-machine no-model check, the image also ships with [llmk-autorun-real-hw-oo-smoke.txt](llmk-autorun-real-hw-oo-smoke.txt). Run it with `/autorun llmk-autorun-real-hw-oo-smoke.txt` or point `autorun_file` to it in `repl.cfg`.
 
@@ -171,6 +182,14 @@ Model-backed OO consult smoke in QEMU:
 ```
 
 This validates `/oo_consult`, `/oo_log`, and `OOCONSULT.LOG` creation with a small bundled model before moving to real hardware.
+
+No-model OO outcome / adaptation learning smoke in QEMU:
+
+```powershell
+./test-qemu-autorun.ps1 -Mode oo_outcome_smoke -Accel tcg -SkipPrebuild
+```
+
+This validates the consult -> persist -> reboot-verified outcome -> learned reselection loop, including `/oo_outcome`, `/oo_explain boot`, recent confirmed history, and operator-facing summaries persisted in `OOCONSULT.LOG`.
 
 For faster iteration, use the unified QEMU wrapper [run-qemu-oo-validation.ps1](run-qemu-oo-validation.ps1):
 

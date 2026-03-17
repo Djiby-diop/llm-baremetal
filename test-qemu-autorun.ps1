@@ -1,7 +1,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
   # Minimal mode set: we only guarantee oo_smoke for no-model iteration.
-  [ValidateSet('oo_smoke','oo_consult_smoke','oo_reboot_smoke','smoke')]
+  [ValidateSet('oo_smoke','oo_consult_smoke','oo_reboot_smoke','oo_outcome_smoke','smoke')]
   [string]$Mode = 'oo_smoke',
 
   [ValidateSet('auto','whpx','tcg','none')]
@@ -88,6 +88,13 @@ try {
   if ($Mode -eq 'oo_consult_smoke') {
     $cfgLines.Add('oo_llm_consult=1')
   }
+  if ($Mode -eq 'oo_outcome_smoke') {
+    $cfgLines.Add('oo_llm_consult=1')
+    $cfgLines.Add('oo_auto_apply=1')
+    $cfgLines.Add('oo_conf_gate=0')
+    $cfgLines.Add('ctx_len=512')
+    $cfgLines.Add('seq_len=1024')
+  }
 
   $cfg = $cfgLines -join "`n"
   Set-Content -LiteralPath $replCfg -Value $cfg -Encoding ASCII -NoNewline
@@ -96,7 +103,8 @@ try {
     'oo_smoke' { 'llmk-autorun-oo-smoke.txt' }
     'oo_consult_smoke' { 'llmk-autorun-oo-consult-smoke.txt' }
     'oo_reboot_smoke' { 'llmk-autorun-oo-reboot-smoke.txt' }
-    default { throw "Unsupported -Mode '$Mode' in minimal harness. Supported: oo_smoke, oo_consult_smoke, oo_reboot_smoke" }
+    'oo_outcome_smoke' { 'llmk-autorun-oo-outcome-smoke.txt' }
+    default { throw "Unsupported -Mode '$Mode' in minimal harness. Supported: oo_smoke, oo_consult_smoke, oo_reboot_smoke, oo_outcome_smoke" }
   }
 
   $scriptPath = Join-Path $root $scriptName
@@ -203,6 +211,48 @@ try {
     if ($serial -notmatch '\[oo_log\] OOCONSULT\.LOG tail:') { throw "Missing /oo_log marker. Serial: $serialPath" }
     if ($serial -notmatch 'OOCONSULT\.LOG\s+present=1') { throw "Missing OOCONSULT.LOG presence in /oo_status. Serial: $serialPath" }
     if ($serial -notmatch 'cmd=oo_consult') { throw "Missing oo_consult journal context marker. Serial: $serialPath" }
+  }
+
+  if ($Mode -eq 'oo_outcome_smoke') {
+    if ($serial -notmatch '(?m)^\[oo_consult_mock\] using mock suggestion\s*$') { throw "Missing /oo_consult_mock marker. Serial: $serialPath" }
+    if ($serial -notmatch 'OK: OO auto-apply: reduce_ctx') { throw "Missing reduce_ctx auto-apply marker. Serial: $serialPath" }
+    if ($serial -notmatch 'OK: OO consult metric: action=reduce_ctx improved=1 expected=ctx_256 observed=ctx_256') { throw "Missing confirmed next-boot outcome metric. Serial: $serialPath" }
+    if ($serial -notmatch 'OK: OO feedback: good=1 bad=0 bias=[1-9][0-9]* action_bias=[1-9][0-9]*') { throw "Missing adaptive feedback bias marker. Serial: $serialPath" }
+    if ($serial -notmatch 'OK: OO boot feedback: reduce_ctx=selected_matches_confirmed_good\(8\) reduce_seq=selected_differs_from_last_confirmed\(0\) increase_ctx=na\(0\)') { throw "Missing boot-relation feedback marker. Serial: $serialPath" }
+    if ($serial -notmatch 'OK: OO trend feedback: reduce_ctx=trend_recent_positive\(4\) reduce_seq=trend_recent_none\(0\) increase_ctx=na\(0\)') { throw "Missing trend feedback marker. Serial: $serialPath" }
+    if ($serial -notmatch 'OK: OO saturation feedback: reduce_ctx=saturated_min\(-10\) reduce_seq=ready\(0\) increase_ctx=na\(0\)') { throw "Missing saturation feedback marker. Serial: $serialPath" }
+    if ($serial -notmatch 'OK: OO action selection: selected=reduce_seq mode=single_best') { throw "Missing trend+saturation action selection marker. Serial: $serialPath" }
+    if ($serial -notmatch '(?m)^\[oo_outcome\] OOOUTCOME\.LOG tail:\s*$') { throw "Missing /oo_outcome header. Serial: $serialPath" }
+    if ($serial -notmatch '(?m)^\[oo_outcome\] pending\.action=reduce_ctx\s*$') { throw "Missing pending outcome action marker. Serial: $serialPath" }
+    if ($serial -notmatch 'out b=\d+ a=reduce_ctx i=-1 exp=ctx_256 obs=pending_next_boot') { throw "Missing OOOUTCOME pending line. Serial: $serialPath" }
+    if ($serial -notmatch 'out b=\d+ a=reduce_ctx i=1 exp=ctx_256 obs=ctx_256') { throw "Missing OOOUTCOME confirmed line. Serial: $serialPath" }
+    if ($serial -notmatch 'OOOUTCOME\.LOG\s+present=1') { throw "Missing OOOUTCOME.LOG presence in /oo_status. Serial: $serialPath" }
+    if ($serial -notmatch 'pending\.action=reduce_ctx') { throw "Missing pending action in /oo_status. Serial: $serialPath" }
+    if ($serial -notmatch 'last\.consult\.decision=multi selected=reduce_seq reason_id=OO_BLOCK_PLAN_BUDGET applied=0 score=\d+ threshold=60 feedback_bias=[1-9][0-9]*') { throw "Missing selected-action consult summary in /oo_status. Serial: $serialPath" }
+    if ($serial -notmatch 'last\.consult\.conf_reason_id=OO_CONF_LOG_ONLY plan\.enabled=0 remain=0 hard_stop=0 plan_reason_id=OO_PLAN_ACTIVE') { throw "Missing confidence/plan consult summary in /oo_status. Serial: $serialPath" }
+    if ($serial -notmatch 'last\.consult\.boot_relation=selected_differs_from_last_confirmed boot_bias=0') { throw "Missing boot relation consult summary in /oo_status. Serial: $serialPath" }
+    if ($serial -notmatch 'last\.consult\.trend=trend_recent_none trend_bias=0 saturation=ready saturation_bias=0') { throw "Missing trend and saturation consult summary in /oo_status. Serial: $serialPath" }
+    if ($serial -notmatch 'last\.consult\.operator_summary=positive_but_saturated') { throw "Missing operator summary in /oo_status. Serial: $serialPath" }
+    if ($serial -notmatch 'last\.consult\.why=not_applied_plan_budget') { throw "Missing human-readable consult why summary in /oo_status. Serial: $serialPath" }
+    if ($serial -notmatch '(?m)^\[oo_explain\] latest consult:\s*$') { throw "Missing /oo_explain header. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain\] why=not_applied_plan_budget reason_id=OO_BLOCK_PLAN_BUDGET') { throw "Missing /oo_explain why summary. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain\] conf_reason_id=OO_CONF_LOG_ONLY') { throw "Missing verbose /oo_explain confidence reason. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain\] plan\.enabled=0 remain=0 hard_stop=0 plan_reason_id=OO_PLAN_ACTIVE') { throw "Missing verbose /oo_explain plan summary. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain\] boot_relation=selected_differs_from_last_confirmed boot_bias=0') { throw "Missing verbose /oo_explain boot relation summary. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain\] trend=trend_recent_none trend_bias=0 saturation=ready saturation_bias=0') { throw "Missing verbose /oo_explain trend and saturation summary. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain\] operator_summary=positive_but_saturated') { throw "Missing verbose /oo_explain operator summary. Serial: $serialPath" }
+    if ($serial -notmatch '(?m)^\[oo_explain\] boot comparison:\s*$') { throw "Missing /oo_explain boot header. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain_boot\] consult\.selected=reduce_seq reason_id=OO_BLOCK_PLAN_BUDGET') { throw "Missing /oo_explain boot consult summary. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain_boot\] operator_summary=positive_but_saturated') { throw "Missing /oo_explain boot operator summary. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain_boot\] outcome\.action=reduce_ctx improved=1 expected=ctx_256 observed=ctx_256') { throw "Missing /oo_explain boot outcome summary. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain_boot\] relation=selected_differs_from_last_confirmed') { throw "Missing /oo_explain boot relation summary. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain_boot\] recent\.count=1') { throw "Missing /oo_explain boot recent count. Serial: $serialPath" }
+    if ($serial -notmatch '\[oo_explain_boot\] recent\[0\]\.action=reduce_ctx improved=1 expected=ctx_256 observed=ctx_256') { throw "Missing /oo_explain boot recent outcome detail. Serial: $serialPath" }
+    if ($serial -notmatch '(?m)^\[oo_log\] latest summary:\s*$') { throw "Missing enriched /oo_log summary header. Serial: $serialPath" }
+    if ($serial -notmatch '(?m)^\[oo_log\] OOCONSULT\.LOG tail:\s*$') { throw "Missing /oo_log tail marker. Serial: $serialPath" }
+    if ($serial -notmatch 'cmd=oo_outcome') { throw "Missing oo_outcome journal marker. Serial: $serialPath" }
+    if ($serial -notmatch '(?m)^\[oo_reboot_probe\] verified=1\s*$') { throw "Missing reboot verification marker in outcome smoke. Serial: $serialPath" }
+    if ($serial -notmatch 'consult b=\d+ .* sel=reduce_seq br=selected_differs_from_last_confirmed bb=0 tr=trend_recent_none tb=0 sr=ready sb=0 os=positive_but_saturated ri=OO_BLOCK_PLAN_BUDGET cri=OO_CONF_LOG_ONLY pe=0 pr=0 ph=0 pri=OO_PLAN_ACTIVE .* fb=[1-9][0-9]*') { throw "Missing persisted selected action, boot relation, trend, saturation, operator summary, reason, confidence, plan, and feedback bias in OOCONSULT.LOG. Serial: $serialPath" }
   }
 
   if ($Mode -eq 'oo_reboot_smoke') {

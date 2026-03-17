@@ -4,6 +4,10 @@ param(
   [switch]$SkipOsgSmoke,
   [switch]$SkipLlmkSmoke,
   [switch]$SkipImage,
+  [switch]$SkipRebootSmoke,
+  [switch]$SkipOutcomeSmoke,
+  [switch]$SkipConsultSmoke,
+  [string]$ConsultModel = 'stories15M.q8_0.gguf',
   [switch]$SkipPrebuild,
   [int]$TimeoutSec = 180
 )
@@ -27,6 +31,32 @@ function ConvertTo-WslPath([string]$winPath) {
     return "/mnt/$drive/$rest"
   }
   throw "Failed to convert path to WSL path: $winPath"
+}
+
+function Test-ModelSpecPresent([string]$spec) {
+  if (-not $spec) { return $false }
+
+  $candidates = @(
+    (Join-Path $PSScriptRoot $spec),
+    (Join-Path (Split-Path $PSScriptRoot -Parent) $spec)
+  )
+
+  if ($spec -notmatch '\.[A-Za-z0-9]+$') {
+    $candidates += @(
+      (Join-Path $PSScriptRoot ($spec + '.bin')),
+      (Join-Path $PSScriptRoot ($spec + '.gguf')),
+      (Join-Path (Split-Path $PSScriptRoot -Parent) ($spec + '.bin')),
+      (Join-Path (Split-Path $PSScriptRoot -Parent) ($spec + '.gguf'))
+    )
+  }
+
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) {
+      return $true
+    }
+  }
+
+  return $false
 }
 
 function Test-OoPolicyBin([string]$path, [bool]$expectAllowByDefault, [string]$expectFirstAllow) {
@@ -232,15 +262,79 @@ if (-not $SkipLlmkSmoke) {
   Assert (Test-Path -LiteralPath $autorun) "test-qemu-autorun.ps1 not found: $autorun"
   Assert (Test-Path -LiteralPath $handoff) "test-qemu-handoff.ps1 not found: $handoff"
 
+  $noModelSmokeArgs = @{
+    Accel = 'tcg'
+    MemMB = 1024
+    TimeoutSec = $TimeoutSec
+  }
+  $ooSmokeArgs = @{
+    Accel = 'tcg'
+    MemMB = 1024
+    TimeoutSec = $TimeoutSec
+  }
+  if (-not $SkipImage) {
+    $ooSmokeArgs.SkipBuild = $true
+  }
+  if ($SkipPrebuild) {
+    $noModelSmokeArgs.SkipPrebuild = $true
+    $ooSmokeArgs.SkipPrebuild = $true
+  }
+
   Info "Running llm-baremetal UEFI/QEMU autorun smoke (no-model)..."
-  & $autorun -Mode oo_smoke -Accel tcg -MemMB 1024 -TimeoutSec $TimeoutSec
+  & $autorun -Mode oo_smoke @ooSmokeArgs
   if ($LASTEXITCODE -ne 0) { throw "llm-baremetal autorun smoke failed ($LASTEXITCODE)" }
   Ok "OK: llm-baremetal autorun smoke PASS"
 
+  if (-not $SkipRebootSmoke) {
+    Info "Running llm-baremetal reboot continuity smoke..."
+    & $autorun -Mode oo_reboot_smoke @noModelSmokeArgs
+    if ($LASTEXITCODE -ne 0) { throw "llm-baremetal reboot smoke failed ($LASTEXITCODE)" }
+    Ok "OK: llm-baremetal reboot smoke PASS"
+  } else {
+    Warn "llm-baremetal reboot smoke skipped (-SkipRebootSmoke)"
+  }
+
+  if (-not $SkipOutcomeSmoke) {
+    Info "Running llm-baremetal outcome feedback smoke..."
+    & $autorun -Mode oo_outcome_smoke @noModelSmokeArgs
+    if ($LASTEXITCODE -ne 0) { throw "llm-baremetal outcome smoke failed ($LASTEXITCODE)" }
+    Ok "OK: llm-baremetal outcome smoke PASS"
+  } else {
+    Warn "llm-baremetal outcome smoke skipped (-SkipOutcomeSmoke)"
+  }
+
   Info "Running llm-baremetal host->sovereign handoff smoke..."
-  & $handoff -Accel tcg -MemMB 1024 -TimeoutSec $TimeoutSec
+  $handoffArgs = @{
+    Accel = 'tcg'
+    MemMB = 1024
+    TimeoutSec = $TimeoutSec
+  }
+  if ($SkipPrebuild) {
+    $handoffArgs.SkipPrebuild = $true
+  }
+  & $handoff @handoffArgs
   if ($LASTEXITCODE -ne 0) { throw "llm-baremetal handoff smoke failed ($LASTEXITCODE)" }
   Ok "OK: llm-baremetal handoff smoke PASS"
+
+  if (-not $SkipConsultSmoke) {
+    Assert (Test-ModelSpecPresent $ConsultModel) "Consult model not found: $ConsultModel"
+    Info "Running llm-baremetal model-backed OO consult smoke..."
+    $consultArgs = @{
+      Mode = 'oo_consult_smoke'
+      Accel = 'tcg'
+      MemMB = 1024
+      TimeoutSec = $TimeoutSec
+      ModelBin = $ConsultModel
+    }
+    if ($SkipPrebuild) {
+      $consultArgs.SkipPrebuild = $true
+    }
+    & $autorun @consultArgs
+    if ($LASTEXITCODE -ne 0) { throw "llm-baremetal consult smoke failed ($LASTEXITCODE)" }
+    Ok "OK: llm-baremetal consult smoke PASS"
+  } else {
+    Warn "llm-baremetal consult smoke skipped (-SkipConsultSmoke)"
+  }
 } else {
   Warn "llm-baremetal autorun smoke skipped (-SkipLlmkSmoke)"
 }

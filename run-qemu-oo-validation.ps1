@@ -1,6 +1,6 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
-  [ValidateSet('smoke','consult','reboot','handoff','all-core')]
+  [ValidateSet('smoke','consult','reboot','outcome','handoff','all-core')]
   [string]$Mode = 'all-core',
 
   [ValidateSet('auto','whpx','tcg','none')]
@@ -82,12 +82,16 @@ switch ($Mode) {
   'reboot' {
     Invoke-Step 'OO reboot continuity smoke' { Invoke-AutorunMode 'oo_reboot_smoke' }
   }
+  'outcome' {
+    Invoke-Step 'OO outcome feedback smoke' { Invoke-AutorunMode 'oo_outcome_smoke' }
+  }
   'handoff' {
     Invoke-Step 'Host to sovereign handoff smoke' { Invoke-HandoffMode }
   }
   'all-core' {
     Invoke-Step 'No-model OO smoke' { Invoke-AutorunMode 'oo_smoke' }
     Invoke-Step 'OO reboot continuity smoke' { Invoke-AutorunMode 'oo_reboot_smoke' }
+    Invoke-Step 'OO outcome feedback smoke' { Invoke-AutorunMode 'oo_outcome_smoke' }
     Invoke-Step 'Host to sovereign handoff smoke' { Invoke-HandoffMode }
     Invoke-Step 'Model-backed OO consult smoke' { Invoke-AutorunMode 'oo_consult_smoke' }
   }

@@ -3943,6 +3943,117 @@ static void llmk_oo_outcome_log_rotate_best_effort(void) {
     uefi_call_wrapper(BS->FreePool, 1, buf);
 }
 
+static void llmk_oo_outcome_copy_token(char *dst, int cap, const char *src) {
+    if (!dst || cap <= 0) return;
+    int p = 0;
+    dst[0] = 0;
+    if (!src) return;
+    for (int i = 0; src[i] && p + 1 < cap; i++) {
+        char c = src[i];
+        if ((c >= 'a' && c <= 'z') ||
+            (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') ||
+            c == '_' || c == '-' || c == ':') {
+            dst[p++] = c;
+        } else {
+            dst[p++] = '_';
+        }
+    }
+    dst[p] = 0;
+}
+
+static int llmk_oo_outcome_extract_token(const char *line, const char *key, char *out, int out_cap) {
+    if (!line || !key || !out || out_cap <= 0) return 0;
+    out[0] = 0;
+    char needle[24];
+    int np = 0;
+    for (int i = 0; key[i] && np + 2 < (int)sizeof(needle); i++) needle[np++] = key[i];
+    needle[np++] = '=';
+    needle[np] = 0;
+
+    char *hit = my_strstr(line, needle);
+    if (!hit) return 0;
+    hit += np;
+
+    int p = 0;
+    while (*hit && *hit != ' ' && *hit != '\r' && *hit != '\n' && p + 1 < out_cap) {
+        out[p++] = *hit++;
+    }
+    out[p] = 0;
+    return (p > 0) ? 1 : 0;
+}
+
+static int llmk_oo_outcome_parse_expected_value(const char *token, const char *prefix, int *out_value) {
+    if (!token || !prefix || !out_value) return 0;
+    int plen = 0;
+    while (prefix[plen]) plen++;
+    if (plen <= 0) return 0;
+    for (int i = 0; i < plen; i++) {
+        if (token[i] != prefix[i]) return 0;
+    }
+    int p = plen;
+    int v = 0;
+    int saw = 0;
+    while (token[p] >= '0' && token[p] <= '9') {
+        saw = 1;
+        v = (v * 10) + (token[p] - '0');
+        p++;
+    }
+    if (!saw || token[p] != 0) return 0;
+    *out_value = v;
+    return 1;
+}
+
+static int llmk_oo_outcome_read_latest_pending_expected(char *out_expected, int out_cap) {
+    if (!out_expected || out_cap <= 0) return 0;
+    out_expected[0] = 0;
+    if (!g_root) return 0;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOOUTCOME.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        return 0;
+    }
+
+    char *cbuf = (char *)buf;
+    UINTN start = (len > 8192) ? (len - 8192) : 0;
+    for (UINTN i = start; i < len; i++) {
+        if (cbuf[i] == '\n') {
+            start = i + 1;
+            break;
+        }
+    }
+    if (start >= len) start = 0;
+
+    char *p = cbuf + start;
+    char *end = cbuf + len;
+    int found = 0;
+    while (p < end) {
+        char *line = p;
+        while (p < end && *p != '\n') p++;
+        if (p < end && *p == '\n') {
+            *p = 0;
+            p++;
+        }
+        for (char *c = line; *c; c++) {
+            if (*c == '\r') { *c = 0; break; }
+        }
+
+        char improved[8];
+        char expected[64];
+        if (!llmk_oo_outcome_extract_token(line, "i", improved, (int)sizeof(improved))) continue;
+        if (!(improved[0] == '-' && improved[1] == '1' && improved[2] == 0)) continue;
+        if (!llmk_oo_outcome_extract_token(line, "exp", expected, (int)sizeof(expected))) continue;
+        llmk_oo_outcome_copy_token(out_expected, out_cap, expected);
+        found = 1;
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    return found;
+}
+
 static void llmk_oo_outcome_append_best_effort(UINT64 boot_count,
                                                 UINT32 action_id,
                                                 const char *expected_effect,
@@ -3956,17 +4067,20 @@ static void llmk_oo_outcome_append_best_effort(UINT64 boot_count,
     EFI_STATUS st = llmk_open_binary_file_append(&f, L"OOOUTCOME.LOG");
     if (EFI_ERROR(st) || !f) return;
 
-    (void)boot_count;
-    (void)expected_effect;
-    (void)observed_effect;
+    char expected_tok[48];
+    char observed_tok[48];
+    llmk_oo_outcome_copy_token(expected_tok, (int)sizeof(expected_tok), expected_effect ? expected_effect : "none");
+    llmk_oo_outcome_copy_token(observed_tok, (int)sizeof(observed_tok), observed_effect ? observed_effect : "none");
 
-    // Ultra-minimal persistent outcome line (easy to parse, stable tokens).
-    // Format: out a=<action> i=<0|1|-1>
-    char line[96];
+    // Stable outcome line.
+    // Format: out b=<boot> a=<action> i=<0|1|-1> exp=<token> obs=<token>
+    char line[192];
     int p = 0;
     line[0] = 0;
 
-    llmk_ascii_append_str(line, (int)sizeof(line), &p, "out a=");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, "out b=");
+    llmk_ascii_append_u64(line, (int)sizeof(line), &p, boot_count);
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " a=");
     llmk_ascii_append_str(line, (int)sizeof(line), &p, llmk_oo_action_name(action_id));
     llmk_ascii_append_str(line, (int)sizeof(line), &p, " i=");
     if (improved < 0) {
@@ -3974,6 +4088,10 @@ static void llmk_oo_outcome_append_best_effort(UINT64 boot_count,
     } else {
         llmk_ascii_append_u64(line, (int)sizeof(line), &p, (UINT64)improved);
     }
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " exp=");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, expected_tok[0] ? expected_tok : "none");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, " obs=");
+    llmk_ascii_append_str(line, (int)sizeof(line), &p, observed_tok[0] ? observed_tok : "none");
     llmk_ascii_append_str(line, (int)sizeof(line), &p, "\r\n");
 
     UINTN nb = (UINTN)p;
@@ -3989,11 +4107,17 @@ static void llmk_oo_outcome_append_best_effort(UINT64 boot_count,
 static void llmk_oo_outcome_feedback_recent_best_effort(int *out_reduction_good,
                                                         int *out_reduction_bad,
                                                         int *out_increase_good,
-                                                        int *out_increase_bad) {
+                                                        int *out_increase_bad,
+                                                        int *out_reduce_ctx_score,
+                                                        int *out_reduce_seq_score,
+                                                        int *out_increase_ctx_score) {
     if (out_reduction_good) *out_reduction_good = 0;
     if (out_reduction_bad) *out_reduction_bad = 0;
     if (out_increase_good) *out_increase_good = 0;
     if (out_increase_bad) *out_increase_bad = 0;
+    if (out_reduce_ctx_score) *out_reduce_ctx_score = 0;
+    if (out_reduce_seq_score) *out_reduce_seq_score = 0;
+    if (out_increase_ctx_score) *out_increase_ctx_score = 0;
     if (!g_root) return;
 
     void *buf = NULL;
@@ -4015,6 +4139,8 @@ static void llmk_oo_outcome_feedback_recent_best_effort(int *out_reduction_good,
     if (start >= len) start = 0;
 
     int considered = 0;
+    int action_codes[16];
+    int improved_vals[16];
     char *p = cbuf + start;
     char *end = cbuf + len;
     while (p < end && considered < 16) {
@@ -4028,43 +4154,430 @@ static void llmk_oo_outcome_feedback_recent_best_effort(int *out_reduction_good,
         for (char *c = line; *c; c++) {
             if (*c == '\r') { *c = 0; break; }
         }
+        char action[32];
+        char imp[8];
+        if (!llmk_oo_outcome_extract_token(line, "a", action, (int)sizeof(action))) continue;
+        if (!llmk_oo_outcome_extract_token(line, "i", imp, (int)sizeof(imp))) continue;
+        if (imp[0] == '-') continue;
 
-        // Format: out a=<action> i=<0|1|-1>
-        char *action = my_strstr(line, "a=");
-        char *imp = my_strstr(line, "i=");
-        if (!action || !imp) continue;
+        int action_code = 0;
+        if (my_strstr(action, "reduce_ctx")) action_code = 1;
+        else if (my_strstr(action, "reduce_seq")) action_code = 2;
+        else if (my_strstr(action, "increase_ctx")) action_code = 3;
+        if (action_code == 0) continue;
 
-        action += 2;
-        imp += 2;
-        if (*imp == '-') continue;
-        int improved = (*imp == '1') ? 1 : 0;
-
-        int is_reduce = 0;
-        int is_increase = 0;
-        if (my_strstr(action, "reduce_ctx") || my_strstr(action, "reduce_seq")) {
-            is_reduce = 1;
-        } else if (my_strstr(action, "increase_ctx")) {
-            is_increase = 1;
-        }
-        if (!is_reduce && !is_increase) continue;
-
+        action_codes[considered] = action_code;
+        improved_vals[considered] = (imp[0] == '1') ? 1 : 0;
         considered++;
-        if (is_reduce) {
+    }
+
+    for (int i = considered - 1, age = 0; i >= 0 && age < 8; i--, age++) {
+        int weight = 4 - (age / 2);
+        if (weight < 1) weight = 1;
+        int improved = improved_vals[i];
+        int action_code = action_codes[i];
+        int signed_weight = improved ? weight : -weight;
+
+        if (action_code == 1 || action_code == 2) {
             if (improved) {
                 if (out_reduction_good) (*out_reduction_good)++;
             } else {
                 if (out_reduction_bad) (*out_reduction_bad)++;
             }
-        } else if (is_increase) {
+            if (action_code == 1 && out_reduce_ctx_score) *out_reduce_ctx_score += signed_weight;
+            if (action_code == 2 && out_reduce_seq_score) *out_reduce_seq_score += signed_weight;
+        } else if (action_code == 3) {
             if (improved) {
                 if (out_increase_good) (*out_increase_good)++;
             } else {
                 if (out_increase_bad) (*out_increase_bad)++;
             }
+            if (out_increase_ctx_score) *out_increase_ctx_score += signed_weight;
         }
     }
 
     uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
+static int llmk_oo_ascii_equals(const char *a, const char *b) {
+    int i;
+    if (!a || !b) return 0;
+    for (i = 0; a[i] || b[i]; i++) {
+        if (a[i] != b[i]) return 0;
+    }
+    return 1;
+}
+
+static int llmk_oo_read_latest_confirmed_outcome_best_effort(char *out_action,
+                                                             int out_action_cap,
+                                                             char *out_improved,
+                                                             int out_improved_cap,
+                                                             char *out_expected,
+                                                             int out_expected_cap,
+                                                             char *out_observed,
+                                                             int out_observed_cap) {
+    if (out_action && out_action_cap > 0) out_action[0] = 0;
+    if (out_improved && out_improved_cap > 0) out_improved[0] = 0;
+    if (out_expected && out_expected_cap > 0) out_expected[0] = 0;
+    if (out_observed && out_observed_cap > 0) out_observed[0] = 0;
+    if (!g_root) return 0;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOOUTCOME.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        return 0;
+    }
+
+    char *cbuf = (char *)buf;
+    UINTN start = (len > 8192) ? (len - 8192) : 0;
+    for (UINTN i = start; i < len; i++) {
+        if (cbuf[i] == '\n') {
+            start = i + 1;
+            break;
+        }
+    }
+    if (start >= len) start = 0;
+
+    int found_confirmed = 0;
+    char *p = cbuf + start;
+    char *end = cbuf + len;
+    while (p < end) {
+        char *line = p;
+        while (p < end && *p != '\n') p++;
+        if (p < end && *p == '\n') {
+            *p = 0;
+            p++;
+        }
+        for (char *c = line; *c; c++) {
+            if (*c == '\r') { *c = 0; break; }
+        }
+
+        char imp[8];
+        char action[32];
+        char expected[64];
+        char observed[64];
+        if (!llmk_oo_outcome_extract_token(line, "i", imp, (int)sizeof(imp))) continue;
+        if (imp[0] == '-' && imp[1] == '1' && imp[2] == 0) continue;
+        if (!llmk_oo_outcome_extract_token(line, "a", action, (int)sizeof(action))) continue;
+        if (!llmk_oo_outcome_extract_token(line, "exp", expected, (int)sizeof(expected))) continue;
+        if (!llmk_oo_outcome_extract_token(line, "obs", observed, (int)sizeof(observed))) continue;
+
+        if (out_action && out_action_cap > 0) llmk_oo_outcome_copy_token(out_action, out_action_cap, action);
+        if (out_improved && out_improved_cap > 0) llmk_oo_outcome_copy_token(out_improved, out_improved_cap, imp);
+        if (out_expected && out_expected_cap > 0) llmk_oo_outcome_copy_token(out_expected, out_expected_cap, expected);
+        if (out_observed && out_observed_cap > 0) llmk_oo_outcome_copy_token(out_observed, out_observed_cap, observed);
+        found_confirmed = 1;
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    return found_confirmed;
+}
+
+static int llmk_oo_boot_relation_for_action_best_effort(const char *selected_action,
+                                                        char *out_relation,
+                                                        int out_relation_cap,
+                                                        char *out_last_action,
+                                                        int out_last_action_cap,
+                                                        char *out_last_improved,
+                                                        int out_last_improved_cap,
+                                                        char *out_last_expected,
+                                                        int out_last_expected_cap,
+                                                        char *out_last_observed,
+                                                        int out_last_observed_cap) {
+    char last_action[32];
+    char last_improved[8];
+    char last_expected[64];
+    char last_observed[64];
+
+    if (out_relation && out_relation_cap > 0) out_relation[0] = 0;
+    if (out_last_action && out_last_action_cap > 0) out_last_action[0] = 0;
+    if (out_last_improved && out_last_improved_cap > 0) out_last_improved[0] = 0;
+    if (out_last_expected && out_last_expected_cap > 0) out_last_expected[0] = 0;
+    if (out_last_observed && out_last_observed_cap > 0) out_last_observed[0] = 0;
+    if (!selected_action || !selected_action[0]) return 0;
+
+    last_action[0] = 0;
+    last_improved[0] = 0;
+    last_expected[0] = 0;
+    last_observed[0] = 0;
+
+    if (!llmk_oo_read_latest_confirmed_outcome_best_effort(last_action, (int)sizeof(last_action),
+                                                           last_improved, (int)sizeof(last_improved),
+                                                           last_expected, (int)sizeof(last_expected),
+                                                           last_observed, (int)sizeof(last_observed))) {
+        return 0;
+    }
+
+    if (out_last_action && out_last_action_cap > 0) llmk_oo_outcome_copy_token(out_last_action, out_last_action_cap, last_action);
+    if (out_last_improved && out_last_improved_cap > 0) llmk_oo_outcome_copy_token(out_last_improved, out_last_improved_cap, last_improved);
+    if (out_last_expected && out_last_expected_cap > 0) llmk_oo_outcome_copy_token(out_last_expected, out_last_expected_cap, last_expected);
+    if (out_last_observed && out_last_observed_cap > 0) llmk_oo_outcome_copy_token(out_last_observed, out_last_observed_cap, last_observed);
+
+    if (llmk_oo_ascii_equals(selected_action, last_action)) {
+        const char *relation = (last_improved[0] == '1' && last_improved[1] == 0)
+            ? "selected_matches_confirmed_good"
+            : "selected_matches_confirmed_bad";
+        if (out_relation && out_relation_cap > 0) llmk_oo_outcome_copy_token(out_relation, out_relation_cap, relation);
+        return (last_improved[0] == '1' && last_improved[1] == 0) ? 8 : -8;
+    }
+
+    if (out_relation && out_relation_cap > 0) {
+        llmk_oo_outcome_copy_token(out_relation, out_relation_cap, "selected_differs_from_last_confirmed");
+    }
+    if (last_improved[0] == '0' && last_improved[1] == 0) return 3;
+    return 0;
+}
+
+static int llmk_oo_recent_trend_for_action_best_effort(const char *selected_action,
+                                                       char *out_trend,
+                                                       int out_trend_cap) {
+    if (out_trend && out_trend_cap > 0) out_trend[0] = 0;
+    if (!selected_action || !selected_action[0] || !g_root) return 0;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOOUTCOME.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        return 0;
+    }
+
+    char actions[3][32];
+    char improveds[3][8];
+    int found = 0;
+    for (int i = 0; i < 3; i++) {
+        actions[i][0] = 0;
+        improveds[i][0] = 0;
+    }
+
+    char *cbuf = (char *)buf;
+    UINTN start = (len > 8192) ? (len - 8192) : 0;
+    for (UINTN i = start; i < len; i++) {
+        if (cbuf[i] == '\n') {
+            start = i + 1;
+            break;
+        }
+    }
+    if (start >= len) start = 0;
+
+    char *p = cbuf + start;
+    char *end = cbuf + len;
+    while (p < end) {
+        char *line = p;
+        while (p < end && *p != '\n') p++;
+        if (p < end && *p == '\n') {
+            *p = 0;
+            p++;
+        }
+        for (char *c = line; *c; c++) {
+            if (*c == '\r') { *c = 0; break; }
+        }
+
+        char imp[8];
+        char action[32];
+        if (!llmk_oo_outcome_extract_token(line, "i", imp, (int)sizeof(imp))) continue;
+        if (imp[0] == '-' && imp[1] == '1' && imp[2] == 0) continue;
+        if (!llmk_oo_outcome_extract_token(line, "a", action, (int)sizeof(action))) continue;
+
+        if (found < 3) {
+            llmk_oo_outcome_copy_token(actions[found], (int)sizeof(actions[found]), action);
+            llmk_oo_outcome_copy_token(improveds[found], (int)sizeof(improveds[found]), imp);
+            found++;
+        } else {
+            llmk_oo_outcome_copy_token(actions[0], (int)sizeof(actions[0]), actions[1]);
+            llmk_oo_outcome_copy_token(improveds[0], (int)sizeof(improveds[0]), improveds[1]);
+            llmk_oo_outcome_copy_token(actions[1], (int)sizeof(actions[1]), actions[2]);
+            llmk_oo_outcome_copy_token(improveds[1], (int)sizeof(improveds[1]), improveds[2]);
+            llmk_oo_outcome_copy_token(actions[2], (int)sizeof(actions[2]), action);
+            llmk_oo_outcome_copy_token(improveds[2], (int)sizeof(improveds[2]), imp);
+        }
+    }
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+
+    int trend_score = 0;
+    int matched = 0;
+    for (int i = found - 1, age = 0; i >= 0 && age < 3; i--, age++) {
+        int weight = 3 - age;
+        if (!llmk_oo_ascii_equals(actions[i], selected_action)) continue;
+        matched++;
+        trend_score += (improveds[i][0] == '1' && improveds[i][1] == 0) ? weight : -weight;
+    }
+
+    if (matched <= 0) {
+        if (out_trend && out_trend_cap > 0) llmk_oo_outcome_copy_token(out_trend, out_trend_cap, "trend_recent_none");
+        return 0;
+    }
+    if (trend_score > 0) {
+        if (out_trend && out_trend_cap > 0) llmk_oo_outcome_copy_token(out_trend, out_trend_cap, "trend_recent_positive");
+        return (trend_score >= 3) ? 4 : 2;
+    }
+    if (trend_score < 0) {
+        if (out_trend && out_trend_cap > 0) llmk_oo_outcome_copy_token(out_trend, out_trend_cap, "trend_recent_negative");
+        return (trend_score <= -3) ? -6 : -3;
+    }
+
+    if (out_trend && out_trend_cap > 0) llmk_oo_outcome_copy_token(out_trend, out_trend_cap, "trend_recent_mixed");
+    return 0;
+}
+
+static int llmk_oo_saturation_bias_for_action_best_effort(const char *selected_action,
+                                                          int ctx,
+                                                          int seq,
+                                                          char *out_state,
+                                                          int out_state_cap) {
+    if (out_state && out_state_cap > 0) out_state[0] = 0;
+    if (!selected_action || !selected_action[0]) return 0;
+
+    if (llmk_oo_ascii_equals(selected_action, "reduce_ctx")) {
+        if (ctx <= 128) {
+            if (out_state && out_state_cap > 0) llmk_oo_outcome_copy_token(out_state, out_state_cap, "saturated_min");
+            return -10;
+        }
+        if (out_state && out_state_cap > 0) llmk_oo_outcome_copy_token(out_state, out_state_cap, "ready");
+        return 0;
+    }
+    if (llmk_oo_ascii_equals(selected_action, "reduce_seq")) {
+        if (seq <= 128) {
+            if (out_state && out_state_cap > 0) llmk_oo_outcome_copy_token(out_state, out_state_cap, "saturated_min");
+            return -10;
+        }
+        if (out_state && out_state_cap > 0) llmk_oo_outcome_copy_token(out_state, out_state_cap, "ready");
+        return 0;
+    }
+    if (llmk_oo_ascii_equals(selected_action, "increase_ctx")) {
+        if (ctx >= 2048) {
+            if (out_state && out_state_cap > 0) llmk_oo_outcome_copy_token(out_state, out_state_cap, "saturated_max");
+            return -10;
+        }
+        if (out_state && out_state_cap > 0) llmk_oo_outcome_copy_token(out_state, out_state_cap, "ready");
+        return 0;
+    }
+
+    if (out_state && out_state_cap > 0) llmk_oo_outcome_copy_token(out_state, out_state_cap, "na");
+    return 0;
+}
+
+static const char *llmk_oo_operator_summary_from_dynamics(int selected_kind,
+                                                          int fallback_from_positive_saturated,
+                                                          int boot_bias,
+                                                          int trend_bias,
+                                                          int saturation_bias,
+                                                          int applied,
+                                                          const char *reason_id) {
+    if (applied) return "applied";
+    if (fallback_from_positive_saturated) return "positive_but_saturated";
+    if (reason_id && llmk_oo_ascii_equals(reason_id, "OO_BLOCK_PLAN_BUDGET")) return "deferred_by_plan";
+    if (reason_id && llmk_oo_ascii_equals(reason_id, "OO_BLOCK_CONFIDENCE")) return "blocked_by_confidence";
+    if (reason_id && llmk_oo_ascii_equals(reason_id, "OO_BLOCK_ALREADY_MIN")) return "saturated_min";
+    if (reason_id && llmk_oo_ascii_equals(reason_id, "OO_BLOCK_ALREADY_MAX")) return "saturated_max";
+    if (selected_kind == 0) return "no_selected_action";
+    if (boot_bias > 0 && trend_bias > 0 && saturation_bias >= 0) return "positive_and_repeatable";
+    if (boot_bias < 0 || trend_bias < 0) return "avoid_recently_bad";
+    if (saturation_bias < 0) return "saturated";
+    return "explore_alternative";
+}
+
+static void llmk_oo_print_recent_confirmed_outcomes_best_effort(int max_items) {
+    if (max_items <= 0) return;
+    if (max_items > 3) max_items = 3;
+    if (!g_root) return;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOOUTCOME.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_explain_boot] recent.count=0\r\n");
+        return;
+    }
+
+    char actions[3][32];
+    char improveds[3][8];
+    char expecteds[3][64];
+    char observeds[3][64];
+    int found = 0;
+    for (int i = 0; i < 3; i++) {
+        actions[i][0] = 0;
+        improveds[i][0] = 0;
+        expecteds[i][0] = 0;
+        observeds[i][0] = 0;
+    }
+
+    char *cbuf = (char *)buf;
+    UINTN start = (len > 8192) ? (len - 8192) : 0;
+    for (UINTN i = start; i < len; i++) {
+        if (cbuf[i] == '\n') {
+            start = i + 1;
+            break;
+        }
+    }
+    if (start >= len) start = 0;
+
+    char *p = cbuf + start;
+    char *end = cbuf + len;
+    while (p < end) {
+        char *line = p;
+        while (p < end && *p != '\n') p++;
+        if (p < end && *p == '\n') {
+            *p = 0;
+            p++;
+        }
+        for (char *c = line; *c; c++) {
+            if (*c == '\r') { *c = 0; break; }
+        }
+
+        char imp[8];
+        char action[32];
+        char expected[64];
+        char observed[64];
+        if (!llmk_oo_outcome_extract_token(line, "i", imp, (int)sizeof(imp))) continue;
+        if (imp[0] == '-' && imp[1] == '1' && imp[2] == 0) continue;
+        if (!llmk_oo_outcome_extract_token(line, "a", action, (int)sizeof(action))) continue;
+        if (!llmk_oo_outcome_extract_token(line, "exp", expected, (int)sizeof(expected))) continue;
+        if (!llmk_oo_outcome_extract_token(line, "obs", observed, (int)sizeof(observed))) continue;
+
+        if (found < 3) {
+            llmk_oo_outcome_copy_token(actions[found], (int)sizeof(actions[found]), action);
+            llmk_oo_outcome_copy_token(improveds[found], (int)sizeof(improveds[found]), imp);
+            llmk_oo_outcome_copy_token(expecteds[found], (int)sizeof(expecteds[found]), expected);
+            llmk_oo_outcome_copy_token(observeds[found], (int)sizeof(observeds[found]), observed);
+            found++;
+        } else {
+            llmk_oo_outcome_copy_token(actions[0], (int)sizeof(actions[0]), actions[1]);
+            llmk_oo_outcome_copy_token(improveds[0], (int)sizeof(improveds[0]), improveds[1]);
+            llmk_oo_outcome_copy_token(expecteds[0], (int)sizeof(expecteds[0]), expecteds[1]);
+            llmk_oo_outcome_copy_token(observeds[0], (int)sizeof(observeds[0]), observeds[1]);
+            llmk_oo_outcome_copy_token(actions[1], (int)sizeof(actions[1]), actions[2]);
+            llmk_oo_outcome_copy_token(improveds[1], (int)sizeof(improveds[1]), improveds[2]);
+            llmk_oo_outcome_copy_token(expecteds[1], (int)sizeof(expecteds[1]), expecteds[2]);
+            llmk_oo_outcome_copy_token(observeds[1], (int)sizeof(observeds[1]), observeds[2]);
+            llmk_oo_outcome_copy_token(actions[2], (int)sizeof(actions[2]), action);
+            llmk_oo_outcome_copy_token(improveds[2], (int)sizeof(improveds[2]), imp);
+            llmk_oo_outcome_copy_token(expecteds[2], (int)sizeof(expecteds[2]), expected);
+            llmk_oo_outcome_copy_token(observeds[2], (int)sizeof(observeds[2]), observed);
+        }
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+
+    if (found <= 0) {
+        Print(L"[oo_explain_boot] recent.count=0\r\n");
+        return;
+    }
+
+    int emit = (found < max_items) ? found : max_items;
+    Print(L"[oo_explain_boot] recent.count=%d\r\n", emit);
+    for (int i = 0; i < emit; i++) {
+        int src = found - 1 - i;
+        Print(L"[oo_explain_boot] recent[%d].action=%a improved=%a expected=%a observed=%a\r\n",
+              i,
+              actions[src][0] ? actions[src] : "na",
+              improveds[src][0] ? improveds[src] : "na",
+              expecteds[src][0] ? expecteds[src] : "na",
+              observeds[src][0] ? observeds[src] : "na");
+    }
 }
 
 static void llmk_oo_journal_append_best_effort(const LlmkOoState *s, const char *event) {
@@ -4097,6 +4610,7 @@ static void llmk_oo_journal_append_best_effort(const LlmkOoState *s, const char 
 
 // Forward decl: used by early OO ticks (e.g. net tick) before full OO journaling helpers.
 static void llmk_oo_journal_event_load_state_best_effort(const char *event);
+static int llmk_repl_cfg_read_ctx_seq_best_effort(int *out_ctx, int *out_seq);
 
 static int llmk_oo_consult_metrics_tick_best_effort(LlmkOoState *s, char *out_event, int out_cap) {
     if (out_event && out_cap > 0) out_event[0] = 0;
@@ -4113,18 +4627,73 @@ static int llmk_oo_consult_metrics_tick_best_effort(LlmkOoState *s, char *out_ev
     UINT32 want = (UINT32)((apply_boot_low8 + 1u) & 0xFFu);
     if (curr_boot_low8 != want) return 0;
 
-    // Improvement: mode numerically decreases (SAFE=2 -> DEGRADED=1 -> NORMAL=0)
-    int improved = ((UINT32)s->mode < apply_mode) ? 1 : 0;
-    Print(L"OK: OO consult metric: action=%a improved=%d\r\n", llmk_oo_action_name(action_id), improved);
+    int improved = 0;
+    char expected_effect[64];
+    char observed_effect[64];
+    expected_effect[0] = 0;
+    observed_effect[0] = 0;
+
+    if (!llmk_oo_outcome_read_latest_pending_expected(expected_effect, (int)sizeof(expected_effect))) {
+        llmk_oo_outcome_copy_token(expected_effect, (int)sizeof(expected_effect),
+                                   llmk_oo_action_is_increase(action_id) ? "mode_stable" : "mode_drop");
+    }
 
     {
-        const char *observed = improved ? "mode_improved" : "mode_not_improved";
-        llmk_oo_outcome_append_best_effort((UINT64)s->boot_count,
-                                           action_id,
-                                           "mode_drop",
-                                           observed,
-                                           improved);
+        int cfg_ctx = 0, cfg_seq = 0;
+        int want_value = 0;
+        int have_cfg = llmk_repl_cfg_read_ctx_seq_best_effort(&cfg_ctx, &cfg_seq);
+
+        if (llmk_oo_outcome_parse_expected_value(expected_effect, "ctx_", &want_value) && have_cfg) {
+            improved = (cfg_ctx == want_value) ? 1 : 0;
+            if (improved) {
+                llmk_oo_outcome_copy_token(observed_effect, (int)sizeof(observed_effect), expected_effect);
+            } else {
+                int p = 0;
+                observed_effect[0] = 0;
+                llmk_ascii_append_str(observed_effect, (int)sizeof(observed_effect), &p, "ctx_");
+                llmk_ascii_append_u64(observed_effect, (int)sizeof(observed_effect), &p, (UINT64)((cfg_ctx > 0) ? cfg_ctx : 0));
+                observed_effect[p] = 0;
+            }
+        } else if (llmk_oo_outcome_parse_expected_value(expected_effect, "seq_", &want_value) && have_cfg) {
+            improved = (cfg_seq == want_value) ? 1 : 0;
+            if (improved) {
+                llmk_oo_outcome_copy_token(observed_effect, (int)sizeof(observed_effect), expected_effect);
+            } else {
+                int p = 0;
+                observed_effect[0] = 0;
+                llmk_ascii_append_str(observed_effect, (int)sizeof(observed_effect), &p, "seq_");
+                llmk_ascii_append_u64(observed_effect, (int)sizeof(observed_effect), &p, (UINT64)((cfg_seq > 0) ? cfg_seq : 0));
+                observed_effect[p] = 0;
+            }
+        } else if (expected_effect[0] == 'm' && expected_effect[1] == 'o' && expected_effect[2] == 'd' &&
+                   expected_effect[3] == 'e' && expected_effect[4] == '_' && expected_effect[5] == 'd' &&
+                   expected_effect[6] == 'r' && expected_effect[7] == 'o' && expected_effect[8] == 'p' &&
+                   expected_effect[9] == 0) {
+            improved = ((UINT32)s->mode < apply_mode) ? 1 : 0;
+            llmk_oo_outcome_copy_token(observed_effect, (int)sizeof(observed_effect),
+                                       improved ? "mode_improved" : "mode_not_improved");
+        } else if (expected_effect[0] == 'm' && expected_effect[1] == 'o' && expected_effect[2] == 'd' &&
+                   expected_effect[3] == 'e' && expected_effect[4] == '_' && expected_effect[5] == 's' &&
+                   expected_effect[6] == 't' && expected_effect[7] == 'a' && expected_effect[8] == 'b' &&
+                   expected_effect[9] == 'l' && expected_effect[10] == 'e' && expected_effect[11] == 0) {
+            improved = ((UINT32)s->mode <= apply_mode) ? 1 : 0;
+            llmk_oo_outcome_copy_token(observed_effect, (int)sizeof(observed_effect),
+                                       improved ? "mode_stable_or_better" : "mode_regressed");
+        } else {
+            improved = ((UINT32)s->mode < apply_mode) ? 1 : 0;
+            llmk_oo_outcome_copy_token(observed_effect, (int)sizeof(observed_effect),
+                                       improved ? "mode_improved" : "mode_not_improved");
+        }
     }
+
+    Print(L"OK: OO consult metric: action=%a improved=%d expected=%a observed=%a\r\n",
+          llmk_oo_action_name(action_id), improved, expected_effect, observed_effect);
+
+    llmk_oo_outcome_append_best_effort((UINT64)s->boot_count,
+                                       action_id,
+                                       expected_effect,
+                                       observed_effect,
+                                       improved);
 
     if (out_event && out_cap > 0) {
         int p = 0;
@@ -4133,6 +4702,10 @@ static int llmk_oo_consult_metrics_tick_best_effort(LlmkOoState *s, char *out_ev
         llmk_ascii_append_str(out_event, out_cap, &p, llmk_oo_action_name(action_id));
         llmk_ascii_append_str(out_event, out_cap, &p, " improved=");
         llmk_ascii_append_u64(out_event, out_cap, &p, (UINT64)improved);
+        llmk_ascii_append_str(out_event, out_cap, &p, " expected=");
+        llmk_ascii_append_str(out_event, out_cap, &p, expected_effect);
+        llmk_ascii_append_str(out_event, out_cap, &p, " observed=");
+        llmk_ascii_append_str(out_event, out_cap, &p, observed_effect);
         out_event[p] = 0;
     }
 
@@ -4654,6 +5227,10 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /oo_handoff_apply [f] Apply safe host->sovereign handoff fields\r\n");
     Print(L"  /oo_handoff_receipt   Show persisted handoff continuity receipt\r\n");
     Print(L"  /oo_continuity_status Compare handoff receipt vs local sovereign state\r\n");
+    Print(L"  /oo_consult_mock <s>  Run deterministic OO consult without a loaded model\r\n");
+    Print(L"  /oo_explain [verbose|boot] Explain the latest OO consult decision\r\n");
+    Print(L"  /oo_log               Tail OOCONSULT.LOG\r\n");
+    Print(L"  /oo_outcome           Tail OOOUTCOME.LOG and show pending feedback\r\n");
     Print(L"  /oo_infermini [text]  Run tiny built-in inference selftest (no-model)\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -4675,6 +5252,8 @@ static int llmk_autorun_start(const CHAR16 *name, int shutdown_when_done);
 static int llmk_autorun_next_line(char *out, int out_cap);
 static void llmk_autorun_stop(void);
 static int llmk_autorun_finish_if_eof(void);
+static void llmk_oo_print_ooconsult_tail_best_effort(int max_lines);
+static void llmk_oo_print_oooutcome_tail_best_effort(int max_lines);
 static void llmk_oo_print_oojour_tail_best_effort(int max_lines);
 static void llmk_oo_journal_cmd_best_effort(const char *cmd);
 static EFI_STATUS llmk_oo_save_to_file_best_effort(const CHAR16 *name, int *out_bytes);
@@ -4683,10 +5262,17 @@ static void llmk_oo_handoff_apply_best_effort(const CHAR16 *path);
 static void llmk_oo_handoff_receipt_best_effort(const CHAR16 *path);
 static void llmk_oo_continuity_status_best_effort(const CHAR16 *path);
 static void llmk_oo_print_persistence_status_best_effort(void);
+static void llmk_oo_print_last_consult_status_best_effort(void);
+static void llmk_oo_explain_last_consult_best_effort(int verbose);
+static void llmk_oo_explain_boot_best_effort(void);
 static void llmk_oo_reboot_probe_best_effort(void);
 static int llmk_best_effort_set_bootnext_to_bootcurrent(UINT16 *boot_current_out, EFI_STATUS *status_out);
 static int llmk_cfg_parse_u64(const char *s, UINT64 *out);
 static void llmk_oo_infermini_no_model(const char *args);
+static int llmk_repl_cfg_read_ctx_seq_best_effort(int *out_ctx, int *out_seq);
+static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT64 boots,
+                                               int ctx, int seq,
+                                               const char *llm_suggestion);
 
 static void llmk_repl_no_model_loop(void) {
     // Minimal repl.cfg parsing for autorun in no-model mode.
@@ -5035,8 +5621,58 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"  llm_consult=%d multi_actions=%d\r\n", consult_enabled, multi_enabled);
             Print(L"  conf_gate=%d conf_threshold=%d\r\n", g_cfg_oo_conf_gate, g_cfg_oo_conf_threshold);
             llmk_oo_print_persistence_status_best_effort();
-            Print(L"\r\nHint: /oo_new <goal>, /oo_list, /oo_jour, /oo_continuity_status, /oo_reboot_probe\r\n\r\n");
+            Print(L"\r\nHint: /oo_new <goal>, /oo_list, /oo_log, /oo_jour, /oo_outcome, /oo_continuity_status, /oo_reboot_probe\r\n\r\n");
             llmk_oo_journal_cmd_best_effort("oo_status");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_consult_mock", 15) == 0) {
+            int consult_enabled = g_cfg_oo_llm_consult;
+            if (consult_enabled < 0) {
+                consult_enabled = g_cfg_oo_enable;
+            }
+            if (!consult_enabled) {
+                Print(L"\r\nERROR: OO LLM consult is disabled (oo_llm_consult=0)\r\n\r\n");
+                continue;
+            }
+            if (!g_cfg_oo_enable) {
+                Print(L"\r\nERROR: OO is not enabled (oo_enable=0)\r\n\r\n");
+                continue;
+            }
+
+            const char *p = prompt + 15;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!p || !p[0]) {
+                Print(L"\r\nUsage: /oo_consult_mock <suggestion>\r\n\r\n");
+                continue;
+            }
+
+            UINT64 ram_mb = llmk_get_conventional_ram_bytes_best_effort() / (1024ULL * 1024ULL);
+            UINT32 mode = g_oo_last_mode_valid ? g_oo_last_mode : LLMK_OO_MODE_SAFE;
+            UINT64 boots = 0;
+            int cfg_ctx = 0;
+            int cfg_seq = 0;
+            {
+                LlmkOoState s;
+                if (llmk_oo_load_state_best_effort(&s)) {
+                    boots = s.boot_count;
+                    mode = s.mode;
+                }
+            }
+            (void)llmk_repl_cfg_read_ctx_seq_best_effort(&cfg_ctx, &cfg_seq);
+
+            char sugg[128];
+            int sp = 0;
+            while (*p && sp + 1 < (int)sizeof(sugg)) {
+                char c = *p++;
+                if (c < 0x20 || c > 0x7E) c = '_';
+                sugg[sp++] = c;
+            }
+            sugg[sp] = 0;
+
+            Print(L"\r\n[oo_consult_mock] using mock suggestion\r\n\r\n");
+            llmk_oo_journal_cmd_best_effort("oo_consult_mock");
+            llmk_oo_consult_process_suggestion(ram_mb, mode, boots, cfg_ctx, cfg_seq, sugg);
+            Print(L"\r\n");
             continue;
         }
         if (my_strncmp(prompt, "/oo_new", 7) == 0) {
@@ -5086,11 +5722,45 @@ static void llmk_repl_no_model_loop(void) {
             }
             continue;
         }
+        if (my_strncmp(prompt, "/oo_log", 7) == 0) {
+            Print(L"\r\n[oo_log] latest summary:\r\n");
+            llmk_oo_print_last_consult_status_best_effort();
+            Print(L"\r\n[oo_log] OOCONSULT.LOG tail:\r\n");
+            llmk_oo_print_ooconsult_tail_best_effort(10);
+            Print(L"\r\n");
+            llmk_oo_journal_cmd_best_effort("oo_log");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_explain", 11) == 0) {
+            int verbose = 0;
+            int boot_compare = 0;
+            const char *p = prompt + 11;
+            while (*p == ' ' || *p == '\t') p++;
+            if (my_strncmp(p, "verbose", 7) == 0 && (p[7] == 0 || p[7] == ' ' || p[7] == '\t')) verbose = 1;
+            else if (my_strncmp(p, "boot", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) boot_compare = 1;
+            if (boot_compare) {
+                Print(L"\r\n[oo_explain] boot comparison:\r\n");
+                llmk_oo_explain_boot_best_effort();
+            } else {
+                Print(L"\r\n[oo_explain] latest consult:\r\n");
+                llmk_oo_explain_last_consult_best_effort(verbose);
+            }
+            Print(L"\r\n");
+            llmk_oo_journal_cmd_best_effort("oo_explain");
+            continue;
+        }
         if (my_strncmp(prompt, "/oo_jour", 8) == 0 || my_strncmp(prompt, "/oo_journal", 11) == 0) {
             Print(L"\r\n[oo_jour] OOJOUR.LOG tail:\r\n");
             llmk_oo_print_oojour_tail_best_effort(10);
             Print(L"\r\n");
             llmk_oo_journal_cmd_best_effort("oo_jour");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_outcome", 11) == 0) {
+            Print(L"\r\n[oo_outcome] OOOUTCOME.LOG tail:\r\n");
+            llmk_oo_print_oooutcome_tail_best_effort(10);
+            Print(L"\r\n");
+            llmk_oo_journal_cmd_best_effort("oo_outcome");
             continue;
         }
 
@@ -5644,7 +6314,23 @@ static void llmk_oo_print_persistence_status_best_effort(void) {
     Print(L"\r\n");
     Print(L"  OOJOUR.LOG     present=%d bytes=%lu\r\n", jour_ok ? 1 : 0, (UINT64)jour_len);
     Print(L"  OOCONSULT.LOG  present=%d bytes=%lu\r\n", consult_ok ? 1 : 0, (UINT64)consult_len);
+    if (consult_ok) {
+        llmk_oo_print_last_consult_status_best_effort();
+    }
     Print(L"  OOOUTCOME.LOG  present=%d bytes=%lu\r\n", outcome_ok ? 1 : 0, (UINT64)outcome_len);
+    if (local_ok) {
+        UINT32 meta = llmk_oo_get_last_action_meta(local.flags);
+        UINT32 apply_boot_low8 = llmk_oo_get_last_apply_boot_low8(local.flags);
+        if (meta != 0 && apply_boot_low8 != 0) {
+            UINT32 action_id = (meta & 0x3Fu);
+            UINT32 apply_mode = (meta >> 6u) & 0x3u;
+            UINT32 want_boot_low8 = (UINT32)((apply_boot_low8 + 1u) & 0xFFu);
+            Print(L"  pending.action=%a next_boot_low8=%lu apply_mode=%s\r\n",
+                  llmk_oo_action_name(action_id),
+                  (UINT64)want_boot_low8,
+                  llmk_oo_mode_name(apply_mode));
+        }
+    }
     Print(L"  OOHANDOFF.TXT  present=%d", receipt_ok ? 1 : 0);
     if (receipt_ok) {
         Print(L" epoch="); llmk_print_ascii(receipt_epoch);
@@ -8803,7 +9489,25 @@ static void llmk_oo_record_last_auto_apply_best_effort(UINT64 boot_count, UINT32
     }
 
     {
-        const char *expected = llmk_oo_action_is_increase(action_id) ? "mode_stable" : "mode_drop";
+        char expected[48];
+        int cfg_ctx = 0, cfg_seq = 0;
+        int p = 0;
+        expected[0] = 0;
+
+        if (llmk_repl_cfg_read_ctx_seq_best_effort(&cfg_ctx, &cfg_seq)) {
+            if (action_id == LLMK_OO_ACTION_REDUCE_CTX || action_id == LLMK_OO_ACTION_INCREASE_CTX) {
+                llmk_ascii_append_str(expected, (int)sizeof(expected), &p, "ctx_");
+                llmk_ascii_append_u64(expected, (int)sizeof(expected), &p, (UINT64)((cfg_ctx > 0) ? cfg_ctx : 0));
+            } else if (action_id == LLMK_OO_ACTION_REDUCE_SEQ) {
+                llmk_ascii_append_str(expected, (int)sizeof(expected), &p, "seq_");
+                llmk_ascii_append_u64(expected, (int)sizeof(expected), &p, (UINT64)((cfg_seq > 0) ? cfg_seq : 0));
+            }
+            expected[p] = 0;
+        }
+        if (!expected[0]) {
+            llmk_oo_outcome_copy_token(expected, (int)sizeof(expected),
+                                       llmk_oo_action_is_increase(action_id) ? "mode_stable" : "mode_drop");
+        }
         (void)apply_mode;
         llmk_oo_outcome_append_best_effort(boot_count,
                                            action_id,
@@ -9611,6 +10315,381 @@ static void llmk_print_ctx(const Config *config,
           (int)g_budget_overruns_prefill, (int)g_budget_overruns_decode);
     }
     Print(L"\r\n");
+}
+
+static void llmk_oo_print_last_consult_status_best_effort(void) {
+    if (!g_root) return;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOCONSULT.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        return;
+    }
+
+    char *cbuf = (char *)buf;
+    UINTN line_start = 0;
+    UINTN line_end = len;
+
+    while (line_end > 0 && (cbuf[line_end - 1] == '\r' || cbuf[line_end - 1] == '\n' || cbuf[line_end - 1] == 0)) {
+        line_end--;
+    }
+    if (line_end == 0) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        return;
+    }
+    for (UINTN i = line_end; i > 0; i--) {
+        if (cbuf[i - 1] == '\n') {
+            line_start = i;
+            break;
+        }
+    }
+
+    UINTN line_len = line_end - line_start;
+    char *line = NULL;
+    if (EFI_ERROR(uefi_call_wrapper(BS->AllocatePool, 3, EfiBootServicesData, line_len + 1, (void **)&line)) || !line) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        return;
+    }
+    CopyMem(line, cbuf + line_start, line_len);
+    line[line_len] = 0;
+
+    char decision[48];
+    char selected[48];
+    char reason_id[64];
+    char confidence_reason_id[64];
+    char plan_enabled[16];
+    char plan_remaining[16];
+    char plan_hard_stop[16];
+    char plan_reason_id[64];
+    char applied[16];
+    char score[24];
+    char threshold[24];
+    char feedback_bias[24];
+    char boot_relation[64];
+    char boot_bias[24];
+    char trend_relation[64];
+    char trend_bias[24];
+    char saturation_state[64];
+    char saturation_bias[24];
+    char operator_summary[64];
+    decision[0] = 0;
+    selected[0] = 0;
+    reason_id[0] = 0;
+    confidence_reason_id[0] = 0;
+    plan_enabled[0] = 0;
+    plan_remaining[0] = 0;
+    plan_hard_stop[0] = 0;
+    plan_reason_id[0] = 0;
+    applied[0] = 0;
+    score[0] = 0;
+    threshold[0] = 0;
+    feedback_bias[0] = 0;
+    boot_relation[0] = 0;
+    boot_bias[0] = 0;
+    trend_relation[0] = 0;
+    trend_bias[0] = 0;
+    saturation_state[0] = 0;
+    saturation_bias[0] = 0;
+    operator_summary[0] = 0;
+
+    (void)llmk_oo_outcome_extract_token(line, "d", decision, (int)sizeof(decision));
+    (void)llmk_oo_outcome_extract_token(line, "sel", selected, (int)sizeof(selected));
+    (void)llmk_oo_outcome_extract_token(line, "ri", reason_id, (int)sizeof(reason_id));
+    (void)llmk_oo_outcome_extract_token(line, "cri", confidence_reason_id, (int)sizeof(confidence_reason_id));
+    (void)llmk_oo_outcome_extract_token(line, "pe", plan_enabled, (int)sizeof(plan_enabled));
+    (void)llmk_oo_outcome_extract_token(line, "pr", plan_remaining, (int)sizeof(plan_remaining));
+    (void)llmk_oo_outcome_extract_token(line, "ph", plan_hard_stop, (int)sizeof(plan_hard_stop));
+    (void)llmk_oo_outcome_extract_token(line, "pri", plan_reason_id, (int)sizeof(plan_reason_id));
+    (void)llmk_oo_outcome_extract_token(line, "a", applied, (int)sizeof(applied));
+    (void)llmk_oo_outcome_extract_token(line, "sc", score, (int)sizeof(score));
+    (void)llmk_oo_outcome_extract_token(line, "th", threshold, (int)sizeof(threshold));
+    (void)llmk_oo_outcome_extract_token(line, "fb", feedback_bias, (int)sizeof(feedback_bias));
+    (void)llmk_oo_outcome_extract_token(line, "br", boot_relation, (int)sizeof(boot_relation));
+    (void)llmk_oo_outcome_extract_token(line, "bb", boot_bias, (int)sizeof(boot_bias));
+    (void)llmk_oo_outcome_extract_token(line, "tr", trend_relation, (int)sizeof(trend_relation));
+    (void)llmk_oo_outcome_extract_token(line, "tb", trend_bias, (int)sizeof(trend_bias));
+    (void)llmk_oo_outcome_extract_token(line, "sr", saturation_state, (int)sizeof(saturation_state));
+    (void)llmk_oo_outcome_extract_token(line, "sb", saturation_bias, (int)sizeof(saturation_bias));
+    (void)llmk_oo_outcome_extract_token(line, "os", operator_summary, (int)sizeof(operator_summary));
+
+    Print(L"  last.consult.decision=%a selected=%a reason_id=%a applied=%a score=%a threshold=%a feedback_bias=%a\r\n",
+          decision[0] ? decision : "na",
+          selected[0] ? selected : "na",
+          reason_id[0] ? reason_id : "na",
+          applied[0] ? applied : "na",
+          score[0] ? score : "na",
+          threshold[0] ? threshold : "na",
+          feedback_bias[0] ? feedback_bias : "na");
+    Print(L"  last.consult.conf_reason_id=%a plan.enabled=%a remain=%a hard_stop=%a plan_reason_id=%a\r\n",
+          confidence_reason_id[0] ? confidence_reason_id : "na",
+          plan_enabled[0] ? plan_enabled : "na",
+          plan_remaining[0] ? plan_remaining : "na",
+          plan_hard_stop[0] ? plan_hard_stop : "na",
+          plan_reason_id[0] ? plan_reason_id : "na");
+        Print(L"  last.consult.boot_relation=%a boot_bias=%a\r\n",
+            boot_relation[0] ? boot_relation : "na",
+            boot_bias[0] ? boot_bias : "na");
+            Print(L"  last.consult.trend=%a trend_bias=%a saturation=%a saturation_bias=%a\r\n",
+                trend_relation[0] ? trend_relation : "na",
+                trend_bias[0] ? trend_bias : "na",
+                saturation_state[0] ? saturation_state : "na",
+                saturation_bias[0] ? saturation_bias : "na");
+                Print(L"  last.consult.operator_summary=%a\r\n",
+                    operator_summary[0] ? operator_summary : "na");
+
+    {
+        const char *why_summary = "see_reason_id";
+        if (applied[0] == '1' && applied[1] == 0) {
+            why_summary = "applied";
+        } else if (reason_id[0] == 'O' && my_strncmp(reason_id, "OO_BLOCK_PLAN_BUDGET", 20) == 0 && reason_id[20] == 0) {
+            why_summary = "not_applied_plan_budget";
+        } else if (reason_id[0] == 'O' && my_strncmp(reason_id, "OO_BLOCK_CONFIDENCE", 19) == 0 && reason_id[19] == 0) {
+            why_summary = "not_applied_confidence";
+        } else if ((reason_id[0] == 'O' && my_strncmp(reason_id, "OO_BLOCK_HARD_STOP", 18) == 0 && reason_id[18] == 0) ||
+                   (plan_hard_stop[0] == '1' && plan_hard_stop[1] == 0)) {
+            why_summary = "not_applied_hard_stop";
+        } else if (reason_id[0] == 'O' && my_strncmp(reason_id, "OO_BLOCK_ALREADY_MIN", 20) == 0 && reason_id[20] == 0) {
+            why_summary = "already_at_min";
+        } else if (reason_id[0] == 'O' && my_strncmp(reason_id, "OO_BLOCK_ALREADY_MAX", 20) == 0 && reason_id[20] == 0) {
+            why_summary = "already_at_max";
+        } else if (reason_id[0] == 'O' && my_strncmp(reason_id, "OO_NO_ACTIONABLE_KEYWORD", 24) == 0 && reason_id[24] == 0) {
+            why_summary = "no_actionable_change";
+        } else if (reason_id[0] == 'O' && my_strncmp(reason_id, "OO_MODEL_LOG_ONLY", 17) == 0 && reason_id[17] == 0) {
+            why_summary = "logged_model_change";
+        } else if (reason_id[0] == 'O' && my_strncmp(reason_id, "OO_REBOOT_LOG_ONLY", 18) == 0 && reason_id[18] == 0) {
+            why_summary = "logged_reboot";
+        } else if (reason_id[0] == 'O' && my_strncmp(reason_id, "OO_STABLE_OK", 12) == 0 && reason_id[12] == 0) {
+            why_summary = "stable_no_action";
+        } else if (reason_id[0] == 'O' && my_strncmp(reason_id, "OO_APPLY_VERIFY_FAILED", 22) == 0 && reason_id[22] == 0) {
+            why_summary = "apply_verify_failed";
+        }
+        Print(L"  last.consult.why=%a\r\n", why_summary);
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, line);
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
+static void llmk_oo_explain_last_consult_best_effort(int verbose) {
+    if (!g_root) return;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOCONSULT.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_explain] no consult history\r\n");
+        return;
+    }
+
+    char *cbuf = (char *)buf;
+    UINTN line_start = 0;
+    UINTN line_end = len;
+    while (line_end > 0 && (cbuf[line_end - 1] == '\r' || cbuf[line_end - 1] == '\n' || cbuf[line_end - 1] == 0)) {
+        line_end--;
+    }
+    if (line_end == 0) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_explain] no consult history\r\n");
+        return;
+    }
+    for (UINTN i = line_end; i > 0; i--) {
+        if (cbuf[i - 1] == '\n') {
+            line_start = i;
+            break;
+        }
+    }
+
+    UINTN line_len = line_end - line_start;
+    char *line = NULL;
+    if (EFI_ERROR(uefi_call_wrapper(BS->AllocatePool, 3, EfiBootServicesData, line_len + 1, (void **)&line)) || !line) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_explain] oom\r\n");
+        return;
+    }
+    CopyMem(line, cbuf + line_start, line_len);
+    line[line_len] = 0;
+
+    char decision[48], selected[48], reason_id[64], confidence_reason_id[64], plan_enabled[16], plan_remaining[16], plan_hard_stop[16], plan_reason_id[64], applied[16], score[24], threshold[24], why[64], boot_relation[64], boot_bias[24], trend_relation[64], trend_bias[24], saturation_state[64], saturation_bias[24], operator_summary[64];
+    decision[0] = 0;
+    selected[0] = 0;
+    reason_id[0] = 0;
+    confidence_reason_id[0] = 0;
+    plan_enabled[0] = 0;
+    plan_remaining[0] = 0;
+    plan_hard_stop[0] = 0;
+    plan_reason_id[0] = 0;
+    applied[0] = 0;
+    score[0] = 0;
+    threshold[0] = 0;
+    why[0] = 0;
+    boot_relation[0] = 0;
+    boot_bias[0] = 0;
+    trend_relation[0] = 0;
+    trend_bias[0] = 0;
+    saturation_state[0] = 0;
+    saturation_bias[0] = 0;
+    operator_summary[0] = 0;
+    (void)llmk_oo_outcome_extract_token(line, "d", decision, (int)sizeof(decision));
+    (void)llmk_oo_outcome_extract_token(line, "sel", selected, (int)sizeof(selected));
+    (void)llmk_oo_outcome_extract_token(line, "ri", reason_id, (int)sizeof(reason_id));
+    (void)llmk_oo_outcome_extract_token(line, "cri", confidence_reason_id, (int)sizeof(confidence_reason_id));
+    (void)llmk_oo_outcome_extract_token(line, "pe", plan_enabled, (int)sizeof(plan_enabled));
+    (void)llmk_oo_outcome_extract_token(line, "pr", plan_remaining, (int)sizeof(plan_remaining));
+    (void)llmk_oo_outcome_extract_token(line, "ph", plan_hard_stop, (int)sizeof(plan_hard_stop));
+    (void)llmk_oo_outcome_extract_token(line, "pri", plan_reason_id, (int)sizeof(plan_reason_id));
+    (void)llmk_oo_outcome_extract_token(line, "a", applied, (int)sizeof(applied));
+    (void)llmk_oo_outcome_extract_token(line, "sc", score, (int)sizeof(score));
+    (void)llmk_oo_outcome_extract_token(line, "th", threshold, (int)sizeof(threshold));
+    (void)llmk_oo_outcome_extract_token(line, "br", boot_relation, (int)sizeof(boot_relation));
+    (void)llmk_oo_outcome_extract_token(line, "bb", boot_bias, (int)sizeof(boot_bias));
+    (void)llmk_oo_outcome_extract_token(line, "tr", trend_relation, (int)sizeof(trend_relation));
+    (void)llmk_oo_outcome_extract_token(line, "tb", trend_bias, (int)sizeof(trend_bias));
+    (void)llmk_oo_outcome_extract_token(line, "sr", saturation_state, (int)sizeof(saturation_state));
+    (void)llmk_oo_outcome_extract_token(line, "sb", saturation_bias, (int)sizeof(saturation_bias));
+    (void)llmk_oo_outcome_extract_token(line, "os", operator_summary, (int)sizeof(operator_summary));
+
+    if (applied[0] == '1' && applied[1] == 0) {
+        llmk_oo_outcome_copy_token(why, (int)sizeof(why), "applied");
+    } else if (my_strncmp(reason_id, "OO_BLOCK_PLAN_BUDGET", 20) == 0 && reason_id[20] == 0) {
+        llmk_oo_outcome_copy_token(why, (int)sizeof(why), "not_applied_plan_budget");
+    } else if (my_strncmp(reason_id, "OO_BLOCK_CONFIDENCE", 19) == 0 && reason_id[19] == 0) {
+        llmk_oo_outcome_copy_token(why, (int)sizeof(why), "not_applied_confidence");
+    } else if (my_strncmp(reason_id, "OO_BLOCK_HARD_STOP", 18) == 0 && reason_id[18] == 0) {
+        llmk_oo_outcome_copy_token(why, (int)sizeof(why), "not_applied_hard_stop");
+    } else if (my_strncmp(reason_id, "OO_BLOCK_ALREADY_MIN", 20) == 0 && reason_id[20] == 0) {
+        llmk_oo_outcome_copy_token(why, (int)sizeof(why), "already_at_min");
+    } else if (my_strncmp(reason_id, "OO_BLOCK_ALREADY_MAX", 20) == 0 && reason_id[20] == 0) {
+        llmk_oo_outcome_copy_token(why, (int)sizeof(why), "already_at_max");
+    } else if (my_strncmp(reason_id, "OO_STABLE_OK", 12) == 0 && reason_id[12] == 0) {
+        llmk_oo_outcome_copy_token(why, (int)sizeof(why), "stable_no_action");
+    } else {
+        llmk_oo_outcome_copy_token(why, (int)sizeof(why), "see_reason_id");
+    }
+
+    Print(L"[oo_explain] selected=%a decision=%a\r\n",
+          selected[0] ? selected : "na",
+          decision[0] ? decision : "na");
+    Print(L"[oo_explain] why=%a reason_id=%a\r\n",
+          why[0] ? why : "na",
+          reason_id[0] ? reason_id : "na");
+    Print(L"[oo_explain] applied=%a score=%a threshold=%a\r\n",
+          applied[0] ? applied : "na",
+          score[0] ? score : "na",
+          threshold[0] ? threshold : "na");
+        if (verbose) {
+          Print(L"[oo_explain] conf_reason_id=%a\r\n",
+              confidence_reason_id[0] ? confidence_reason_id : "na");
+          Print(L"[oo_explain] plan.enabled=%a remain=%a hard_stop=%a plan_reason_id=%a\r\n",
+              plan_enabled[0] ? plan_enabled : "na",
+              plan_remaining[0] ? plan_remaining : "na",
+              plan_hard_stop[0] ? plan_hard_stop : "na",
+              plan_reason_id[0] ? plan_reason_id : "na");
+          Print(L"[oo_explain] boot_relation=%a boot_bias=%a\r\n",
+              boot_relation[0] ? boot_relation : "na",
+              boot_bias[0] ? boot_bias : "na");
+          Print(L"[oo_explain] trend=%a trend_bias=%a saturation=%a saturation_bias=%a\r\n",
+              trend_relation[0] ? trend_relation : "na",
+              trend_bias[0] ? trend_bias : "na",
+              saturation_state[0] ? saturation_state : "na",
+              saturation_bias[0] ? saturation_bias : "na");
+          Print(L"[oo_explain] operator_summary=%a\r\n",
+              operator_summary[0] ? operator_summary : "na");
+        }
+
+    uefi_call_wrapper(BS->FreePool, 1, line);
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
+static void llmk_oo_explain_boot_best_effort(void) {
+    if (!g_root) return;
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOCONSULT.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_explain_boot] no consult history\r\n");
+        return;
+    }
+
+    char *cbuf = (char *)buf;
+    UINTN line_start = 0;
+    UINTN line_end = len;
+    while (line_end > 0 && (cbuf[line_end - 1] == '\r' || cbuf[line_end - 1] == '\n' || cbuf[line_end - 1] == 0)) {
+        line_end--;
+    }
+    if (line_end == 0) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_explain_boot] no consult history\r\n");
+        return;
+    }
+    for (UINTN i = line_end; i > 0; i--) {
+        if (cbuf[i - 1] == '\n') {
+            line_start = i;
+            break;
+        }
+    }
+
+    UINTN consult_line_len = line_end - line_start;
+    char *consult_line = NULL;
+    if (EFI_ERROR(uefi_call_wrapper(BS->AllocatePool, 3, EfiBootServicesData, consult_line_len + 1, (void **)&consult_line)) || !consult_line) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_explain_boot] oom\r\n");
+        return;
+    }
+    CopyMem(consult_line, cbuf + line_start, consult_line_len);
+    consult_line[consult_line_len] = 0;
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+
+    char consult_selected[48];
+    char consult_reason_id[64];
+    char consult_operator_summary[64];
+    consult_selected[0] = 0;
+    consult_reason_id[0] = 0;
+    consult_operator_summary[0] = 0;
+    (void)llmk_oo_outcome_extract_token(consult_line, "sel", consult_selected, (int)sizeof(consult_selected));
+    (void)llmk_oo_outcome_extract_token(consult_line, "ri", consult_reason_id, (int)sizeof(consult_reason_id));
+    (void)llmk_oo_outcome_extract_token(consult_line, "os", consult_operator_summary, (int)sizeof(consult_operator_summary));
+
+    char last_action[32];
+    char last_improved[8];
+    char last_expected[64];
+    char last_observed[64];
+    last_action[0] = 0;
+    last_improved[0] = 0;
+    last_expected[0] = 0;
+    last_observed[0] = 0;
+    if (!llmk_oo_read_latest_confirmed_outcome_best_effort(last_action, (int)sizeof(last_action),
+                                                           last_improved, (int)sizeof(last_improved),
+                                                           last_expected, (int)sizeof(last_expected),
+                                                           last_observed, (int)sizeof(last_observed))) {
+        uefi_call_wrapper(BS->FreePool, 1, consult_line);
+        Print(L"[oo_explain_boot] no outcome history\r\n");
+        return;
+    }
+
+    const char *relation = "selected_differs_from_last_confirmed";
+    if (llmk_oo_ascii_equals(consult_selected, last_action)) {
+        relation = (last_improved[0] == '1' && last_improved[1] == 0) ? "selected_matches_confirmed_good" : "selected_matches_confirmed_bad";
+    }
+
+    Print(L"[oo_explain_boot] consult.selected=%a reason_id=%a\r\n",
+          consult_selected[0] ? consult_selected : "na",
+          consult_reason_id[0] ? consult_reason_id : "na");
+        Print(L"[oo_explain_boot] operator_summary=%a\r\n",
+            consult_operator_summary[0] ? consult_operator_summary : "na");
+    Print(L"[oo_explain_boot] outcome.action=%a improved=%a expected=%a observed=%a\r\n",
+          last_action[0] ? last_action : "na",
+          last_improved[0] ? last_improved : "na",
+          last_expected[0] ? last_expected : "na",
+          last_observed[0] ? last_observed : "na");
+    Print(L"[oo_explain_boot] relation=%a\r\n", relation);
+    llmk_oo_print_recent_confirmed_outcomes_best_effort(3);
+
+    uefi_call_wrapper(BS->FreePool, 1, consult_line);
 }
 
 static void llmk_print_log(UINT32 n) {
@@ -10836,8 +11915,11 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/oo_exec", L"Run agenda items (n cycles). Stops when agenda empty unless --plan" },
     { "/oo_exec_stop", L"Stop /oo_exec" },
     { "/oo_consult", L"Ask the model to suggest a system adaptation action" },
+    { "/oo_consult_mock", L"Run the OO consult policy with a deterministic mock suggestion" },
+    { "/oo_explain", L"Explain the latest OO consult decision (add 'verbose' or 'boot')" },
     { "/oo_log", L"Tail OOCONSULT.LOG" },
     { "/oo_jour", L"Tail OOJOUR.LOG" },
+    { "/oo_outcome", L"Tail OOOUTCOME.LOG and show pending next-boot feedback" },
 
     { "/autorun", L"Run scripted REPL commands from file (default from repl.cfg)" },
     { "/autorun_stop", L"Stop autorun" },
@@ -11109,8 +12191,10 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/oo_exec_stop",
         "/oo_consult",
         "/oo_consult_mock",
+        "/oo_explain",
         "/oo_log",
         "/oo_jour",
+        "/oo_outcome",
         "/autorun",
         "/autorun_stop",
         "/reset",
@@ -11501,8 +12585,23 @@ static EFI_STATUS llmk_snap_load_into_state_best_effort(RunState *state, const C
 static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_mb,
                                      int ctx, int seq, const char *suggestion,
                                      const char *decision, int applied,
+                                     const char *selected_action,
+                                     const char *boot_relation,
+                                     int boot_bias,
+                                     const char *trend_relation,
+                                     int trend_bias,
+                                     const char *saturation_state,
+                                     int saturation_bias,
+                                     const char *operator_summary,
+                                     const char *reason_id,
+                                     const char *confidence_reason_id,
+                                     int plan_enabled,
+                                     int plan_remaining_budget,
+                                     int plan_hard_stop,
+                                     const char *plan_reason_id,
                                      int confidence_score, int confidence_threshold,
-                                     int confidence_gate_enabled);
+                                     int confidence_gate_enabled,
+                                     int feedback_bias);
 
 static int llmk_oo_confidence_score(UINT32 mode, UINT64 ram_mb, int ctx, int seq,
                                     int llm_len,
@@ -11510,12 +12609,21 @@ static int llmk_oo_confidence_score(UINT32 mode, UINT64 ram_mb, int ctx, int seq
                                     int action_increase, int action_reboot,
                                     int action_model, int action_stable,
                                     int *out_feedback_bias,
+                                    int *out_action_bias,
+                                    int *out_reduce_ctx_score,
+                                    int *out_reduce_seq_score,
+                                    int *out_increase_ctx_score,
                                     int *out_feedback_good,
                                     int *out_feedback_bad) {
     int score = 50;
     int feedback_bias = 0;
+    int action_bias = 0;
 
     if (out_feedback_bias) *out_feedback_bias = 0;
+    if (out_action_bias) *out_action_bias = 0;
+    if (out_reduce_ctx_score) *out_reduce_ctx_score = 0;
+    if (out_reduce_seq_score) *out_reduce_seq_score = 0;
+    if (out_increase_ctx_score) *out_increase_ctx_score = 0;
     if (out_feedback_good) *out_feedback_good = 0;
     if (out_feedback_bad) *out_feedback_bad = 0;
 
@@ -11541,7 +12649,12 @@ static int llmk_oo_confidence_score(UINT32 mode, UINT64 ram_mb, int ctx, int seq
 
     {
         int rg = 0, rb = 0, ig = 0, ib = 0;
-        llmk_oo_outcome_feedback_recent_best_effort(&rg, &rb, &ig, &ib);
+        int rc_score = 0, rs_score = 0, ic_score = 0;
+        llmk_oo_outcome_feedback_recent_best_effort(&rg, &rb, &ig, &ib,
+                                                    &rc_score, &rs_score, &ic_score);
+        if (out_reduce_ctx_score) *out_reduce_ctx_score = rc_score;
+        if (out_reduce_seq_score) *out_reduce_seq_score = rs_score;
+        if (out_increase_ctx_score) *out_increase_ctx_score = ic_score;
 
         int wants_reduce = (action_reduce_ctx || action_reduce_seq) ? 1 : 0;
         int wants_increase = action_increase ? 1 : 0;
@@ -11561,10 +12674,25 @@ static int llmk_oo_confidence_score(UINT32 mode, UINT64 ram_mb, int ctx, int seq
             if (out_feedback_good) *out_feedback_good += ig;
             if (out_feedback_bad) *out_feedback_bad += ib;
         }
+
+        if (action_reduce_ctx) {
+            if (rc_score > 0) action_bias += (rc_score >= 6) ? 8 : 4;
+            else if (rc_score < 0) action_bias -= ((-rc_score) >= 6) ? 12 : 6;
+        }
+        if (action_reduce_seq) {
+            if (rs_score > 0) action_bias += (rs_score >= 6) ? 6 : 3;
+            else if (rs_score < 0) action_bias -= ((-rs_score) >= 6) ? 10 : 5;
+        }
+        if (wants_increase) {
+            if (ic_score > 0) action_bias += (ic_score >= 5) ? 6 : 3;
+            else if (ic_score < 0) action_bias -= ((-ic_score) >= 5) ? 10 : 5;
+        }
     }
 
+    feedback_bias += action_bias;
     score += feedback_bias;
     if (out_feedback_bias) *out_feedback_bias = feedback_bias;
+    if (out_action_bias) *out_action_bias = action_bias;
 
     if (score < 0) score = 0;
     if (score > 100) score = 100;
@@ -11649,13 +12777,21 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
         if (confidence_threshold > 100) confidence_threshold = 100;
         int confidence_gate_enabled = (g_cfg_oo_conf_gate != 0);
     int feedback_bias = 0;
+    int action_bias = 0;
+    int recent_reduce_ctx_score = 0;
+    int recent_reduce_seq_score = 0;
+    int recent_increase_ctx_score = 0;
     int feedback_good = 0;
     int feedback_bad = 0;
     int confidence_score = llmk_oo_confidence_score(mode, ram_mb, ctx, seq, llm_len,
                                                     action_reduce_ctx, action_reduce_seq,
                                                     action_increase, action_reboot,
                                                     action_model, action_stable,
-                                                    &feedback_bias, &feedback_good, &feedback_bad);
+                                                    &feedback_bias, &action_bias,
+                                                    &recent_reduce_ctx_score,
+                                                    &recent_reduce_seq_score,
+                                                    &recent_increase_ctx_score,
+                                                    &feedback_good, &feedback_bad);
         int confidence_gate_pass = (confidence_score >= confidence_threshold);
         int plan_hard_stop = (confidence_gate_enabled && !confidence_gate_pass) ? 1 : 0;
         const char *confidence_reason_id = (!confidence_gate_enabled) ? "OO_CONF_LOG_ONLY" :
@@ -11671,6 +12807,10 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
         if (plan_remaining_budget < 0) plan_remaining_budget = 0;
         int plan_applied_now = 0;
         int plan_checkpoint_done = 0;
+        const char *selected_action = "na";
+        const char *operator_summary = "na";
+        int operator_positive_saturated = 0;
+        const char *final_reason_id = confidence_reason_id;
 
         Print(L"OK: OO confidence: score=%d threshold=%d gate=%a pass=%a reason_id=%a\r\n",
             confidence_score,
@@ -11678,15 +12818,222 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
             confidence_gate_enabled ? "enforced" : "log_only",
             confidence_gate_pass ? "yes" : "no",
             confidence_reason_id);
-        Print(L"OK: OO feedback: good=%d bad=%d bias=%d\r\n",
-            feedback_good, feedback_bad, feedback_bias);
+        Print(L"OK: OO feedback: good=%d bad=%d bias=%d action_bias=%d\r\n",
+            feedback_good, feedback_bad, feedback_bias, action_bias);
+        {
+            int pref_reduce_ctx = recent_reduce_ctx_score;
+            int pref_reduce_seq = recent_reduce_seq_score;
+            int pref_increase_ctx = recent_increase_ctx_score;
+            int boot_reduce_ctx_bias = 0;
+            int boot_reduce_seq_bias = 0;
+            int boot_increase_ctx_bias = 0;
+            int trend_reduce_ctx_bias = 0;
+            int trend_reduce_seq_bias = 0;
+            int trend_increase_ctx_bias = 0;
+            int sat_reduce_ctx_bias = 0;
+            int sat_reduce_seq_bias = 0;
+            int sat_increase_ctx_bias = 0;
+            char boot_reduce_ctx_relation[48];
+            char boot_reduce_seq_relation[48];
+            char boot_increase_ctx_relation[48];
+            char trend_reduce_ctx_relation[48];
+            char trend_reduce_seq_relation[48];
+            char trend_increase_ctx_relation[48];
+            char sat_reduce_ctx_state[48];
+            char sat_reduce_seq_state[48];
+            char sat_increase_ctx_state[48];
+            int requested_adaptive = action_reduce_ctx + action_reduce_seq + action_increase;
+            int best_kind = 0;
+            int best_score = -999;
+            int second_score = -999;
+            int fallback_from_positive_saturated = 0;
+
+            boot_reduce_ctx_relation[0] = 0;
+            boot_reduce_seq_relation[0] = 0;
+            boot_increase_ctx_relation[0] = 0;
+            trend_reduce_ctx_relation[0] = 0;
+            trend_reduce_seq_relation[0] = 0;
+            trend_increase_ctx_relation[0] = 0;
+            sat_reduce_ctx_state[0] = 0;
+            sat_reduce_seq_state[0] = 0;
+            sat_increase_ctx_state[0] = 0;
+
+            if (action_reduce_ctx) {
+                boot_reduce_ctx_bias = llmk_oo_boot_relation_for_action_best_effort("reduce_ctx",
+                                                                                   boot_reduce_ctx_relation,
+                                                                                   (int)sizeof(boot_reduce_ctx_relation),
+                                                                                   NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+                trend_reduce_ctx_bias = llmk_oo_recent_trend_for_action_best_effort("reduce_ctx",
+                                                                                    trend_reduce_ctx_relation,
+                                                                                    (int)sizeof(trend_reduce_ctx_relation));
+                sat_reduce_ctx_bias = llmk_oo_saturation_bias_for_action_best_effort("reduce_ctx",
+                                                                                     ctx,
+                                                                                     seq,
+                                                                                     sat_reduce_ctx_state,
+                                                                                     (int)sizeof(sat_reduce_ctx_state));
+                pref_reduce_ctx += boot_reduce_ctx_bias;
+                pref_reduce_ctx += trend_reduce_ctx_bias;
+                pref_reduce_ctx += sat_reduce_ctx_bias;
+            }
+            if (action_reduce_seq) {
+                boot_reduce_seq_bias = llmk_oo_boot_relation_for_action_best_effort("reduce_seq",
+                                                                                   boot_reduce_seq_relation,
+                                                                                   (int)sizeof(boot_reduce_seq_relation),
+                                                                                   NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+                trend_reduce_seq_bias = llmk_oo_recent_trend_for_action_best_effort("reduce_seq",
+                                                                                    trend_reduce_seq_relation,
+                                                                                    (int)sizeof(trend_reduce_seq_relation));
+                sat_reduce_seq_bias = llmk_oo_saturation_bias_for_action_best_effort("reduce_seq",
+                                                                                     ctx,
+                                                                                     seq,
+                                                                                     sat_reduce_seq_state,
+                                                                                     (int)sizeof(sat_reduce_seq_state));
+                pref_reduce_seq += boot_reduce_seq_bias;
+                pref_reduce_seq += trend_reduce_seq_bias;
+                pref_reduce_seq += sat_reduce_seq_bias;
+            }
+            if (action_increase) {
+                boot_increase_ctx_bias = llmk_oo_boot_relation_for_action_best_effort("increase_ctx",
+                                                                                      boot_increase_ctx_relation,
+                                                                                      (int)sizeof(boot_increase_ctx_relation),
+                                                                                      NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+                trend_increase_ctx_bias = llmk_oo_recent_trend_for_action_best_effort("increase_ctx",
+                                                                                       trend_increase_ctx_relation,
+                                                                                       (int)sizeof(trend_increase_ctx_relation));
+                sat_increase_ctx_bias = llmk_oo_saturation_bias_for_action_best_effort("increase_ctx",
+                                                                                        ctx,
+                                                                                        seq,
+                                                                                        sat_increase_ctx_state,
+                                                                                        (int)sizeof(sat_increase_ctx_state));
+                pref_increase_ctx += boot_increase_ctx_bias;
+                pref_increase_ctx += trend_increase_ctx_bias;
+                pref_increase_ctx += sat_increase_ctx_bias;
+            }
+
+            if (action_reduce_ctx) {
+                if (mode == LLMK_OO_MODE_SAFE || mode == LLMK_OO_MODE_DEGRADED) pref_reduce_ctx += 2;
+                if (ctx <= 256) pref_reduce_ctx -= 3;
+                if (ctx <= 128) pref_reduce_ctx -= 8;
+                if (pref_reduce_ctx > best_score) {
+                    second_score = best_score;
+                    best_score = pref_reduce_ctx;
+                    best_kind = 1;
+                } else if (pref_reduce_ctx > second_score) {
+                    second_score = pref_reduce_ctx;
+                }
+            }
+            if (action_reduce_seq) {
+                if (mode == LLMK_OO_MODE_SAFE && ram_mb < 1024ULL) pref_reduce_seq += 2;
+                if (seq <= 256) pref_reduce_seq -= 3;
+                if (seq <= 128) pref_reduce_seq -= 8;
+                if (pref_reduce_seq > best_score) {
+                    second_score = best_score;
+                    best_score = pref_reduce_seq;
+                    best_kind = 2;
+                } else if (pref_reduce_seq > second_score) {
+                    second_score = pref_reduce_seq;
+                }
+            }
+            if (action_increase) {
+                if (mode != LLMK_OO_MODE_NORMAL) pref_increase_ctx -= 6;
+                if (g_cfg_oo_auto_apply < 2) pref_increase_ctx -= 4;
+                if (ctx >= 1536) pref_increase_ctx -= 3;
+                if (pref_increase_ctx > best_score) {
+                    second_score = best_score;
+                    best_score = pref_increase_ctx;
+                    best_kind = 3;
+                } else if (pref_increase_ctx > second_score) {
+                    second_score = pref_increase_ctx;
+                }
+            }
+
+            Print(L"OK: OO action preference: reduce_ctx=%d reduce_seq=%d increase_ctx=%d\r\n",
+                action_reduce_ctx ? pref_reduce_ctx : -999,
+                action_reduce_seq ? pref_reduce_seq : -999,
+                action_increase ? pref_increase_ctx : -999);
+            Print(L"OK: OO boot feedback: reduce_ctx=%a(%d) reduce_seq=%a(%d) increase_ctx=%a(%d)\r\n",
+                action_reduce_ctx ? (boot_reduce_ctx_relation[0] ? boot_reduce_ctx_relation : "none") : "na",
+                action_reduce_ctx ? boot_reduce_ctx_bias : 0,
+                action_reduce_seq ? (boot_reduce_seq_relation[0] ? boot_reduce_seq_relation : "none") : "na",
+                action_reduce_seq ? boot_reduce_seq_bias : 0,
+                action_increase ? (boot_increase_ctx_relation[0] ? boot_increase_ctx_relation : "none") : "na",
+                action_increase ? boot_increase_ctx_bias : 0);
+            Print(L"OK: OO trend feedback: reduce_ctx=%a(%d) reduce_seq=%a(%d) increase_ctx=%a(%d)\r\n",
+                action_reduce_ctx ? (trend_reduce_ctx_relation[0] ? trend_reduce_ctx_relation : "none") : "na",
+                action_reduce_ctx ? trend_reduce_ctx_bias : 0,
+                action_reduce_seq ? (trend_reduce_seq_relation[0] ? trend_reduce_seq_relation : "none") : "na",
+                action_reduce_seq ? trend_reduce_seq_bias : 0,
+                action_increase ? (trend_increase_ctx_relation[0] ? trend_increase_ctx_relation : "none") : "na",
+                action_increase ? trend_increase_ctx_bias : 0);
+            Print(L"OK: OO saturation feedback: reduce_ctx=%a(%d) reduce_seq=%a(%d) increase_ctx=%a(%d)\r\n",
+                action_reduce_ctx ? (sat_reduce_ctx_state[0] ? sat_reduce_ctx_state : "none") : "na",
+                action_reduce_ctx ? sat_reduce_ctx_bias : 0,
+                action_reduce_seq ? (sat_reduce_seq_state[0] ? sat_reduce_seq_state : "none") : "na",
+                action_reduce_seq ? sat_reduce_seq_bias : 0,
+                action_increase ? (sat_increase_ctx_state[0] ? sat_increase_ctx_state : "none") : "na",
+                action_increase ? sat_increase_ctx_bias : 0);
+
+            if ((action_reduce_ctx && (boot_reduce_ctx_bias > 0 || trend_reduce_ctx_bias > 0) && sat_reduce_ctx_bias < 0) ||
+                (action_reduce_seq && (boot_reduce_seq_bias > 0 || trend_reduce_seq_bias > 0) && sat_reduce_seq_bias < 0) ||
+                (action_increase && (boot_increase_ctx_bias > 0 || trend_increase_ctx_bias > 0) && sat_increase_ctx_bias < 0)) {
+                fallback_from_positive_saturated = 1;
+            }
+            if (fallback_from_positive_saturated) {
+                operator_positive_saturated = 1;
+            }
+
+            if (!action_stable && !action_reboot && requested_adaptive > 1 && best_kind != 0) {
+                int prefer_single = (!plan_enabled) || (plan_max_actions <= 1) || ((best_score - second_score) >= 3);
+                if (prefer_single) {
+                    action_reduce_ctx = (best_kind == 1) ? 1 : 0;
+                    action_reduce_seq = (best_kind == 2) ? 1 : 0;
+                    action_increase = (best_kind == 3) ? 1 : 0;
+                    selected_action = (best_kind == 1) ? "reduce_ctx" : (best_kind == 2) ? "reduce_seq" : "increase_ctx";
+                    Print(L"OK: OO action selection: selected=%a mode=single_best lead=%d\r\n",
+                        selected_action,
+                        best_score - second_score);
+                } else {
+                    selected_action = "multi";
+                    Print(L"OK: OO action selection: selected=multi mode=keep_multiple lead=%d\r\n",
+                        best_score - second_score);
+                }
+            }
+
+            if (best_kind == 1) {
+                operator_summary = llmk_oo_operator_summary_from_dynamics(best_kind,
+                                                                          fallback_from_positive_saturated && selected_action[0] && !llmk_oo_ascii_equals(selected_action, "reduce_ctx"),
+                                                                          boot_reduce_ctx_bias,
+                                                                          trend_reduce_ctx_bias,
+                                                                          sat_reduce_ctx_bias,
+                                                                          0,
+                                                                          final_reason_id);
+            } else if (best_kind == 2) {
+                operator_summary = llmk_oo_operator_summary_from_dynamics(best_kind,
+                                                                          fallback_from_positive_saturated && selected_action[0] && !llmk_oo_ascii_equals(selected_action, "reduce_seq"),
+                                                                          boot_reduce_seq_bias,
+                                                                          trend_reduce_seq_bias,
+                                                                          sat_reduce_seq_bias,
+                                                                          0,
+                                                                          final_reason_id);
+            } else if (best_kind == 3) {
+                operator_summary = llmk_oo_operator_summary_from_dynamics(best_kind,
+                                                                          fallback_from_positive_saturated && selected_action[0] && !llmk_oo_ascii_equals(selected_action, "increase_ctx"),
+                                                                          boot_increase_ctx_bias,
+                                                                          trend_increase_ctx_bias,
+                                                                          sat_increase_ctx_bias,
+                                                                          0,
+                                                                          final_reason_id);
+            }
+        }
+        const char *plan_reason_id = plan_hard_stop ? "OO_PLAN_HARD_STOP" : "OO_PLAN_ACTIVE";
+
         Print(L"OK: OO plan: enabled=%a max=%d used=%d remain=%d hard_stop=%a reason_id=%a\r\n",
             plan_enabled ? "yes" : "no",
             plan_max_actions,
             g_oo_auto_applied_count_this_boot,
             plan_remaining_budget,
             plan_hard_stop ? "yes" : "no",
-            plan_hard_stop ? "OO_PLAN_HARD_STOP" : "OO_PLAN_ACTIVE");
+            plan_reason_id);
 
         // Ultra-minimal journal markers (details go to serial + OOCONSULT.LOG).
         if (!confidence_gate_enabled) {
@@ -11713,12 +13060,16 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
     // Priority filtering: stable cancels all, reboot primes others
     if (action_stable) {
         // Stable signal: no action needed
+        selected_action = "stable";
+        final_reason_id = "OO_STABLE_OK";
         Print(L"OK: OO policy decided: system_stable (reason=llm_reports_ok reason_id=OO_STABLE_OK)\r\n");
         actions_applied = 0;
         actions_blocked = (action_reduce_ctx + action_reduce_seq + action_increase + action_reboot + action_model - 1);
         llmk_ascii_append_str(batch_summary, (int)sizeof(batch_summary), &batch_summary_pos, "stable");
     } else if (action_reboot) {
         // Reboot primes others: log but don't auto-apply (v0)
+        selected_action = "reboot_logged";
+        final_reason_id = "OO_REBOOT_LOG_ONLY";
         Print(L"OK: OO policy decided: logged_only (reason=reboot_not_auto reason_id=OO_REBOOT_LOG_ONLY)\r\n");
         actions_applied = 0;
         actions_blocked = (action_reduce_ctx + action_reduce_seq + action_increase + action_model);
@@ -11741,13 +13092,17 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                     if (!can_auto_apply) {
                         // Auto-apply disabled or throttled
                         if (confidence_gate_enabled && !confidence_gate_pass) {
+                                final_reason_id = "OO_BLOCK_CONFIDENCE";
                                 Print(L"OK: OO policy blocked: reduce_ctx (reason=confidence_below_threshold reason_id=OO_BLOCK_CONFIDENCE score=%d threshold=%d)\r\n",
                                   confidence_score, confidence_threshold);
                         } else if (g_cfg_oo_auto_apply == 0) {
+                            final_reason_id = "OO_SIM_AUTO_APPLY_DISABLED";
                             Print(L"OK: OO policy simulation: reduce_ctx (would_apply_if_enabled, new=%d)\r\n", new_ctx);
                         } else if (plan_hard_stop) {
+                            final_reason_id = "OO_BLOCK_HARD_STOP";
                             Print(L"OK: OO policy blocked: reduce_ctx (reason=hard_stop_active reason_id=OO_BLOCK_HARD_STOP, new=%d)\r\n", new_ctx);
                         } else {
+                            final_reason_id = "OO_BLOCK_PLAN_BUDGET";
                             Print(L"OK: OO policy throttled: reduce_ctx (reason=plan_budget_exhausted reason_id=OO_BLOCK_PLAN_BUDGET, new=%d)\r\n", new_ctx);
                         }
                         actions_blocked++;
@@ -11769,6 +13124,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                             seq,
                                                                             ram_mb);
                         if (ok) {
+                            final_reason_id = "OO_APPLY_OK";
                             Print(L"OK: OO auto-apply: reduce_ctx (old=%d new=%d check=pass reason_id=OO_APPLY_OK)\r\n", ctx, new_ctx);
                             llmk_oo_journal_event_load_state_best_effort("auto_apply_reduce_ctx_ok");
                             llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_CTX);
@@ -11785,6 +13141,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)ctx);
                             oval[op] = 0;
                             llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
+                            final_reason_id = "OO_APPLY_VERIFY_FAILED";
                             Print(L"ERROR: OO auto-apply verification failed: reduce_ctx (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
                             llmk_oo_journal_event_load_state_best_effort("auto_apply_reduce_ctx_fail");
                             llmk_oo_journal_event_load_state_best_effort("plan_hard_stop");
@@ -11793,10 +13150,12 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                         }
                     }
                 } else {
+                    final_reason_id = "OO_BLOCK_ALREADY_MIN";
                     Print(L"OK: OO policy blocked: reduce_ctx (reason=already_at_min)\r\n");
                     actions_blocked++;
                 }
             } else {
+                final_reason_id = "OO_BLOCK_NORMAL_MODE";
                 Print(L"OK: OO policy blocked: reduce_ctx (reason=normal_mode_no_auto_reduce)\r\n");
                 actions_blocked++;
             }
@@ -11815,13 +13174,17 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
 
                     if (!can_auto_apply) {
                         if (confidence_gate_enabled && !confidence_gate_pass) {
+                                final_reason_id = "OO_BLOCK_CONFIDENCE";
                                 Print(L"OK: OO policy blocked: reduce_seq (reason=confidence_below_threshold reason_id=OO_BLOCK_CONFIDENCE score=%d threshold=%d)\r\n",
                                   confidence_score, confidence_threshold);
                         } else if (g_cfg_oo_auto_apply == 0) {
+                            final_reason_id = "OO_SIM_AUTO_APPLY_DISABLED";
                             Print(L"OK: OO policy simulation: reduce_seq (would_apply_if_enabled, new=%d)\r\n", new_seq);
                         } else if (plan_hard_stop) {
+                            final_reason_id = "OO_BLOCK_HARD_STOP";
                             Print(L"OK: OO policy blocked: reduce_seq (reason=hard_stop_active reason_id=OO_BLOCK_HARD_STOP, new=%d)\r\n", new_seq);
                         } else {
+                            final_reason_id = "OO_BLOCK_PLAN_BUDGET";
                             Print(L"OK: OO policy throttled: reduce_seq (reason=plan_budget_exhausted reason_id=OO_BLOCK_PLAN_BUDGET, new=%d)\r\n", new_seq);
                         }
                         actions_blocked++;
@@ -11838,6 +13201,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                             new_seq,
                                                                             ram_mb);
                         if (ok) {
+                            final_reason_id = "OO_APPLY_OK";
                             Print(L"OK: OO auto-apply: reduce_seq (old=%d new=%d check=pass reason_id=OO_APPLY_OK)\r\n", seq, new_seq);
                             llmk_oo_journal_event_load_state_best_effort("auto_apply_reduce_seq_ok");
                             llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_REDUCE_SEQ);
@@ -11853,6 +13217,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                             llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)seq);
                             oval[op] = 0;
                             llmk_repl_cfg_set_kv_best_effort("seq_len", oval);
+                            final_reason_id = "OO_APPLY_VERIFY_FAILED";
                             Print(L"ERROR: OO auto-apply verification failed: reduce_seq (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
                             llmk_oo_journal_event_load_state_best_effort("auto_apply_reduce_seq_fail");
                             llmk_oo_journal_event_load_state_best_effort("plan_hard_stop");
@@ -11861,14 +13226,17 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                         }
                     }
                 } else {
+                    final_reason_id = "OO_BLOCK_ALREADY_MIN";
                     Print(L"OK: OO policy blocked: reduce_seq (reason=already_at_min)\r\n");
                     actions_blocked++;
                 }
             } else {
+                final_reason_id = "OO_BLOCK_NOT_SAFE_LOW_RAM";
                 Print(L"OK: OO policy blocked: reduce_seq (reason=not_safe_low_ram)\r\n");
                 actions_blocked++;
             }
         } else if (action_reduce_seq && !multi_enabled) {
+            final_reason_id = "OO_BLOCK_MULTI_DISABLED";
             Print(L"OK: OO policy blocked: reduce_seq (reason=multi_actions_disabled)\r\n");
             actions_blocked++;
         }
@@ -11898,6 +13266,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                                                                         seq,
                                                                         ram_mb);
                     if (ok) {
+                        final_reason_id = "OO_APPLY_OK";
                         Print(L"OK: OO auto-apply: increase_ctx (old=%d new=%d check=pass mode=aggressive reason_id=OO_APPLY_OK)\r\n", ctx, new_ctx);
                         llmk_oo_journal_event_load_state_best_effort("auto_apply_increase_ctx_ok");
                         llmk_oo_record_last_auto_apply_best_effort(boots, mode, LLMK_OO_ACTION_INCREASE_CTX);
@@ -11913,6 +13282,7 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                         llmk_ascii_append_u64(oval, (int)sizeof(oval), &op, (UINT64)ctx);
                         oval[op] = 0;
                         llmk_repl_cfg_set_kv_best_effort("ctx_len", oval);
+                        final_reason_id = "OO_APPLY_VERIFY_FAILED";
                         Print(L"ERROR: OO auto-apply verification failed: increase_ctx (reason=verify_failed reason_id=OO_APPLY_VERIFY_FAILED, reverting)\r\n");
                         llmk_oo_journal_event_load_state_best_effort("auto_apply_increase_ctx_fail");
                         llmk_oo_journal_event_load_state_best_effort("plan_hard_stop");
@@ -11920,10 +13290,12 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
                         actions_blocked++;
                     }
                 } else {
+                    final_reason_id = "OO_BLOCK_ALREADY_MAX";
                     Print(L"OK: OO policy blocked: increase_ctx (reason=already_at_max)\r\n");
                     actions_blocked++;
                 }
             } else {
+                final_reason_id = "OO_BLOCK_DYNAMIC";
                 const char *block_reason = (!can_auto_apply && confidence_gate_enabled && !confidence_gate_pass) ? "confidence_below_threshold" :
                                            (!can_auto_apply && g_cfg_oo_auto_apply == 0) ? "auto_apply_disabled" :
                                            (!can_auto_apply && plan_hard_stop) ? "hard_stop_active" :
@@ -11939,12 +13311,14 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
 
         // 6.4: Log model change (not auto-applied in v0)
         if (action_model) {
+            final_reason_id = "OO_MODEL_LOG_ONLY";
             Print(L"OK: OO policy decided: logged_only (reason=model_change_not_auto reason_id=OO_MODEL_LOG_ONLY)\r\n");
             actions_blocked++;
         }
 
         // If no actions applied/blocked, mark as no actionable keywords
         if (actions_applied == 0 && actions_blocked == 0) {
+            final_reason_id = "OO_NO_ACTIONABLE_KEYWORD";
             Print(L"OK: OO policy decided: ignored (reason=no_actionable_keyword reason_id=OO_NO_ACTIONABLE_KEYWORD)\r\n");
         }
     }
@@ -11954,10 +13328,52 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
         Print(L"OK: OO policy batch: %d actions applied, %d blocked\r\n", actions_applied, actions_blocked);
     }
 
+    if (selected_action[0] && !(selected_action[0] == 'n' && selected_action[1] == 'a' && selected_action[2] == 0)) {
+        int selected_kind = llmk_oo_ascii_equals(selected_action, "reduce_ctx") ? 1 :
+                            llmk_oo_ascii_equals(selected_action, "reduce_seq") ? 2 :
+                            llmk_oo_ascii_equals(selected_action, "increase_ctx") ? 3 : 0;
+        int selected_boot_bias_now = 0;
+        int selected_trend_bias_now = 0;
+        int selected_saturation_bias_now = 0;
+        if (selected_kind == 1) {
+            selected_boot_bias_now = llmk_oo_boot_relation_for_action_best_effort("reduce_ctx", NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+            selected_trend_bias_now = llmk_oo_recent_trend_for_action_best_effort("reduce_ctx", NULL, 0);
+            selected_saturation_bias_now = llmk_oo_saturation_bias_for_action_best_effort("reduce_ctx", ctx, seq, NULL, 0);
+        } else if (selected_kind == 2) {
+            selected_boot_bias_now = llmk_oo_boot_relation_for_action_best_effort("reduce_seq", NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+            selected_trend_bias_now = llmk_oo_recent_trend_for_action_best_effort("reduce_seq", NULL, 0);
+            selected_saturation_bias_now = llmk_oo_saturation_bias_for_action_best_effort("reduce_seq", ctx, seq, NULL, 0);
+        } else if (selected_kind == 3) {
+            selected_boot_bias_now = llmk_oo_boot_relation_for_action_best_effort("increase_ctx", NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+            selected_trend_bias_now = llmk_oo_recent_trend_for_action_best_effort("increase_ctx", NULL, 0);
+            selected_saturation_bias_now = llmk_oo_saturation_bias_for_action_best_effort("increase_ctx", ctx, seq, NULL, 0);
+        }
+        operator_summary = llmk_oo_operator_summary_from_dynamics(selected_kind,
+                                                                  operator_positive_saturated,
+                                                                  selected_boot_bias_now,
+                                                                  selected_trend_bias_now,
+                                                                  selected_saturation_bias_now,
+                                                                  (actions_applied > 0) ? 1 : 0,
+                                                                  final_reason_id);
+    }
+    Print(L"OK: OO operator summary: %a\r\n", operator_summary ? operator_summary : "na");
+
     // M5.3: Log consultation to OOCONSULT.LOG
     {
         // Determine decision string for log
         const char *decision_str = "unknown";
+        char selected_boot_relation[64];
+        int selected_boot_bias = 0;
+        char selected_trend_relation[64];
+        int selected_trend_bias = 0;
+        char selected_saturation_state[64];
+        int selected_saturation_bias = 0;
+        char selected_operator_summary[64];
+
+        selected_boot_relation[0] = 0;
+        selected_trend_relation[0] = 0;
+        selected_saturation_state[0] = 0;
+        selected_operator_summary[0] = 0;
         if (action_stable) {
             decision_str = "stable";
         } else if (action_reboot) {
@@ -11977,10 +13393,54 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
             decision_str = "model_logged";
         }
 
+        if (selected_action[0] == 'n' && selected_action[1] == 'a' && selected_action[2] == 0) {
+            if (action_reduce_ctx) selected_action = "reduce_ctx";
+            else if (action_reduce_seq) selected_action = "reduce_seq";
+            else if (action_increase) selected_action = "increase_ctx";
+            else if (action_model) selected_action = "model_logged";
+        }
+
+        selected_boot_bias = llmk_oo_boot_relation_for_action_best_effort(selected_action,
+                                                                          selected_boot_relation,
+                                                                          (int)sizeof(selected_boot_relation),
+                                                                          NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+        selected_trend_bias = llmk_oo_recent_trend_for_action_best_effort(selected_action,
+                                                                          selected_trend_relation,
+                                                                          (int)sizeof(selected_trend_relation));
+        selected_saturation_bias = llmk_oo_saturation_bias_for_action_best_effort(selected_action,
+                                                                                   ctx,
+                                                                                   seq,
+                                                                                   selected_saturation_state,
+                                                                                   (int)sizeof(selected_saturation_state));
+        if (!selected_boot_relation[0]) {
+            llmk_oo_outcome_copy_token(selected_boot_relation, (int)sizeof(selected_boot_relation), "na");
+        }
+        if (!selected_trend_relation[0]) {
+            llmk_oo_outcome_copy_token(selected_trend_relation, (int)sizeof(selected_trend_relation), "na");
+        }
+        if (!selected_saturation_state[0]) {
+            llmk_oo_outcome_copy_token(selected_saturation_state, (int)sizeof(selected_saturation_state), "na");
+        }
+        llmk_oo_outcome_copy_token(selected_operator_summary, (int)sizeof(selected_operator_summary), operator_summary ? operator_summary : "na");
+
         llmk_oo_log_consultation(boots, mode, ram_mb, ctx, seq, llm_suggestion,
                                  decision_str, (actions_applied > 0) ? 1 : 0,
+                                 selected_action,
+                                 selected_boot_relation,
+                                 selected_boot_bias,
+                                 selected_trend_relation,
+                                 selected_trend_bias,
+                                 selected_saturation_state,
+                                 selected_saturation_bias,
+                                 selected_operator_summary,
+                                 final_reason_id,
+                                 confidence_reason_id,
+                                 plan_enabled,
+                                 plan_remaining_budget,
+                                 plan_hard_stop,
+                                 plan_reason_id,
                                  confidence_score, confidence_threshold,
-                                 confidence_gate_enabled);
+                                 confidence_gate_enabled, feedback_bias);
     }
 
     // 7. Log to journal (best-effort): ultra-minimal markers.
@@ -12081,8 +13541,23 @@ static void llmk_oo_consult_log_rotate_best_effort(void) {
 static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_mb, 
                                      int ctx, int seq, const char *suggestion, 
                                      const char *decision, int applied,
+                                     const char *selected_action,
+                                     const char *boot_relation,
+                                     int boot_bias,
+                                     const char *trend_relation,
+                                     int trend_bias,
+                                     const char *saturation_state,
+                                     int saturation_bias,
+                                     const char *operator_summary,
+                                     const char *reason_id,
+                                     const char *confidence_reason_id,
+                                     int plan_enabled,
+                                     int plan_remaining_budget,
+                                     int plan_hard_stop,
+                                     const char *plan_reason_id,
                                      int confidence_score, int confidence_threshold,
-                                     int confidence_gate_enabled) {
+                                     int confidence_gate_enabled,
+                                     int feedback_bias) {
     // Check if logging enabled
     int log_enabled = g_cfg_oo_consult_log;
     if (log_enabled < 0) {
@@ -12095,8 +13570,8 @@ static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_
     (void)suggestion;
 
     // Compact, stable log line (avoid persisting raw suggestion payload).
-    // Format: consult b=<boot> m=<N|D|S> r=<ram_mb> c=<ctx> s=<seq> d=<decision> a=<0|1> sc=<score> th=<thr> g=<0|1>
-    char logline[256];
+    // Format: consult b=<boot> m=<N|D|S> r=<ram_mb> c=<ctx> s=<seq> d=<decision> sel=<selected> br=<boot_relation> bb=<boot_bias> tr=<trend_relation> tb=<trend_bias> sr=<saturation_state> sb=<saturation_bias> os=<operator_summary> ri=<reason_id> cri=<confidence_reason_id> pe=<0|1> pr=<remain> ph=<0|1> pri=<plan_reason_id> a=<0|1> sc=<score> th=<thr> g=<0|1> fb=<bias>
+    char logline[640];
     int lp = 0;
 
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "consult b=");
@@ -12113,6 +13588,49 @@ static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)seq);
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " d=");
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, decision ? decision : "na");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " sel=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, selected_action ? selected_action : "na");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " br=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, boot_relation ? boot_relation : "na");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " bb=");
+    if (boot_bias < 0) {
+        llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "-");
+        llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)(-boot_bias));
+    } else {
+        llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)boot_bias);
+    }
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " tr=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, trend_relation ? trend_relation : "na");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " tb=");
+    if (trend_bias < 0) {
+        llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "-");
+        llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)(-trend_bias));
+    } else {
+        llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)trend_bias);
+    }
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " sr=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, saturation_state ? saturation_state : "na");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " sb=");
+    if (saturation_bias < 0) {
+        llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "-");
+        llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)(-saturation_bias));
+    } else {
+        llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)saturation_bias);
+    }
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " os=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, operator_summary ? operator_summary : "na");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " ri=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, reason_id ? reason_id : "na");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " cri=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, confidence_reason_id ? confidence_reason_id : "na");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " pe=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)(plan_enabled ? 1 : 0));
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " pr=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)((plan_remaining_budget < 0) ? 0 : plan_remaining_budget));
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " ph=");
+    llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)(plan_hard_stop ? 1 : 0));
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " pri=");
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, plan_reason_id ? plan_reason_id : "na");
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " a=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)applied);
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " sc=");
@@ -12121,6 +13639,13 @@ static void llmk_oo_log_consultation(UINT64 boot_count, UINT32 mode, UINT64 ram_
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)confidence_threshold);
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " g=");
     llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)(confidence_gate_enabled ? 1 : 0));
+    llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, " fb=");
+    if (feedback_bias < 0) {
+        llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "-");
+        llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)(-feedback_bias));
+    } else {
+        llmk_ascii_append_u64(logline, (int)sizeof(logline), &lp, (UINT64)feedback_bias);
+    }
     llmk_ascii_append_str(logline, (int)sizeof(logline), &lp, "\r\n");
     logline[lp] = 0;
 
@@ -12169,6 +13694,63 @@ static void llmk_oo_print_ooconsult_tail_best_effort(int max_lines) {
     if (EFI_ERROR(uefi_call_wrapper(BS->AllocatePool, 3, EfiBootServicesData, out_len + 1, (void **)&out)) || !out) {
         uefi_call_wrapper(BS->FreePool, 1, buf);
         Print(L"[oo_log] (OOM printing tail)\r\n");
+        return;
+    }
+
+    CopyMem(out, cbuf + start, out_len);
+    out[out_len] = 0;
+
+    Print(L"%a", out);
+
+    uefi_call_wrapper(BS->FreePool, 1, out);
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+}
+
+static void llmk_oo_print_oooutcome_tail_best_effort(int max_lines) {
+    if (!g_root || max_lines <= 0) return;
+
+    LlmkOoState s;
+    if (llmk_oo_load_state_best_effort(&s)) {
+        UINT32 meta = llmk_oo_get_last_action_meta(s.flags);
+        UINT32 apply_boot_low8 = llmk_oo_get_last_apply_boot_low8(s.flags);
+        if (meta != 0 && apply_boot_low8 != 0) {
+            UINT32 action_id = (meta & 0x3Fu);
+            UINT32 apply_mode = (meta >> 6u) & 0x3u;
+            UINT32 want_boot_low8 = (UINT32)((apply_boot_low8 + 1u) & 0xFFu);
+            Print(L"[oo_outcome] pending.action=%a\r\n", llmk_oo_action_name(action_id));
+            Print(L"[oo_outcome] pending.apply_mode=%s\r\n", llmk_oo_mode_name(apply_mode));
+            Print(L"[oo_outcome] pending.next_boot_low8=%lu\r\n", (UINT64)want_boot_low8);
+        }
+    }
+
+    void *buf = NULL;
+    UINTN len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"OOOUTCOME.LOG", &buf, &len);
+    if (EFI_ERROR(st) || !buf || len == 0) {
+        if (buf) uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_outcome] (no OOOUTCOME.LOG)\r\n");
+        return;
+    }
+
+    char *cbuf = (char *)buf;
+    UINTN start = 0;
+    int lines = 0;
+    for (UINTN i = len; i > 0; i--) {
+        if (cbuf[i - 1] == '\n') {
+            lines++;
+            if (lines > max_lines) {
+                start = i;
+                break;
+            }
+        }
+    }
+    if (start >= len) start = 0;
+
+    UINTN out_len = len - start;
+    char *out = NULL;
+    if (EFI_ERROR(uefi_call_wrapper(BS->AllocatePool, 3, EfiBootServicesData, out_len + 1, (void **)&out)) || !out) {
+        uefi_call_wrapper(BS->FreePool, 1, buf);
+        Print(L"[oo_outcome] (OOM printing tail)\r\n");
         return;
     }
 
@@ -17306,7 +18888,7 @@ snap_autoload_done:
                 Print(L"  llm_consult=%d multi_actions=%d\r\n", consult_enabled, multi_enabled);
                 Print(L"  conf_gate=%d conf_threshold=%d\r\n", g_cfg_oo_conf_gate, g_cfg_oo_conf_threshold);
                 llmk_oo_print_persistence_status_best_effort();
-                Print(L"\r\nHint: /oo_list, /oo_show <id>, /oo_agenda <id>, /oo_save\r\n\r\n");
+                Print(L"\r\nHint: /oo_list, /oo_show <id>, /oo_agenda <id>, /oo_outcome, /oo_save\r\n\r\n");
                 llmk_oo_journal_cmd_best_effort("oo_status");
                 continue;
             } else if (my_strncmp(prompt, "/oo_kill", 8) == 0) {
@@ -18103,10 +19685,34 @@ snap_autoload_done:
                     continue;
                 }
 
+                Print(L"\r\n[oo_log] latest summary:\r\n");
+                llmk_oo_print_last_consult_status_best_effort();
                 Print(L"\r\n[oo_log] OOCONSULT.LOG tail:\r\n");
                 llmk_oo_print_ooconsult_tail_best_effort(10);
                 Print(L"\r\n");
                 llmk_oo_journal_cmd_best_effort("oo_log");
+                continue;
+            } else if (my_strncmp(prompt, "/oo_explain", 11) == 0) {
+                if (!g_cfg_oo_enable) {
+                    Print(L"\r\nERROR: OO is not enabled (oo_enable=0)\r\n\r\n");
+                    continue;
+                }
+
+                int verbose = 0;
+                int boot_compare = 0;
+                const char *p = prompt + 11;
+                while (*p == ' ' || *p == '\t') p++;
+                if (my_strncmp(p, "verbose", 7) == 0 && (p[7] == 0 || p[7] == ' ' || p[7] == '\t')) verbose = 1;
+                else if (my_strncmp(p, "boot", 4) == 0 && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) boot_compare = 1;
+                if (boot_compare) {
+                    Print(L"\r\n[oo_explain] boot comparison:\r\n");
+                    llmk_oo_explain_boot_best_effort();
+                } else {
+                    Print(L"\r\n[oo_explain] latest consult:\r\n");
+                    llmk_oo_explain_last_consult_best_effort(verbose);
+                }
+                Print(L"\r\n");
+                llmk_oo_journal_cmd_best_effort("oo_explain");
                 continue;
             } else if (my_strncmp(prompt, "/oo_jour", 8) == 0 || my_strncmp(prompt, "/oo_journal", 11) == 0) {
                 if (!g_cfg_oo_enable) {
@@ -18118,6 +19724,17 @@ snap_autoload_done:
                 llmk_oo_print_oojour_tail_best_effort(10);
                 Print(L"\r\n");
                 llmk_oo_journal_cmd_best_effort("oo_jour");
+                continue;
+            } else if (my_strncmp(prompt, "/oo_outcome", 11) == 0) {
+                if (!g_cfg_oo_enable) {
+                    Print(L"\r\nERROR: OO is not enabled (oo_enable=0)\r\n\r\n");
+                    continue;
+                }
+
+                Print(L"\r\n[oo_outcome] OOOUTCOME.LOG tail:\r\n");
+                llmk_oo_print_oooutcome_tail_best_effort(10);
+                Print(L"\r\n");
+                llmk_oo_journal_cmd_best_effort("oo_outcome");
                 continue;
             } else if (my_strncmp(prompt, "/autorun_stop", 13) == 0) {
                 if (g_autorun_active) {
