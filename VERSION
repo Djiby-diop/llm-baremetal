@@ -1,0 +1,10 @@
+OO_VERSION=0.2.0
+OO_CODENAME=NeuralFS-Organic
+OO_BUILD_DATE=2025
+
+# Roadmap
+# v0.1 — Stable UEFI kernel + D+ policy + Zones de Conscience
+# v0.2 — D+ Organic + NeuralFS + REPL + Genome + Conscience (CURRENT)
+# v0.3 — Multi-node OO bus + genome inheritance + distributed consensus
+# v0.4 — FPGA hardware acceleration (F0→F5)
+# v1.0 — Self-evolving distributed Operating Organism

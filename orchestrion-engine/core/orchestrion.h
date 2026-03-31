@@ -56,6 +56,11 @@ void orchestrion_pipeline_resume(OrchestrionEngine *e);
 void orchestrion_pipeline_stop(OrchestrionEngine *e);
 const char *orchestrion_pipeline_next_step(OrchestrionEngine *e);
 
+/* Module lifecycle hooks */
+void orchestrion_tick(OrchestrionEngine *e);
+void orchestrion_on_boot_done(OrchestrionEngine *e);
+void orchestrion_on_degraded(OrchestrionEngine *e);
+
 #ifdef __cplusplus
 }
 #endif

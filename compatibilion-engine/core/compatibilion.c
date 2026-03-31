@@ -74,6 +74,18 @@ static uint64_t compat_xgetbv(uint32_t xcr) {
 #endif
     return ((uint64_t)hi << 32) | lo;
 }
+
+/* SAFE: read CR4 to verify OSXSAVE bit (18) before executing xgetbv.
+ * On QEMU/TCG, CPUID reports OSXSAVE=1 but CR4.OSXSAVE may be 0 → xgetbv #UD. */
+static int compat_cr4_osxsave_set(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    uint64_t cr4;
+    __asm__ __volatile__("mov %%cr4, %0" : "=r"(cr4));
+    return (cr4 & (1ull << 18)) != 0;
+#else
+    return 0;
+#endif
+}
 #endif
 
 void compatibilion_probe_cpu(CompatibilionEngine *e) {
@@ -104,7 +116,9 @@ void compatibilion_probe_cpu(CompatibilionEngine *e) {
     int has_osxsave = (ecx & (1u << 27)) != 0;
     int has_avx_bit = (ecx & (1u << 28)) != 0;
     int avx_ok = 0;
-    if (has_osxsave && has_avx_bit) {
+    /* SAFE: verify CR4.OSXSAVE before xgetbv — QEMU/TCG reports OSXSAVE=1 in CPUID
+     * but CR4.OSXSAVE may still be 0, causing xgetbv to raise #UD. */
+    if (has_osxsave && has_avx_bit && compat_cr4_osxsave_set()) {
         uint64_t xcr0 = compat_xgetbv(0);
         if ((xcr0 & 0x6) == 0x6) {
             e->caps.cpu_flags |= COMPAT_CPU_AVX;

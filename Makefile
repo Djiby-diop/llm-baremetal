@@ -25,7 +25,8 @@ endif
 # Canonical GNU-EFI build flags (known-good for this project)
 CFLAGS = -ffreestanding -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
 		 -I/usr/include/efi -I/usr/include/efi/$(ARCH) -DEFI_FUNCTION_WRAPPER \
-		 -O2 -msse2
+		 -Icore -Iengine/llama2 -Iengine/gguf -Iengine/djiblas -Iengine/ssm \
+		 -O2 -msse2 -DDJIBLAS_DISABLE_CPUID=1
 
 # Embed a build identifier for /version output (UTC). Override: make BUILD_ID=...
 # NOTE: $(shell ...) in a recursively-expanded variable would re-run on each expansion,
@@ -39,9 +40,29 @@ LDFLAGS = -nostdlib -znocombreloc -T $(EFI_LDS) \
 
 LIBS = -lefi -lgnuefi
 
-# Stable build: chat REPL (single-file + kernel primitives)
+# ============================================================
+# OO Subsystem archives (P1 split build)
+#
+# Built from worktree: llm-baremetal.worktrees/copilot-worktree-*
+#
+# P1 SPLIT: liboo-kernel.a now contains efi_phases.c (unity-build
+# wrapper that includes llama2_efi_final.c with LLM_SPLIT_EFI_MAIN,
+# extracting phase1-6 + llmk_repl_run) and efi_entry.c (new efi_main).
+# We now include liboo-kernel.a and drop llama2_repl.o from the link.
+# ============================================================
+OO_WORKTREE ?= ../llm-baremetal.worktrees/copilot-worktree-2026-03-21T23-04-08
+OO_BUILD_DIR = $(OO_WORKTREE)/build/oo
+OO_LINK_ARCHIVES = \
+	$(OO_BUILD_DIR)/liboo-kernel.a \
+	$(OO_BUILD_DIR)/liboo-warden.a \
+	$(OO_BUILD_DIR)/liboo-engine.a \
+	$(OO_BUILD_DIR)/liboo-modules.a \
+	$(OO_BUILD_DIR)/liboo-bus.a \
+	$(OO_BUILD_DIR)/librust_guard.a
+
+# P1 split build: no god-file object (efi_phases.c inside liboo-kernel.a)
 TARGET = llama2.efi
-REPL_SRC = llama2_efi_final.c
+REPL_SRC = engine/llama2/llama2_efi_final.c
 REPL_OBJ = llama2_repl.o
 
 # Phase 5 (Zig): metabolism profile selection
@@ -50,32 +71,32 @@ ZIG ?= zig
 METABION_PROFILE_HDR = metabion_profile.h
 METABION_PROFILE_DEFAULT = metabion_profile_default.h
 
-DJIBION_OBJ = djibion-engine/core/djibion.o
-DIOPION_OBJ = diopion-engine/core/diopion.o
-DIAGNOSTION_OBJ = diagnostion-engine/core/diagnostion.o
-MEMORION_OBJ = memorion-engine/core/memorion.o
-ORCHESTRION_OBJ = orchestrion-engine/core/orchestrion.o
-CALIBRION_OBJ = calibrion-engine/core/calibrion.o
-COMPATIBILION_OBJ = compatibilion-engine/core/compatibilion.o
-EVOLVION_OBJ = evolvion-engine/core/evolvion.o
-SYNAPTION_OBJ = synaption-engine/core/synaption.o
-CONSCIENCE_OBJ = conscience-engine/core/conscience.o
-NEURALFS_OBJ = neuralfs-engine/core/neuralfs.o
-GHOST_OBJ = ghost-engine/core/ghost.o
-IMMUNION_OBJ = immunion-engine/core/immunion.o
-DREAMION_OBJ = dreamion-engine/core/dreamion.o
-SYMBION_OBJ = symbion-engine/core/symbion.o
-COLLECTIVION_OBJ = collectivion-engine/core/collectivion.o
-METABION_OBJ = metabion-engine/core/metabion.o
-CELLION_OBJ = cellion-engine/core/cellion.o
-MORPHION_OBJ = morphion-engine/core/morphion.o
-PHEROMION_OBJ = pheromion-engine/core/pheromion.o
-REPL_OBJS = $(REPL_OBJ) $(DJIBION_OBJ) $(DIOPION_OBJ) $(DIAGNOSTION_OBJ) $(MEMORION_OBJ) $(ORCHESTRION_OBJ) $(CALIBRION_OBJ) $(COMPATIBILION_OBJ) $(EVOLVION_OBJ) $(SYNAPTION_OBJ) $(CONSCIENCE_OBJ) $(NEURALFS_OBJ) $(GHOST_OBJ) $(IMMUNION_OBJ) $(DREAMION_OBJ) $(SYMBION_OBJ) $(COLLECTIVION_OBJ) $(METABION_OBJ) $(CELLION_OBJ) $(MORPHION_OBJ) $(PHEROMION_OBJ) llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o
+# Engine cores NOT in any OO archive (missing → undefined symbols → runtime crash).
+# Engines IN archives (OO_ENGINE_SRCS or OO_MODULES_SRCS) are excluded to avoid duplicates:
+#   IN OO_ENGINE_SRCS:  evolvion, ghost, dreamion, morphion
+#   IN OO_MODULES_SRCS: neuralfs, collectivion, cellion
+REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
+	oo-modules/djibion-engine/core/djibion.o \
+	oo-modules/diopion-engine/core/diopion.o \
+	oo-modules/diagnostion-engine/core/diagnostion.o \
+	oo-modules/memorion-engine/core/memorion.o \
+	oo-modules/orchestrion-engine/core/orchestrion.o \
+	oo-modules/calibrion-engine/core/calibrion.o \
+	oo-modules/compatibilion-engine/core/compatibilion.o \
+	oo-modules/synaption-engine/core/synaption.o \
+	oo-modules/conscience-engine/core/conscience.o \
+	oo-modules/immunion-engine/core/immunion.o \
+	oo-modules/symbion-engine/core/symbion.o \
+	oo-modules/metabion-engine/core/metabion.o \
+	oo-modules/pheromion-engine/core/pheromion.o
 REPL_SO  = llama2_repl.so
 
 all: repl
 
-.PHONY: all repl clean rebuild genome test
+.PHONY: all repl clean rebuild genome test oo-subsystems
+
+oo-subsystems:
+	$(MAKE) -C $(OO_WORKTREE) -f tools/build/Makefile.oo-build OO_ROOT=. SRC_ROOT=../../llm-baremetal all
 
 repl: $(TARGET)
 	@echo "OK: Build complete: $(TARGET)"
@@ -101,105 +122,108 @@ $(METABION_PROFILE_HDR): $(METABION_PROFILE_DEFAULT)
 	fi
 
 # Rebuild when key headers change (Make doesn't auto-detect includes).
-$(REPL_OBJ): $(REPL_SRC) djiblas.h interface.h $(METABION_PROFILE_HDR)
+$(REPL_OBJ): $(REPL_SRC) engine/djiblas/djiblas.h engine/ssm/interface.h $(METABION_PROFILE_HDR)
 	$(CC) $(CFLAGS) -c $(REPL_SRC) -o $(REPL_OBJ)
 
-llmk_zones.o: llmk_zones.c llmk_zones.h
-	$(CC) $(CFLAGS) -c llmk_zones.c -o llmk_zones.o
+llmk_zones.o: core/llmk_zones.c core/llmk_zones.h core/llmk_log.h
+	$(CC) $(CFLAGS) -c core/llmk_zones.c -o llmk_zones.o
 
-llmk_log.o: llmk_log.c llmk_log.h llmk_zones.h
-	$(CC) $(CFLAGS) -c llmk_log.c -o llmk_log.o
+llmk_log.o: core/llmk_log.c core/llmk_log.h core/llmk_zones.h
+	$(CC) $(CFLAGS) -c core/llmk_log.c -o llmk_log.o
 
-llmk_sentinel.o: llmk_sentinel.c llmk_sentinel.h llmk_zones.h llmk_log.h
-	$(CC) $(CFLAGS) -c llmk_sentinel.c -o llmk_sentinel.o
+llmk_sentinel.o: core/llmk_sentinel.c core/llmk_sentinel.h core/llmk_zones.h core/llmk_log.h
+	$(CC) $(CFLAGS) -c core/llmk_sentinel.c -o llmk_sentinel.o
 
-llmk_oo.o: llmk_oo.c llmk_oo.h
-	$(CC) $(CFLAGS) -c llmk_oo.c -o llmk_oo.o
+llmk_oo.o: core/llmk_oo.c core/llmk_oo.h
+	$(CC) $(CFLAGS) -c core/llmk_oo.c -o llmk_oo.o
 
-gguf_loader.o: gguf_loader.c gguf_loader.h
-	$(CC) $(CFLAGS) -c gguf_loader.c -o gguf_loader.o
+gguf_loader.o: engine/gguf/gguf_loader.c engine/gguf/gguf_loader.h
+	$(CC) $(CFLAGS) -c engine/gguf/gguf_loader.c -o gguf_loader.o
 
-gguf_infer.o: gguf_infer.c gguf_infer.h
-	$(CC) $(CFLAGS) -c gguf_infer.c -o gguf_infer.o
+gguf_infer.o: engine/gguf/gguf_infer.c engine/gguf/gguf_infer.h
+	$(CC) $(CFLAGS) -c engine/gguf/gguf_infer.c -o gguf_infer.o
 
-djibion-engine/core/djibion.o: djibion-engine/core/djibion.c djibion-engine/core/djibion.h
-	$(CC) $(CFLAGS) -c djibion-engine/core/djibion.c -o djibion-engine/core/djibion.o
+oo-modules/djibion-engine/core/djibion.o: oo-modules/djibion-engine/core/djibion.c oo-modules/djibion-engine/core/djibion.h
+	$(CC) $(CFLAGS) -c oo-modules/djibion-engine/core/djibion.c -o oo-modules/djibion-engine/core/djibion.o
 
-diopion-engine/core/diopion.o: diopion-engine/core/diopion.c diopion-engine/core/diopion.h
-	$(CC) $(CFLAGS) -c diopion-engine/core/diopion.c -o diopion-engine/core/diopion.o
+oo-modules/diopion-engine/core/diopion.o: oo-modules/diopion-engine/core/diopion.c oo-modules/diopion-engine/core/diopion.h
+	$(CC) $(CFLAGS) -c oo-modules/diopion-engine/core/diopion.c -o oo-modules/diopion-engine/core/diopion.o
 
-diagnostion-engine/core/diagnostion.o: diagnostion-engine/core/diagnostion.c diagnostion-engine/core/diagnostion.h
-	$(CC) $(CFLAGS) -c diagnostion-engine/core/diagnostion.c -o diagnostion-engine/core/diagnostion.o
+oo-modules/diagnostion-engine/core/diagnostion.o: oo-modules/diagnostion-engine/core/diagnostion.c oo-modules/diagnostion-engine/core/diagnostion.h
+	$(CC) $(CFLAGS) -c oo-modules/diagnostion-engine/core/diagnostion.c -o oo-modules/diagnostion-engine/core/diagnostion.o
 
-memorion-engine/core/memorion.o: memorion-engine/core/memorion.c memorion-engine/core/memorion.h
-	$(CC) $(CFLAGS) -c memorion-engine/core/memorion.c -o memorion-engine/core/memorion.o
+oo-modules/memorion-engine/core/memorion.o: oo-modules/memorion-engine/core/memorion.c oo-modules/memorion-engine/core/memorion.h
+	$(CC) $(CFLAGS) -c oo-modules/memorion-engine/core/memorion.c -o oo-modules/memorion-engine/core/memorion.o
 
-orchestrion-engine/core/orchestrion.o: orchestrion-engine/core/orchestrion.c orchestrion-engine/core/orchestrion.h
-	$(CC) $(CFLAGS) -c orchestrion-engine/core/orchestrion.c -o orchestrion-engine/core/orchestrion.o
+oo-modules/orchestrion-engine/core/orchestrion.o: oo-modules/orchestrion-engine/core/orchestrion.c oo-modules/orchestrion-engine/core/orchestrion.h
+	$(CC) $(CFLAGS) -c oo-modules/orchestrion-engine/core/orchestrion.c -o oo-modules/orchestrion-engine/core/orchestrion.o
 
-calibrion-engine/core/calibrion.o: calibrion-engine/core/calibrion.c calibrion-engine/core/calibrion.h
-	$(CC) $(CFLAGS) -c calibrion-engine/core/calibrion.c -o calibrion-engine/core/calibrion.o
+oo-modules/calibrion-engine/core/calibrion.o: oo-modules/calibrion-engine/core/calibrion.c oo-modules/calibrion-engine/core/calibrion.h
+	$(CC) $(CFLAGS) -c oo-modules/calibrion-engine/core/calibrion.c -o oo-modules/calibrion-engine/core/calibrion.o
 
-compatibilion-engine/core/compatibilion.o: compatibilion-engine/core/compatibilion.c compatibilion-engine/core/compatibilion.h
-	$(CC) $(CFLAGS) -c compatibilion-engine/core/compatibilion.c -o compatibilion-engine/core/compatibilion.o
+oo-modules/compatibilion-engine/core/compatibilion.o: oo-modules/compatibilion-engine/core/compatibilion.c oo-modules/compatibilion-engine/core/compatibilion.h
+	$(CC) $(CFLAGS) -c oo-modules/compatibilion-engine/core/compatibilion.c -o oo-modules/compatibilion-engine/core/compatibilion.o
 
-evolvion-engine/core/evolvion.o: evolvion-engine/core/evolvion.c evolvion-engine/core/evolvion.h
-	$(CC) $(CFLAGS) -c evolvion-engine/core/evolvion.c -o evolvion-engine/core/evolvion.o
+oo-modules/evolvion-engine/core/evolvion.o: oo-modules/evolvion-engine/core/evolvion.c oo-modules/evolvion-engine/core/evolvion.h
+	$(CC) $(CFLAGS) -c oo-modules/evolvion-engine/core/evolvion.c -o oo-modules/evolvion-engine/core/evolvion.o
 
-synaption-engine/core/synaption.o: synaption-engine/core/synaption.c synaption-engine/core/synaption.h
-	$(CC) $(CFLAGS) -c synaption-engine/core/synaption.c -o synaption-engine/core/synaption.o
+oo-modules/synaption-engine/core/synaption.o: oo-modules/synaption-engine/core/synaption.c oo-modules/synaption-engine/core/synaption.h
+	$(CC) $(CFLAGS) -c oo-modules/synaption-engine/core/synaption.c -o oo-modules/synaption-engine/core/synaption.o
 
-conscience-engine/core/conscience.o: conscience-engine/core/conscience.c conscience-engine/core/conscience.h
-	$(CC) $(CFLAGS) -c conscience-engine/core/conscience.c -o conscience-engine/core/conscience.o
+oo-modules/conscience-engine/core/conscience.o: oo-modules/conscience-engine/core/conscience.c oo-modules/conscience-engine/core/conscience.h
+	$(CC) $(CFLAGS) -c oo-modules/conscience-engine/core/conscience.c -o oo-modules/conscience-engine/core/conscience.o
 
-neuralfs-engine/core/neuralfs.o: neuralfs-engine/core/neuralfs.c neuralfs-engine/core/neuralfs.h
-	$(CC) $(CFLAGS) -c neuralfs-engine/core/neuralfs.c -o neuralfs-engine/core/neuralfs.o
+oo-modules/neuralfs-engine/core/neuralfs.o: oo-modules/neuralfs-engine/core/neuralfs.c oo-modules/neuralfs-engine/core/neuralfs.h
+	$(CC) $(CFLAGS) -c oo-modules/neuralfs-engine/core/neuralfs.c -o oo-modules/neuralfs-engine/core/neuralfs.o
 
-ghost-engine/core/ghost.o: ghost-engine/core/ghost.c ghost-engine/core/ghost.h
-	$(CC) $(CFLAGS) -c ghost-engine/core/ghost.c -o ghost-engine/core/ghost.o
+oo-modules/ghost-engine/core/ghost.o: oo-modules/ghost-engine/core/ghost.c oo-modules/ghost-engine/core/ghost.h
+	$(CC) $(CFLAGS) -c oo-modules/ghost-engine/core/ghost.c -o oo-modules/ghost-engine/core/ghost.o
 
-immunion-engine/core/immunion.o: immunion-engine/core/immunion.c immunion-engine/core/immunion.h
-	$(CC) $(CFLAGS) -c immunion-engine/core/immunion.c -o immunion-engine/core/immunion.o
+oo-modules/immunion-engine/core/immunion.o: oo-modules/immunion-engine/core/immunion.c oo-modules/immunion-engine/core/immunion.h
+	$(CC) $(CFLAGS) -c oo-modules/immunion-engine/core/immunion.c -o oo-modules/immunion-engine/core/immunion.o
 
-dreamion-engine/core/dreamion.o: dreamion-engine/core/dreamion.c dreamion-engine/core/dreamion.h
-	$(CC) $(CFLAGS) -c dreamion-engine/core/dreamion.c -o dreamion-engine/core/dreamion.o
+oo-modules/dreamion-engine/core/dreamion.o: oo-modules/dreamion-engine/core/dreamion.c oo-modules/dreamion-engine/core/dreamion.h
+	$(CC) $(CFLAGS) -c oo-modules/dreamion-engine/core/dreamion.c -o oo-modules/dreamion-engine/core/dreamion.o
 
-symbion-engine/core/symbion.o: symbion-engine/core/symbion.c symbion-engine/core/symbion.h
-	$(CC) $(CFLAGS) -c symbion-engine/core/symbion.c -o symbion-engine/core/symbion.o
+oo-modules/symbion-engine/core/symbion.o: oo-modules/symbion-engine/core/symbion.c oo-modules/symbion-engine/core/symbion.h
+	$(CC) $(CFLAGS) -c oo-modules/symbion-engine/core/symbion.c -o oo-modules/symbion-engine/core/symbion.o
 
-collectivion-engine/core/collectivion.o: collectivion-engine/core/collectivion.c collectivion-engine/core/collectivion.h
-	$(CC) $(CFLAGS) -c collectivion-engine/core/collectivion.c -o collectivion-engine/core/collectivion.o
+oo-modules/collectivion-engine/core/collectivion.o: oo-modules/collectivion-engine/core/collectivion.c oo-modules/collectivion-engine/core/collectivion.h
+	$(CC) $(CFLAGS) -c oo-modules/collectivion-engine/core/collectivion.c -o oo-modules/collectivion-engine/core/collectivion.o
 
-metabion-engine/core/metabion.o: metabion-engine/core/metabion.c metabion-engine/core/metabion.h
-	$(CC) $(CFLAGS) -c metabion-engine/core/metabion.c -o metabion-engine/core/metabion.o
+oo-modules/metabion-engine/core/metabion.o: oo-modules/metabion-engine/core/metabion.c oo-modules/metabion-engine/core/metabion.h
+	$(CC) $(CFLAGS) -c oo-modules/metabion-engine/core/metabion.c -o oo-modules/metabion-engine/core/metabion.o
 
-cellion-engine/core/cellion.o: cellion-engine/core/cellion.c cellion-engine/core/cellion.h
-	$(CC) $(CFLAGS) -c cellion-engine/core/cellion.c -o cellion-engine/core/cellion.o
+oo-modules/cellion-engine/core/cellion.o: oo-modules/cellion-engine/core/cellion.c oo-modules/cellion-engine/core/cellion.h
+	$(CC) $(CFLAGS) -c oo-modules/cellion-engine/core/cellion.c -o oo-modules/cellion-engine/core/cellion.o
 
-morphion-engine/core/morphion.o: morphion-engine/core/morphion.c morphion-engine/core/morphion.h
-	$(CC) $(CFLAGS) -c morphion-engine/core/morphion.c -o morphion-engine/core/morphion.o
+oo-modules/morphion-engine/core/morphion.o: oo-modules/morphion-engine/core/morphion.c oo-modules/morphion-engine/core/morphion.h
+	$(CC) $(CFLAGS) -c oo-modules/morphion-engine/core/morphion.c -o oo-modules/morphion-engine/core/morphion.o
 
-pheromion-engine/core/pheromion.o: pheromion-engine/core/pheromion.c pheromion-engine/core/pheromion.h
-	$(CC) $(CFLAGS) -c pheromion-engine/core/pheromion.c -o pheromion-engine/core/pheromion.o
+oo-modules/pheromion-engine/core/pheromion.o: oo-modules/pheromion-engine/core/pheromion.c oo-modules/pheromion-engine/core/pheromion.h
+	$(CC) $(CFLAGS) -c oo-modules/pheromion-engine/core/pheromion.c -o oo-modules/pheromion-engine/core/pheromion.o
 
-$(REPL_SO): $(REPL_OBJS)
-	ld $(LDFLAGS) $(REPL_OBJS) -o $(REPL_SO) $(LIBS)
+$(REPL_SO): $(REPL_OBJS) | oo-subsystems
+	ld $(LDFLAGS) $(REPL_OBJS) \
+		--start-group $(OO_LINK_ARCHIVES) --end-group \
+		-o $(REPL_SO) $(LIBS)
 
 $(TARGET): $(REPL_SO)
 	objcopy -j .text -j .sdata -j .data -j .dynamic -j .dynsym \
 			-j .rel -j .rela -j .reloc --target=efi-app-$(ARCH) $(REPL_SO) $(TARGET)
 
-djiblas.o: djiblas.c djiblas.h
-	$(CC) $(CFLAGS) -c djiblas.c -o djiblas.o
+djiblas.o: engine/djiblas/djiblas.c engine/djiblas/djiblas.h
+	$(CC) $(CFLAGS) -c engine/djiblas/djiblas.c -o djiblas.o
 
-djiblas_avx2.o: djiblas_avx2.c djiblas.h
-	$(CC) $(CFLAGS) -mavx2 -mfma -c djiblas_avx2.c -o djiblas_avx2.o
+djiblas_avx2.o: engine/djiblas/djiblas_avx2.c engine/djiblas/djiblas.h
+	$(CC) $(CFLAGS) -mavx2 -mfma -mno-vzeroupper -c engine/djiblas/djiblas_avx2.c -o djiblas_avx2.o
 
-attention_avx2.o: attention_avx2.c
-	$(CC) $(CFLAGS) -mavx2 -mfma -c attention_avx2.c -o attention_avx2.o
+attention_avx2.o: engine/ssm/attention_avx2.c
+	$(CC) $(CFLAGS) -mavx2 -mfma -mno-vzeroupper -c engine/ssm/attention_avx2.c -o attention_avx2.o
 
 clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
+	rm -rf $(OO_BUILD_DIR)
 	@echo "OK: Clean complete"
 
 rebuild: clean all

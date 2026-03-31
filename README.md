@@ -1,6 +1,7 @@
 # llm-baremetal
 
 UEFI x86_64 bare-metal LLM chat REPL (GNU-EFI). Boots from USB.
+For the broader Operating Organism vision, see @OO_VISION.md.
 
 By Djiby Diop
 

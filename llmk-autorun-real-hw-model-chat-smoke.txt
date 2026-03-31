@@ -1,9 +1,0 @@
-# llmk autorun (real hardware model-backed chat smoke)
-# Expect: a model is already bundled into the boot image and selected by repl.cfg.
-
-/diag
-/models
-/cfg
-hi
-/diag_report
-exit

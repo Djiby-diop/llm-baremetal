@@ -121,3 +121,22 @@ const char *orchestrion_pipeline_next_step(OrchestrionEngine *e) {
     e->steps_executed++;
     return step;
 }
+
+/* Module lifecycle hooks */
+void orchestrion_tick(OrchestrionEngine *e) {
+    if (!e) return;
+    if (e->mode == ORCHESTRION_MODE_OFF) return;
+    /* stub: advance pipeline one step per tick if running */
+}
+
+void orchestrion_on_boot_done(OrchestrionEngine *e) {
+    if (!e) return;
+    e->mode = ORCHESTRION_MODE_OBSERVE;
+}
+
+void orchestrion_on_degraded(OrchestrionEngine *e) {
+    if (!e) return;
+    e->mode = ORCHESTRION_MODE_OFF;
+    e->errors++;
+}
+
