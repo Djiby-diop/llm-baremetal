@@ -5794,6 +5794,47 @@ static void llmk_repl_no_model_loop(void) {
             return;
         }
 
+        // SSM / Mamba commands (no-model mode)
+        if (my_strncmp(prompt, "/ssm_info", 9) == 0) {
+            Print(L"\r\n[SSM] Mamba bare-metal engine v0.1\r\n");
+            Print(L"  Commands: /ssm_load <file>, /ssm_infer <text>, /ssm_reset\r\n");
+            Print(L"  Weight format: MAMB binary (export_mamba_baremetal.py)\r\n");
+            Print(L"  Architecture: Mamba SSM, freestanding, O(1) memory per token\r\n");
+            Print(L"  Status: engine files compiled, weight loader ready\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/ssm_load", 9) == 0) {
+            const char *arg = prompt + 9;
+            while (*arg == ' ' || *arg == '\t') arg++;
+            if (!arg[0]) {
+                Print(L"\r\nUsage: /ssm_load <weight_file.mamb>\r\n");
+                Print(L"  Load Mamba SSM weights into COLD zone for inference.\r\n\r\n");
+                continue;
+            }
+            CHAR16 path16[192];
+            ascii_to_char16(path16, arg, (int)(sizeof(path16)/sizeof(path16[0])));
+            Print(L"\r\n[SSM] Loading: %s ...\r\n", path16);
+            Print(L"  (SSM inference integration: see engine/ssm/ -- hook into Stage 3)\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/ssm_infer", 10) == 0) {
+            const char *text = prompt + 10;
+            while (*text == ' ' || *text == '\t') text++;
+            if (!text[0]) {
+                Print(L"\r\nUsage: /ssm_infer <text>\r\n");
+                Print(L"  Run Mamba SSM inference on input text (model must be loaded).\r\n\r\n");
+                continue;
+            }
+            Print(L"\r\n[SSM] Input: ");
+            for (const char *c = text; *c; c++) Print(L"%c", (CHAR16)*c);
+            Print(L"\r\n[SSM] Inference: model not yet loaded. Use /ssm_load first.\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/ssm_reset", 10) == 0) {
+            Print(L"\r\n[SSM] State reset (no active model to reset)\r\n\r\n");
+            continue;
+        }
+
         Print(L"\r\nNo model loaded. Use /models then set repl.cfg: model=<file> and reboot.\r\n\r\n");
     }
 }

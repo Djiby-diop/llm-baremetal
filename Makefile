@@ -76,6 +76,7 @@ METABION_PROFILE_DEFAULT = metabion_profile_default.h
 #   IN OO_ENGINE_SRCS:  evolvion, ghost, dreamion, morphion
 #   IN OO_MODULES_SRCS: neuralfs, collectivion, cellion
 REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
+	ssm_infer.o mamba_block.o mamba_weights.o bpe_tokenizer.o \
 	oo-modules/djibion-engine/core/djibion.o \
 	oo-modules/diopion-engine/core/diopion.o \
 	oo-modules/diagnostion-engine/core/diagnostion.o \
@@ -220,6 +221,18 @@ djiblas_avx2.o: engine/djiblas/djiblas_avx2.c engine/djiblas/djiblas.h
 
 attention_avx2.o: engine/ssm/attention_avx2.c
 	$(CC) $(CFLAGS) -mavx2 -mfma -mno-vzeroupper -c engine/ssm/attention_avx2.c -o attention_avx2.o
+
+ssm_infer.o: engine/ssm/ssm_infer.c engine/ssm/ssm_infer.h engine/ssm/ssm_types.h
+	$(CC) $(CFLAGS) -c engine/ssm/ssm_infer.c -o ssm_infer.o
+
+mamba_block.o: engine/ssm/mamba_block.c engine/ssm/mamba_block.h engine/ssm/ssm_types.h
+	$(CC) $(CFLAGS) -c engine/ssm/mamba_block.c -o mamba_block.o
+
+mamba_weights.o: engine/ssm/mamba_weights.c engine/ssm/mamba_weights.h engine/ssm/ssm_types.h
+	$(CC) $(CFLAGS) -c engine/ssm/mamba_weights.c -o mamba_weights.o
+
+bpe_tokenizer.o: engine/ssm/bpe_tokenizer.c engine/ssm/bpe_tokenizer.h
+	$(CC) $(CFLAGS) -c engine/ssm/bpe_tokenizer.c -o bpe_tokenizer.o
 
 clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
