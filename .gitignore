@@ -60,11 +60,15 @@ repl.cfg
 # Generated build-time defaults (created by Makefile when Zig is available)
 metabion_profile.h
 
-# OS-G (Operating System Genesis) - generated artifacts (keep sources trackable)
-OS-G (Operating System Genesis)/target/
-OS-G (Operating System Genesis)/ovmf-vars-osg.fd
-OS-G (Operating System Genesis)/osg-qemu-serial-*.txt
-OS-G (Operating System Genesis)/osg-qemu-stderr-*.txt
+# OS-G (Operating System Genesis) - old prototype, not part of OO core
+OS-G (Operating System Genesis)/
+
+# Olympe - old experiment, not part of OO core
+olympe/
+
+# Legacy scripts (real-hw validation, not in CI)
+scripts/collect-real-hw-oo-artifacts.ps1
+scripts/validate-real-hw-oo-artifacts.ps1
 
 # Local archived artifacts
 artifacts/
