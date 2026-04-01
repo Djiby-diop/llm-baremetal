@@ -1,7 +1,9 @@
 # llm-baremetal
 
-UEFI x86_64 bare-metal LLM chat REPL (GNU-EFI). Boots from USB.
-For the broader Operating Organism vision, see @OO_VISION.md.
+> **Couche 1 — Cognitive Core** | [oo-system architecture](https://github.com/Djiby-diop/oo-system)
+
+UEFI x86_64 bare-metal LLM + Mamba SSM inference engine. Boots from USB. No OS.
+Part of the [Operating Organism](https://github.com/Djiby-diop/oo-system) ecosystem.
 
 By Djiby Diop
 
