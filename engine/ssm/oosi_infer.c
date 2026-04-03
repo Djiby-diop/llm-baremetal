@@ -180,7 +180,8 @@ SsmStatus oosi_gen_ctx_init(
     uint32_t seed,
     int max_tokens)
 {
-    if (!ctx || !oosi || !mamb) return SSM_ERR_NOMEM;
+    if (!ctx || !oosi) return SSM_ERR_NOMEM;
+    // mamb may be NULL in OOSI-only mode (int8 projections only, no full MAMB binary)
     if (!x_buf || !x_out_buf || !scratch || !logits) return SSM_ERR_NOMEM;
     if (!halt_buf || !halt_h1 || !halt_h2) return SSM_ERR_NOMEM;
 
@@ -212,12 +213,27 @@ SsmStatus oosi_gen_ctx_init(
 // oosi_gen_ctx_reset — zero recurrent state
 // ============================================================
 void oosi_gen_ctx_reset(OosiGenCtx *ctx) {
-    int n = ctx->mamb->n_layers_actual;
-    for (int l = 0; l < n && l < SSM_MAX_LAYERS; l++) {
+    // Use OOSI header for layer count when MAMB is not loaded
+    int n = ctx->mamb ? ctx->mamb->n_layers_actual : (int)ctx->oosi->header.n_layer;
+    if (n > SSM_MAX_LAYERS) n = SSM_MAX_LAYERS;
+
+    int d_inner = ctx->mamb ? ctx->mamb->layers[0].d_inner : (int)(ctx->oosi->header.d_model * ctx->oosi->header.expand);
+    int d_state = ctx->mamb ? ctx->mamb->layers[0].d_state  : (int)ctx->oosi->header.d_state;
+    int d_conv  = ctx->mamb ? ctx->mamb->layers[0].d_conv   : (int)ctx->oosi->header.d_conv;
+
+    for (int l = 0; l < n; l++) {
         MambaLayerState *s = &ctx->state.layers[l];
-        const MambaLayerWeights *w = &ctx->mamb->layers[l];
-        int nh = w->d_inner * w->d_state;
-        int nc = w->d_inner * w->d_conv;
+        int nh, nc;
+        if (ctx->mamb) {
+            const MambaLayerWeights *w = &ctx->mamb->layers[l];
+            nh = w->d_inner * w->d_state;
+            nc = w->d_inner * w->d_conv;
+        } else {
+            nh = d_inner * d_state;
+            nc = d_inner * d_conv;
+        }
+        if (nh > SSM_MAX_D_INNER * 16) nh = SSM_MAX_D_INNER * 16;
+        if (nc > SSM_MAX_D_INNER * 4)  nc = SSM_MAX_D_INNER * 4;
         for (int i = 0; i < nh; i++) s->h[i] = 0.0f;
         for (int i = 0; i < nc; i++) s->conv_buf[i] = 0.0f;
         s->conv_pos = 0;
