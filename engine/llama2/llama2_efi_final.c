@@ -5633,8 +5633,6 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
 
 static void llmk_repl_no_model_loop(void) {
     // Minimal repl.cfg parsing for autorun in no-model mode.
-    // (We can't rely on the main cfg loader here because this loop is used
-    // in early failure paths too.)
     int autorun_autostart = 0;
     int autorun_shutdown_when_done = 0;
     CHAR16 autorun_file[96];
@@ -5690,7 +5688,7 @@ static void llmk_repl_no_model_loop(void) {
                         autorun_autostart = (val[0] == '1' || val[0] == 't' || val[0] == 'T' || val[0] == 'y' || val[0] == 'Y');
                     } else if (my_strncmp(key, "autorun_shutdown_when_done", 26) == 0 && key[26] == 0) {
                         autorun_shutdown_when_done = (val[0] == '1' || val[0] == 't' || val[0] == 'T' || val[0] == 'y' || val[0] == 'Y');
-                    } else if (my_strncmp(key, "autorun_file", 11) == 0 && key[11] == 0) {
+                    } else if (my_strncmp(key, "autorun_file", 12) == 0 && key[12] == 0) {
                         if (val[0]) {
                             ascii_to_char16(autorun_file, val, (int)(sizeof(autorun_file) / sizeof(autorun_file[0])));
                         }
@@ -6263,12 +6261,15 @@ static void llmk_repl_no_model_loop(void) {
             // ── Get file size ─────────────────────────────────────────────
             EFI_FILE_INFO *finfo = NULL;
             UINTN finfo_sz = SIZE_OF_EFI_FILE_INFO + 512;
-            finfo = (EFI_FILE_INFO *)llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH,
-                                                       finfo_sz, 8);
-            if (!finfo) {
-                Print(L"[OOSI] ERROR: alloc for file info failed\r\n\r\n");
-                uefi_call_wrapper(oosi_f->Close, 1, oosi_f);
-                continue;
+            // Use AllocatePool (not arena) — finfo is small and transient.
+            {
+                EFI_STATUS fpst = uefi_call_wrapper(BS->AllocatePool, 3,
+                                                    EfiLoaderData, finfo_sz, (void **)&finfo);
+                if (EFI_ERROR(fpst) || !finfo) {
+                    Print(L"[OOSI] ERROR: alloc for file info failed (%r)\r\n\r\n", fpst);
+                    uefi_call_wrapper(oosi_f->Close, 1, oosi_f);
+                    continue;
+                }
             }
             ost = uefi_call_wrapper(oosi_f->GetInfo, 4, oosi_f, &gEfiFileInfoGuid,
                                     &finfo_sz, finfo);
@@ -6280,6 +6281,27 @@ static void llmk_repl_no_model_loop(void) {
             UINT64 oosi_size = finfo->FileSize;
             Print(L"[OOSI] File size: %d MB\r\n", (int)(oosi_size / (1024*1024)));
 
+            // ── Ensure zones initialized for WEIGHTS arena ────────────────
+            // If boot happened in no-model mode, zones were not set up yet.
+            if (BS && g_zones.zone_b_base == 0) {
+                Print(L"[OOSI] Initializing memory zones (no-model boot path)...\r\n");
+                UINT64 need = oosi_size + 32ULL * 1024ULL * 1024ULL; // model + 32MB overhead
+                LlmkZonesConfig ssm_cfg;
+                ssm_cfg.total_bytes       = need;
+                ssm_cfg.weights_bytes     = oosi_size;
+                ssm_cfg.kv_bytes          = 16ULL * 1024ULL * 1024ULL;
+                ssm_cfg.scratch_bytes     =  8ULL * 1024ULL * 1024ULL;
+                ssm_cfg.activations_bytes =  4ULL * 1024ULL * 1024ULL;
+                ssm_cfg.zone_c_bytes      =  4ULL * 1024ULL * 1024ULL;
+                EFI_STATUS zst = llmk_zones_init(BS, &ssm_cfg, &g_zones);
+                if (EFI_ERROR(zst)) {
+                    Print(L"[OOSI] ERROR: zones_init failed (%r)\r\n\r\n", zst);
+                    uefi_call_wrapper(oosi_f->Close, 1, oosi_f);
+                    if (finfo) uefi_call_wrapper(BS->FreePool, 1, finfo);
+                    continue;
+                }
+            }
+
             // ── Allocate in WEIGHTS arena (cold zone) ─────────────────────
             void *oosi_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_WEIGHTS,
                                               oosi_size, 64);
@@ -6287,6 +6309,7 @@ static void llmk_repl_no_model_loop(void) {
                 Print(L"[OOSI] ERROR: not enough WEIGHTS arena space (%d MB needed)\r\n\r\n",
                       (int)(oosi_size / (1024*1024)));
                 uefi_call_wrapper(oosi_f->Close, 1, oosi_f);
+                if (finfo) uefi_call_wrapper(BS->FreePool, 1, finfo);
                 continue;
             }
 
