@@ -1,4 +1,5 @@
 #include "llmk_oo.h"
+#include "llmk_oo_infer.h"
 
 // ============================================================================
 // LLM-OO (Organism-Oriented) minimal runtime
@@ -447,6 +448,27 @@ static void llmk_oo_step_index(int idx) {
     if (e->energy > 0) e->energy--;
     if (e->energy <= 0) e->status = LLMK_OO_DONE;
     else e->status = LLMK_OO_IDLE;
+
+    // ── OO Inference hook ──────────────────────────────────────────────────
+    // If the OOSI engine is ready and the entity has a goal, run one
+    // "think" step: tokenize the goal, generate with adaptive halting,
+    // then append the decoded output to entity notes.
+    // This makes each energy-tick a reasoning iteration.
+    if (llmk_oo_infer_is_ready() && e->goal[0] != '\0') {
+        // Tokenize goal (static buffer: 256 token IDs max)
+        int prompt_tokens[256];
+        int prompt_len = llmk_oo_infer_tokenize(e->goal, prompt_tokens, 256);
+        if (prompt_len > 0) {
+            OoThinkResult think_result;
+            int n = llmk_oo_infer_think(prompt_tokens, prompt_len, &think_result);
+            if (n > 0 && think_result.text[0] != '\0') {
+                // Append inference output to notes (guarded by existing notes capacity)
+                // llmk_oo_note truncates safely if over 1024 bytes
+                llmk_oo_note(e->id, think_result.text);
+            }
+        }
+    }
+    // ───────────────────────────────────────────────────────────────────────
 
     if (g_on_step) {
         g_on_step(e->id, e->ticks, e->energy);

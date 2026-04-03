@@ -429,30 +429,20 @@ int oosi_generate(
     }
     ctx->tokens_generated = 0;
 
+    // Seed the generation loop with the last prompt token
+    int last_tok = (prompt_len > 0) ? prompt_tokens[prompt_len - 1] : 1;  // 1 = BOS fallback
+
     // Generate with adaptive halting
     int generated = 0;
     while (generated < ctx->max_tokens) {
-        // Use last prompt token as seed for first generation step
-        int seed_tok = (prompt_len > 0) ? prompt_tokens[prompt_len - 1] : 0;
-        int feed_tok = (generated == 0) ? seed_tok : /* last generated */ 0;
-
-        // For generation loop we need the last emitted token
-        // We use output_cb to track it — but here we call forward directly
-        // and let the caller handle token accumulation.
-        // If no prompt, start from token 0 (BOS).
-        (void)feed_tok;
-
-        // The correct approach: caller tracks last token and passes it back.
-        // For simplicity, we feed the last element of prompt on step 0.
-        // This matches the run_local.py generate_latent() behavior.
-        int input_tok = (generated == 0 && prompt_len > 0)
-            ? prompt_tokens[prompt_len - 1]
-            : 0;  // caller should maintain; see note below
-
-        OosiHaltResult r = oosi_forward_one(ctx, input_tok);
+        OosiHaltResult r = oosi_forward_one(ctx, last_tok);
         generated++;
 
         if (output_cb) output_cb(r.token, &r, userdata);
+
+        // Feed generated token back as input for next step
+        last_tok = r.token;
+
         if (r.halted) break;
     }
 
