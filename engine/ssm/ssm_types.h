@@ -12,13 +12,14 @@ extern "C" {
 
 // ============================================================
 // Mamba architecture constants
+// Updated for Mamba-2.8B: d_model=2560, n_layer=64, vocab=50282
 // ============================================================
-#define SSM_MAX_D_MODEL     2048   // max hidden dim
+#define SSM_MAX_D_MODEL     2560   // max hidden dim (2560 for Mamba-2.8B)
 #define SSM_MAX_D_STATE     16     // SSM state size (N)
 #define SSM_MAX_D_CONV      4      // depthwise conv kernel size
-#define SSM_MAX_D_INNER     4096   // max expanded inner dim (d_model * expand)
-#define SSM_MAX_LAYERS      48     // max Mamba layers
-#define SSM_MAX_VOCAB       32000  // max vocabulary size
+#define SSM_MAX_D_INNER     5120   // max expanded inner dim (2560*2 for Mamba-2.8B)
+#define SSM_MAX_LAYERS      64     // max Mamba layers (64 for Mamba-2.8B)
+#define SSM_MAX_VOCAB       51200  // max vocabulary size (50282 for Mamba-2.8B, aligned)
 #define SSM_MAX_SEQ         2048   // max sequence length
 
 // ============================================================
