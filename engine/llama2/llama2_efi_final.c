@@ -6285,12 +6285,12 @@ static void llmk_repl_no_model_loop(void) {
             // If boot happened in no-model mode, zones were not set up yet.
             if (BS && g_zones.zone_b_base == 0) {
                 Print(L"[OOSI] Initializing memory zones (no-model boot path)...\r\n");
-                UINT64 need = oosi_size + 32ULL * 1024ULL * 1024ULL; // model + 32MB overhead
+                UINT64 need = oosi_size + 56ULL * 1024ULL * 1024ULL; // model + 56MB overhead
                 LlmkZonesConfig ssm_cfg;
                 ssm_cfg.total_bytes       = need;
                 ssm_cfg.weights_bytes     = oosi_size;
                 ssm_cfg.kv_bytes          = 16ULL * 1024ULL * 1024ULL;
-                ssm_cfg.scratch_bytes     =  8ULL * 1024ULL * 1024ULL;
+                ssm_cfg.scratch_bytes     = 20ULL * 1024ULL * 1024ULL; // 20MB: 13MB vocab + 7MB work
                 ssm_cfg.activations_bytes =  4ULL * 1024ULL * 1024ULL;
                 ssm_cfg.zone_c_bytes      =  4ULL * 1024ULL * 1024ULL;
                 EFI_STATUS zst = llmk_zones_init(BS, &ssm_cfg, &g_zones);
@@ -6383,6 +6383,41 @@ static void llmk_repl_no_model_loop(void) {
                 Print(L"[OOSI] WARNING: llmk_oo_infer_init failed (code %d) - inference disabled\r\n\r\n", sst);
                 g_oosi_weights_valid = 0;
                 continue;
+            }
+
+            // ── Load GPT-NeoX tokenizer (gpt_neox_tokenizer.bin) ──────────
+            {
+                void *tok_raw = NULL; UINTN tok_len = 0;
+                EFI_STATUS tst = llmk_read_entire_file_best_effort(
+                        L"gpt_neox_tokenizer.bin", &tok_raw, &tok_len);
+                if (EFI_ERROR(tst) || !tok_raw || tok_len == 0) {
+                    if (tok_raw) uefi_call_wrapper(BS->FreePool, 1, tok_raw);
+                    tok_raw = NULL; tok_len = 0;
+                    tst = llmk_read_entire_file_best_effort(
+                            L"tokenizer.bin", &tok_raw, &tok_len);
+                }
+                if (!EFI_ERROR(tst) && tok_raw && tok_len > 0) {
+                    // BpeVocabEntry[vocab_size] buffer — allocate from SCRATCH arena
+                    int vocab_sz = (int)g_oosi_weights.header.vocab_size;
+                    if (vocab_sz <= 0) vocab_sz = 50280; // GPT-NeoX default
+                    UINTN vocab_buf_sz = (UINTN)vocab_sz * sizeof(BpeVocabEntry);
+                    BpeVocabEntry *vbuf = llmk_arena_alloc(&g_zones,
+                            LLMK_ARENA_SCRATCH, vocab_buf_sz, 8);
+                    if (vbuf) {
+                        SsmStatus tss = llmk_oo_infer_tokenizer_init(
+                                vbuf, vocab_sz, tok_raw, (uint64_t)tok_len);
+                        if (tss == SSM_OK)
+                            Print(L"[OOSI] Tokenizer loaded (vocab=%d, %d bytes)\r\n",
+                                  vocab_sz, (int)tok_len);
+                        else
+                            Print(L"[OOSI] WARNING: tokenizer init failed (code %d) - char-level fallback\r\n", tss);
+                    } else {
+                        Print(L"[OOSI] WARNING: no SCRATCH arena space for vocab buf - char-level fallback\r\n");
+                    }
+                    uefi_call_wrapper(BS->FreePool, 1, tok_raw);
+                } else {
+                    Print(L"[OOSI] WARNING: tokenizer file not found - char-level fallback\r\n");
+                }
             }
 
             llmk_mind_mark_core_active(arg, "oosi-v2");
