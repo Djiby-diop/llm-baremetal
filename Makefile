@@ -75,8 +75,10 @@ METABION_PROFILE_DEFAULT = metabion_profile_default.h
 # Engines IN archives (OO_ENGINE_SRCS or OO_MODULES_SRCS) are excluded to avoid duplicates:
 #   IN OO_ENGINE_SRCS:  evolvion, ghost, dreamion, morphion
 #   IN OO_MODULES_SRCS: neuralfs, collectivion, cellion
-REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
+REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
+	djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
 	ssm_infer.o mamba_block.o mamba_weights.o bpe_tokenizer.o \
+	oosi_loader.o oosi_infer.o \
 	oo-modules/djibion-engine/core/djibion.o \
 	oo-modules/diopion-engine/core/diopion.o \
 	oo-modules/diagnostion-engine/core/diagnostion.o \
@@ -135,8 +137,11 @@ llmk_log.o: core/llmk_log.c core/llmk_log.h core/llmk_zones.h
 llmk_sentinel.o: core/llmk_sentinel.c core/llmk_sentinel.h core/llmk_zones.h core/llmk_log.h
 	$(CC) $(CFLAGS) -c core/llmk_sentinel.c -o llmk_sentinel.o
 
-llmk_oo.o: core/llmk_oo.c core/llmk_oo.h
+llmk_oo.o: core/llmk_oo.c core/llmk_oo.h core/llmk_oo_infer.h
 	$(CC) $(CFLAGS) -c core/llmk_oo.c -o llmk_oo.o
+
+llmk_oo_infer.o: core/llmk_oo_infer.c core/llmk_oo_infer.h engine/ssm/bpe_tokenizer.h engine/ssm/oosi_infer.h
+	$(CC) $(CFLAGS) -c core/llmk_oo_infer.c -o llmk_oo_infer.o
 
 gguf_loader.o: engine/gguf/gguf_loader.c engine/gguf/gguf_loader.h
 	$(CC) $(CFLAGS) -c engine/gguf/gguf_loader.c -o gguf_loader.o
@@ -234,8 +239,15 @@ mamba_weights.o: engine/ssm/mamba_weights.c engine/ssm/mamba_weights.h engine/ss
 bpe_tokenizer.o: engine/ssm/bpe_tokenizer.c engine/ssm/bpe_tokenizer.h
 	$(CC) $(CFLAGS) -c engine/ssm/bpe_tokenizer.c -o bpe_tokenizer.o
 
+oosi_loader.o: engine/ssm/oosi_loader.c engine/ssm/oosi_loader.h engine/ssm/ssm_types.h
+	$(CC) $(CFLAGS) -c engine/ssm/oosi_loader.c -o oosi_loader.o
+
+oosi_infer.o: engine/ssm/oosi_infer.c engine/ssm/oosi_infer.h engine/ssm/oosi_loader.h engine/ssm/mamba_weights.h engine/ssm/ssm_types.h
+	$(CC) $(CFLAGS) -c engine/ssm/oosi_infer.c -o oosi_infer.o
+
 clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
+	rm -f oosi_loader.o oosi_infer.o llmk_oo_infer.o
 	rm -rf $(OO_BUILD_DIR)
 	@echo "OK: Clean complete"
 
