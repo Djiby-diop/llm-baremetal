@@ -62,6 +62,9 @@
 #include "gguf_loader.h"
 #include "gguf_infer.h"
 
+// Forward declarations for static helpers used before their definitions
+static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
+
 typedef enum {
     LLMK_MODEL_FMT_UNKNOWN = 0,
     LLMK_MODEL_FMT_BIN = 1,
@@ -74,8 +77,231 @@ static volatile UINT32 g_loaded_model_path16_canary = 0xD1B1D1B1u;
 static GgufSummary g_loaded_model_gguf;
 static int g_loaded_model_gguf_valid = 0;
 
+typedef struct {
+    char core_path[192];
+    char core_kind[32];
+    int core_requested;
+    int core_active;
+    char sidecar_path[192];
+    char sidecar_kind[32];
+    int sidecar_requested;
+    int sidecar_active;
+    char attach_path[192];
+    char attach_kind[32];
+    int attach_requested;
+    int attach_active;
+    UINT32 sidecar_version;
+    UINT32 sidecar_d_model;
+    UINT32 sidecar_n_layer;
+    UINT32 sidecar_d_state;
+    UINT32 sidecar_d_conv;
+    UINT32 sidecar_expand;
+    UINT32 sidecar_vocab_size;
+    UINT32 sidecar_halting_d_input;
+    int sidecar_header_valid;
+} LlmkMindRuntimeState;
+
+static LlmkMindRuntimeState g_mind_runtime_state;
+
+typedef struct {
+    UINT32 magic;
+    UINT32 version;
+    UINT32 d_model;
+    UINT32 n_layer;
+    UINT32 d_state;
+    UINT32 d_conv;
+    UINT32 expand;
+    UINT32 vocab_size;
+    UINT32 halting_head_d_input;
+} LlmkOoSidecarHeader;
+
+#define LLMK_OOSS_MAGIC 0x4F4F5353u
+
 // Forward decl used by early GGUF summary printer.
 static void llmk_print_ascii(const char *s);
+
+static void llmk_copy_ascii_bounded(char *dst, int dst_cap, const char *src) {
+    if (!dst || dst_cap <= 0) return;
+    int i = 0;
+    if (src) {
+        while (src[i] && i + 1 < dst_cap) {
+            dst[i] = src[i];
+            i++;
+        }
+    }
+    dst[i] = 0;
+}
+
+static void llmk_mind_clear_core(void) {
+    g_mind_runtime_state.core_requested = 0;
+    g_mind_runtime_state.core_active = 0;
+    g_mind_runtime_state.core_path[0] = 0;
+    g_mind_runtime_state.core_kind[0] = 0;
+    g_mind_runtime_state.sidecar_active = 0;
+}
+
+static void llmk_mind_clear_sidecar(void) {
+    g_mind_runtime_state.sidecar_requested = 0;
+    g_mind_runtime_state.sidecar_active = 0;
+    g_mind_runtime_state.sidecar_path[0] = 0;
+    g_mind_runtime_state.sidecar_kind[0] = 0;
+    g_mind_runtime_state.sidecar_version = 0;
+    g_mind_runtime_state.sidecar_d_model = 0;
+    g_mind_runtime_state.sidecar_n_layer = 0;
+    g_mind_runtime_state.sidecar_d_state = 0;
+    g_mind_runtime_state.sidecar_d_conv = 0;
+    g_mind_runtime_state.sidecar_expand = 0;
+    g_mind_runtime_state.sidecar_vocab_size = 0;
+    g_mind_runtime_state.sidecar_halting_d_input = 0;
+    g_mind_runtime_state.sidecar_header_valid = 0;
+}
+
+static void llmk_mind_clear_attach(void) {
+    g_mind_runtime_state.attach_requested = 0;
+    g_mind_runtime_state.attach_active = 0;
+    g_mind_runtime_state.attach_path[0] = 0;
+    g_mind_runtime_state.attach_kind[0] = 0;
+}
+
+static void llmk_mind_set_core_request(const char *path, const char *kind) {
+    llmk_copy_ascii_bounded(g_mind_runtime_state.core_path, (int)sizeof(g_mind_runtime_state.core_path), path);
+    llmk_copy_ascii_bounded(g_mind_runtime_state.core_kind, (int)sizeof(g_mind_runtime_state.core_kind), kind ? kind : "somamind-core");
+    g_mind_runtime_state.core_requested = (path && path[0]) ? 1 : 0;
+    g_mind_runtime_state.core_active = 0;
+}
+
+static void llmk_mind_mark_core_active(const char *path, const char *kind) {
+    llmk_mind_set_core_request(path, kind);
+    g_mind_runtime_state.core_active = g_mind_runtime_state.core_requested;
+    if (g_mind_runtime_state.sidecar_requested) {
+        g_mind_runtime_state.sidecar_active = 0;
+    }
+}
+
+static void llmk_mind_set_sidecar_request(const char *path, const char *kind) {
+    llmk_copy_ascii_bounded(g_mind_runtime_state.sidecar_path, (int)sizeof(g_mind_runtime_state.sidecar_path), path);
+    llmk_copy_ascii_bounded(g_mind_runtime_state.sidecar_kind, (int)sizeof(g_mind_runtime_state.sidecar_kind), kind ? kind : "ooss-sidecar");
+    g_mind_runtime_state.sidecar_requested = (path && path[0]) ? 1 : 0;
+    g_mind_runtime_state.sidecar_active = 0;
+}
+
+static UINT32 llmk_u32le_read(const UINT8 *p) {
+    if (!p) return 0;
+    return ((UINT32)p[0]) |
+           ((UINT32)p[1] << 8) |
+           ((UINT32)p[2] << 16) |
+           ((UINT32)p[3] << 24);
+}
+
+static int llmk_ooss_parse_header(const void *buf, UINTN len, LlmkOoSidecarHeader *out) {
+    if (!buf || !out || len < 36) return 0;
+    const UINT8 *p = (const UINT8 *)buf;
+    out->magic = llmk_u32le_read(p + 0);
+    out->version = llmk_u32le_read(p + 4);
+    out->d_model = llmk_u32le_read(p + 8);
+    out->n_layer = llmk_u32le_read(p + 12);
+    out->d_state = llmk_u32le_read(p + 16);
+    out->d_conv = llmk_u32le_read(p + 20);
+    out->expand = llmk_u32le_read(p + 24);
+    out->vocab_size = llmk_u32le_read(p + 28);
+    out->halting_head_d_input = llmk_u32le_read(p + 32);
+    return out->magic == LLMK_OOSS_MAGIC;
+}
+
+static void llmk_mind_store_sidecar_header(const LlmkOoSidecarHeader *hdr) {
+    if (!hdr) return;
+    g_mind_runtime_state.sidecar_version = hdr->version;
+    g_mind_runtime_state.sidecar_d_model = hdr->d_model;
+    g_mind_runtime_state.sidecar_n_layer = hdr->n_layer;
+    g_mind_runtime_state.sidecar_d_state = hdr->d_state;
+    g_mind_runtime_state.sidecar_d_conv = hdr->d_conv;
+    g_mind_runtime_state.sidecar_expand = hdr->expand;
+    g_mind_runtime_state.sidecar_vocab_size = hdr->vocab_size;
+    g_mind_runtime_state.sidecar_halting_d_input = hdr->halting_head_d_input;
+    g_mind_runtime_state.sidecar_header_valid = 1;
+}
+
+static void llmk_mind_set_attach_request(const char *path, const char *kind) {
+    llmk_copy_ascii_bounded(g_mind_runtime_state.attach_path, (int)sizeof(g_mind_runtime_state.attach_path), path);
+    llmk_copy_ascii_bounded(g_mind_runtime_state.attach_kind, (int)sizeof(g_mind_runtime_state.attach_kind), kind ? kind : "attach-model");
+    g_mind_runtime_state.attach_requested = (path && path[0]) ? 1 : 0;
+    g_mind_runtime_state.attach_active = 0;
+}
+
+static void llmk_mind_print_status(void) {
+    Print(L"\r\n[Mind] OO-SomaMind runtime topology\r\n");
+    Print(L"  identity: internal native core\r\n");
+    Print(L"  v1 execution path: MAMB backbone via /ssm_load\r\n");
+
+    Print(L"  core: ");
+    if (g_mind_runtime_state.core_requested) {
+        if (g_mind_runtime_state.core_active) Print(L"active\r\n");
+        else Print(L"requested\r\n");
+        Print(L"    kind="); llmk_print_ascii(g_mind_runtime_state.core_kind[0] ? g_mind_runtime_state.core_kind : "somamind-core"); Print(L"\r\n");
+        Print(L"    path="); llmk_print_ascii(g_mind_runtime_state.core_path); Print(L"\r\n");
+        Print(L"    route=");
+        if (g_mind_runtime_state.core_active) Print(L"active via /ssm_load\r\n");
+        else Print(L"registered; waiting for runtime bind\r\n");
+    } else {
+        Print(L"not requested\r\n");
+    }
+
+    Print(L"  sidecar: ");
+    if (g_mind_runtime_state.sidecar_requested) {
+        if (g_mind_runtime_state.sidecar_active) Print(L"active\r\n");
+        else Print(L"requested\r\n");
+        Print(L"    kind="); llmk_print_ascii(g_mind_runtime_state.sidecar_kind[0] ? g_mind_runtime_state.sidecar_kind : "ooss-sidecar"); Print(L"\r\n");
+        Print(L"    path="); llmk_print_ascii(g_mind_runtime_state.sidecar_path); Print(L"\r\n");
+        if (g_mind_runtime_state.sidecar_header_valid) {
+            Print(L"    header: version=%u d_model=%u n_layer=%u vocab=%u halt_in=%u\r\n",
+                  g_mind_runtime_state.sidecar_version,
+                  g_mind_runtime_state.sidecar_d_model,
+                  g_mind_runtime_state.sidecar_n_layer,
+                  g_mind_runtime_state.sidecar_vocab_size,
+                  g_mind_runtime_state.sidecar_halting_d_input);
+        }
+        Print(L"    route=");
+        if (g_mind_runtime_state.sidecar_active) Print(L"active OO sidecar backend\r\n");
+        else if (g_mind_runtime_state.core_active) Print(L"registered; waiting for OO sidecar loader\r\n");
+        else Print(L"registered; core backbone not active yet\r\n");
+    } else {
+        Print(L"none\r\n");
+    }
+
+    Print(L"  attach: ");
+    if (g_mind_runtime_state.attach_requested) {
+        if (g_mind_runtime_state.attach_active) Print(L"active\r\n");
+        else Print(L"requested\r\n");
+        Print(L"    kind="); llmk_print_ascii(g_mind_runtime_state.attach_kind[0] ? g_mind_runtime_state.attach_kind : "attach-model"); Print(L"\r\n");
+        Print(L"    path="); llmk_print_ascii(g_mind_runtime_state.attach_path); Print(L"\r\n");
+        Print(L"    route=");
+        if (g_mind_runtime_state.attach_active) Print(L"active attach backend\r\n");
+        else Print(L"registered only; backend not wired yet\r\n");
+    } else {
+        Print(L"none\r\n");
+    }
+
+    Print(L"  note: attach models are optional and must not redefine the OO core.\r\n\r\n");
+}
+
+static void llmk_mind_bind_core_backbone_v1(const char *path, int via_core_alias) {
+    if (!path || !path[0]) return;
+    llmk_mind_mark_core_active(path, "mamb-runtime");
+
+    CHAR16 path16[192];
+    ascii_to_char16(path16, path, (int)(sizeof(path16) / sizeof(path16[0])));
+
+    Print(L"\r\n[SSM] Loading: %s ...\r\n", path16);
+    if (via_core_alias) {
+        Print(L"  Alias: /core_load -> /ssm_load\r\n");
+        Print(L"  Identity: internal OO-SomaMind core\r\n");
+    }
+    Print(L"  Bound as OO-SomaMind V1 core backbone.\r\n");
+    if (g_mind_runtime_state.sidecar_requested) {
+        Print(L"  Sidecar note: OOSS sidecar registered but loader not wired yet.\r\n");
+    }
+    Print(L"  (SSM inference integration: see engine/ssm/ -- hook into Stage 3)\r\n\r\n");
+}
 
 static void llmk_model_set_loaded_path(const CHAR16 *path) {
     g_loaded_model_path16_canary = 0xD1B1D1B1u;
@@ -1037,6 +1263,10 @@ static __inline__ void llmk_outb(UINT16 port, UINT8 val) {
     __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
+static __inline__ void llmk_outw(UINT16 port, UINT16 val) {
+    __asm__ __volatile__("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
 static void llmk_serial_putc(UINT8 c) {
     const UINT16 COM1 = 0x3F8;
     const UINT16 LSR = (UINT16)(COM1 + 5);
@@ -1062,6 +1292,23 @@ static void llmk_serial_write_char16(const CHAR16 *s) {
 static void llmk_serial_write_char16(const CHAR16 *s) { (void)s; }
 #endif
 
+static void llmk_shutdown_best_effort(void) {
+    if (RT && RT->ResetSystem) {
+        uefi_call_wrapper(RT->ResetSystem, 4, EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+    }
+
+#if defined(__x86_64__) || defined(_M_X64)
+    // QEMU/Bochs fallback poweroff ports for cases where ResetSystem returns
+    // but firmware does not actually power down the VM.
+    llmk_outw(0x604, 0x2000);
+    llmk_outw(0xB004, 0x2000);
+
+    for (;;) {
+        __asm__ __volatile__("cli; hlt");
+    }
+#endif
+}
+
 // Some generations still contain a classic mojibake sequence for U+2019 (RIGHT SINGLE QUOTATION MARK).
 // This can span token boundaries, so keep a small byte tail and repair across calls.
 static unsigned char g_utf8_repair_tail[5]; // SAFE: tail buffer for cross-call UTF-8 repair; bounded by keep=5
@@ -1070,6 +1317,52 @@ static int g_utf8_repair_tail_len = 0;
 // GOP transcript (best-effort): capture streamed UTF-8 output into an ASCII-ish ring buffer
 // so we can render it later in the GOP UI.
 static void llmk_tr_append_ascii_bytes(const unsigned char *bytes, int len);
+
+// ============================================================
+// llmk_decode_piece — convert raw vocab token string to printable bytes
+// Handles SentencePiece conventions:
+//   1. "<0xNN>" byte tokens → actual byte value
+//   2. "▁" (U+2581, 3 bytes E2 96 81) leading space → ' '
+//   3. Raw string → returned as-is
+// out_buf must be at least 4 bytes. Returns actual byte count.
+// ============================================================
+static int llmk_decode_piece(const char *piece, char *out_buf, int out_size) {
+    if (!piece || !out_buf || out_size <= 0) return 0;
+
+    int len = 0;
+    while (piece[len]) len++;
+    if (len == 0) return 0;
+
+    // Case 1: byte token "<0xNN>" (exactly 6 chars)
+    if (len == 6 && piece[0] == '<' && piece[1] == '0' && piece[2] == 'x' && piece[5] == '>') {
+        char hi = piece[3], lo = piece[4];
+        int hv = (hi >= '0' && hi <= '9') ? hi-'0' : (hi >= 'a' && hi <= 'f') ? hi-'a'+10 : (hi >= 'A' && hi <= 'F') ? hi-'A'+10 : -1;
+        int lv = (lo >= '0' && lo <= '9') ? lo-'0' : (lo >= 'a' && lo <= 'f') ? lo-'a'+10 : (lo >= 'A' && lo <= 'F') ? lo-'A'+10 : -1;
+        if (hv >= 0 && lv >= 0 && out_size >= 1) {
+            out_buf[0] = (char)((hv << 4) | lv);
+            return 1;
+        }
+    }
+
+    // Case 2: SentencePiece leading "▁" (U+2581 = E2 96 81) → space
+    // Replace only the leading ▁; keep remaining bytes as-is
+    if (len >= 3 && (unsigned char)piece[0] == 0xE2 &&
+                    (unsigned char)piece[1] == 0x96 &&
+                    (unsigned char)piece[2] == 0x81) {
+        int rest = len - 3;
+        if (out_size < 1 + rest) rest = out_size - 1;
+        if (rest < 0) rest = 0;
+        if (out_size >= 1) out_buf[0] = ' ';
+        for (int i = 0; i < rest; i++) out_buf[1 + i] = piece[3 + i];
+        return 1 + rest;
+    }
+
+    // Case 3: raw string — copy up to out_size bytes
+    int copy = len < out_size ? len : out_size;
+    for (int i = 0; i < copy; i++) out_buf[i] = piece[i];
+    return copy;
+}
+
 
 static void uefi_print_utf8_bytes(const char *bytes, int len) {
     if (!bytes || len <= 0) return;
@@ -5247,11 +5540,18 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /oo_log               Tail OOCONSULT.LOG\r\n");
     Print(L"  /oo_outcome           Tail OOOUTCOME.LOG and show pending feedback\r\n");
     Print(L"  /oo_infermini [text]  Run tiny built-in inference selftest (no-model)\r\n");
+    Print(L"  /core_load <file>     Register the OO-SomaMind internal core target\r\n");
+    Print(L"  /oo_sidecar <file>    Register an OO sidecar extension (future OOSS path)\r\n");
+    Print(L"  /attach_load <file>   Register an optional attached external model\r\n");
+    Print(L"  /attach_unload        Detach the optional external model\r\n");
+    Print(L"  /mind_status          Show core vs attach runtime topology\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
     Print(L"  exit                  Return to UEFI shell\r\n\r\n");
     Print(L"To boot with a model: copy a supported .gguf/.bin to the USB root (or models\\)\r\n");
-    Print(L"and set repl.cfg: model=<filename> then reboot.\r\n\r\n");
+    Print(L"and set repl.cfg: model=<filename> then reboot.\r\n");
+    Print(L"For OO-SomaMind V1, the current core execution path remains /ssm_load <file.mamb>.\r\n");
+    Print(L"The future OO extension path is /oo_sidecar <file.ooss>.\r\n\r\n");
 }
 
 // Forward declarations for the no-model REPL (definitions appear later in this file).
@@ -5790,15 +6090,106 @@ static void llmk_repl_no_model_loop(void) {
         }
         if (my_strncmp(prompt, "shutdown", 8) == 0 || my_strncmp(prompt, "poweroff", 8) == 0) {
             Print(L"\r\nShutting down...\r\n");
-            uefi_call_wrapper(RT->ResetSystem, 4, EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+            llmk_shutdown_best_effort();
             return;
         }
 
         // SSM / Mamba commands (no-model mode)
+        if (my_strncmp(prompt, "/mind_status", 12) == 0) {
+            llmk_mind_print_status();
+            continue;
+        }
+        if (my_strncmp(prompt, "/core_load", 10) == 0) {
+            const char *arg = prompt + 10;
+            while (*arg == ' ' || *arg == '\t') arg++;
+            if (!arg[0]) {
+                Print(L"\r\nUsage: /core_load <somamind_core>\r\n");
+                Print(L"  Register the internal OO-SomaMind core target.\r\n");
+                Print(L"  In V1, this aliases to the current /ssm_load <file.mamb> path.\r\n\r\n");
+                continue;
+            }
+            llmk_mind_bind_core_backbone_v1(arg, 1);
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_sidecar", 11) == 0) {
+            const char *arg = prompt + 11;
+            while (*arg == ' ' || *arg == '\t') arg++;
+            if (!arg[0]) {
+                Print(L"\r\nUsage: /oo_sidecar <file.ooss>\r\n");
+                Print(L"  Register an OO-SomaMind sidecar extension for future OOSS loading.\r\n");
+                Print(L"  Current state: metadata/skeleton only; loader backend not wired yet.\r\n\r\n");
+                continue;
+            }
+            CHAR16 path16[192];
+            ascii_to_char16(path16, arg, (int)(sizeof(path16) / sizeof(path16[0])));
+            void *raw = NULL;
+            UINTN raw_len = 0;
+            EFI_STATUS st = llmk_read_entire_file_best_effort(path16, &raw, &raw_len);
+            if (EFI_ERROR(st) || !raw || raw_len < 36) {
+                if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+                Print(L"\r\n[Mind] OO sidecar open failed: %s (%r)\r\n", path16, st);
+                Print(L"  Need a valid OOSS file with a readable header.\r\n\r\n");
+                continue;
+            }
+
+            LlmkOoSidecarHeader hdr;
+            if (!llmk_ooss_parse_header(raw, raw_len, &hdr)) {
+                uefi_call_wrapper(BS->FreePool, 1, raw);
+                Print(L"\r\n[Mind] OO sidecar invalid: %s\r\n", path16);
+                Print(L"  Expected magic=OOSS and a 36-byte minimum header.\r\n\r\n");
+                continue;
+            }
+            uefi_call_wrapper(BS->FreePool, 1, raw);
+
+            llmk_mind_set_sidecar_request(arg, "ooss-sidecar");
+            llmk_mind_store_sidecar_header(&hdr);
+            Print(L"\r\n[Mind] OO sidecar registered: %s\r\n", path16);
+            Print(L"  Role: future OO-SomaMind enriched extension\r\n");
+            Print(L"  Header: version=%u d_model=%u n_layer=%u vocab=%u halt_in=%u\r\n",
+                  hdr.version, hdr.d_model, hdr.n_layer, hdr.vocab_size, hdr.halting_head_d_input);
+            if (g_mind_runtime_state.core_active) {
+                Print(L"  State: core backbone active, sidecar loader pending.\r\n");
+            } else {
+                Print(L"  State: waiting for core backbone activation and sidecar loader.\r\n");
+            }
+            Print(L"  Rule: OOSS complements MAMB; it does not replace the V1 runtime backbone.\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/attach_load", 12) == 0) {
+            const char *arg = prompt + 12;
+            while (*arg == ' ' || *arg == '\t') arg++;
+            if (!arg[0]) {
+                Print(L"\r\nUsage: /attach_load <model>\r\n");
+                Print(L"  Register an optional external attached model without redefining the OO core.\r\n\r\n");
+                continue;
+            }
+            llmk_mind_set_attach_request(arg, "attach-model");
+            CHAR16 path16[192];
+            ascii_to_char16(path16, arg, (int)(sizeof(path16) / sizeof(path16[0])));
+            Print(L"\r\n[Mind] Attach model registered: %s\r\n", path16);
+            Print(L"  Role: optional external extension\r\n");
+            Print(L"  State: requested only; attach backend not wired yet.\r\n");
+            Print(L"  Rule: attached models do not redefine OO-SomaMind identity.\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/attach_unload", 14) == 0) {
+            if (g_mind_runtime_state.attach_requested) {
+                Print(L"\r\n[Mind] Attach model detached: ");
+                llmk_print_ascii(g_mind_runtime_state.attach_path);
+                Print(L"\r\n");
+            } else {
+                Print(L"\r\n[Mind] No attach model registered.\r\n");
+            }
+            llmk_mind_clear_attach();
+            Print(L"  Core continuity preserved.\r\n\r\n");
+            continue;
+        }
         if (my_strncmp(prompt, "/ssm_info", 9) == 0) {
             Print(L"\r\n[SSM] Mamba bare-metal engine v0.1\r\n");
             Print(L"  Commands: /ssm_load <file>, /ssm_infer <text>, /ssm_reset\r\n");
-            Print(L"  Weight format: MAMB binary (export_mamba_baremetal.py)\r\n");
+            Print(L"  Mind cmds: /core_load <file>, /oo_sidecar <file>, /attach_load <file>, /attach_unload, /mind_status\r\n");
+            Print(L"  Weight format: MAMB binary\r\n");
+            Print(L"  Exporters: runtime export_mamba_baremetal.py | oo-model export_mamb_binary.py\r\n");
             Print(L"  Architecture: Mamba SSM, freestanding, O(1) memory per token\r\n");
             Print(L"  Status: engine files compiled, weight loader ready\r\n\r\n");
             continue;
@@ -5811,10 +6202,7 @@ static void llmk_repl_no_model_loop(void) {
                 Print(L"  Load Mamba SSM weights into COLD zone for inference.\r\n\r\n");
                 continue;
             }
-            CHAR16 path16[192];
-            ascii_to_char16(path16, arg, (int)(sizeof(path16)/sizeof(path16[0])));
-            Print(L"\r\n[SSM] Loading: %s ...\r\n", path16);
-            Print(L"  (SSM inference integration: see engine/ssm/ -- hook into Stage 3)\r\n\r\n");
+            llmk_mind_bind_core_backbone_v1(arg, 0);
             continue;
         }
         if (my_strncmp(prompt, "/ssm_infer", 10) == 0) {
@@ -5831,6 +6219,7 @@ static void llmk_repl_no_model_loop(void) {
             continue;
         }
         if (my_strncmp(prompt, "/ssm_reset", 10) == 0) {
+            llmk_mind_clear_core();
             Print(L"\r\n[SSM] State reset (no active model to reset)\r\n\r\n");
             continue;
         }
@@ -7412,7 +7801,7 @@ static int llmk_autorun_finish_if_eof(void) {
     llmk_autorun_stop();
     if (shutdown) {
         Print(L"[autorun] shutting down\r\n");
-        uefi_call_wrapper(RT->ResetSystem, 4, EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+        llmk_shutdown_best_effort();
     }
     return 1;
 }
@@ -14020,9 +14409,10 @@ static void llmk_oo_consult_execute(Config *config, TransformerWeights *weights,
 
             char *piece = (tokenizer && tokenizer->vocab) ? tokenizer->vocab[next] : NULL;
             if (piece) {
-                int plen = my_strlen(piece);
-                for (int k = 0; k < plen && llm_len + 1 < (int)sizeof(llm_suggestion); k++) {
-                    llm_suggestion[llm_len++] = piece[k];
+                char decoded2[8];
+                int dlen2 = llmk_decode_piece(piece, decoded2, (int)sizeof(decoded2));
+                for (int k = 0; k < dlen2 && llm_len + 1 < (int)sizeof(llm_suggestion); k++) {
+                    llm_suggestion[llm_len++] = decoded2[k];
                 }
                 llm_suggestion[llm_len] = 0;
             }
@@ -15963,7 +16353,7 @@ snap_autoload_done:
                     llmk_autorun_stop();
                     if (shutdown) {
                         Print(L"[autorun] shutting down\r\n");
-                        uefi_call_wrapper(RT->ResetSystem, 4, EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+                        llmk_shutdown_best_effort();
                     }
                 }
             }
@@ -20864,7 +21254,9 @@ snap_autoload_done:
             }
         }
 
+        { CHAR16 _gdmg[80]; SPrint(_gdmg, sizeof(_gdmg), L"[dbg] gen-loop-start max_gen=%d capture=%d\r\n", max_gen_tokens, (int)g_capture_mode); llmk_serial_write_char16(_gdmg); Print(_gdmg); }
         for (int step = 0; step < max_gen_tokens; step++) {
+            { CHAR16 _gds[80]; SPrint(_gds, sizeof(_gds), L"[dbg] step-enter step=%d max=%d\r\n", step, max_gen_tokens); llmk_serial_write_char16(_gds); }
             // We sample from the logits produced by the previous forward pass.
             // For step==0, logits come from the final prompt token (prefill).
 
@@ -20932,12 +21324,18 @@ snap_autoload_done:
             // Print token (or capture token output for /draw)
             if (next >= 0 && next < config.vocab_size && tokenizer.vocab[next]) {
                 char* piece = tokenizer.vocab[next];
-                int len = my_strlen(piece);
-                if (len > 0) {
+                // Decode byte-tokens (<0xNN>) and SentencePiece spaces (▁)
+                char decoded[8];
+                int dlen = llmk_decode_piece(piece, decoded, (int)sizeof(decoded));
+                // Fallback to raw piece if decode returned nothing (e.g. empty token)
+                const char* out_bytes = (dlen > 0) ? decoded : piece;
+                int out_len = (dlen > 0) ? dlen : (int)(piece[0] ? (int)__builtin_strlen(piece) : 0);
+                if (out_len <= 0) { int sl=0; while(piece[sl]) sl++; out_len=sl; }
+                if (out_len > 0) {
                     if (g_capture_mode) {
-                        llmk_capture_append_ascii(piece, len);
+                        llmk_capture_append_ascii(out_bytes, out_len);
                     } else {
-                        uefi_print_utf8_bytes(piece, len);
+                        uefi_print_utf8_bytes(out_bytes, out_len);
                     }
                     generated_count++;
                     
@@ -20957,8 +21355,8 @@ snap_autoload_done:
                     }
 
                     // Update ASCII tail buffer for stop detection.
-                    for (int k = 0; k < len; k++) {
-                        char ch = piece[k];
+                    for (int k = 0; k < out_len; k++) {
+                        char ch = out_bytes[k];
                         if (out_tail_len < (int)sizeof(out_tail) - 1) {
                             out_tail[out_tail_len++] = ch;
                             out_tail[out_tail_len] = 0;
