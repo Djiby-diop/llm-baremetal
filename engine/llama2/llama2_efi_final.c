@@ -6303,6 +6303,18 @@ static void llmk_repl_no_model_loop(void) {
             UINT64 oosi_size = finfo->FileSize;
             Print(L"[OOSI] File size: %d MB\r\n", (int)(oosi_size / (1024*1024)));
 
+            // ── Peek magic (4 bytes) to detect v2 vs v3 before zones_init ──
+            UINT32 peek_magic = 0;
+            {
+                UINT8 mb[4] = {0,0,0,0}; UINTN msz = 4;
+                uefi_call_wrapper(oosi_f->Read, 3, oosi_f, &msz, mb);
+                if (msz == 4)
+                    peek_magic = (UINT32)mb[0] | ((UINT32)mb[1]<<8)
+                               | ((UINT32)mb[2]<<16) | ((UINT32)mb[3]<<24);
+                UINT64 rewind = 0;
+                uefi_call_wrapper(oosi_f->SetPosition, 2, oosi_f, rewind);
+            }
+
             // ── Ensure zones initialized for WEIGHTS arena ────────────────
             // If boot happened in no-model mode, zones were not set up yet.
             if (BS && g_zones.zone_b_base == 0) {
@@ -6311,7 +6323,11 @@ static void llmk_repl_no_model_loop(void) {
                 LlmkZonesConfig ssm_cfg;
                 ssm_cfg.total_bytes       = need;
                 ssm_cfg.weights_bytes     = oosi_size;
-                ssm_cfg.kv_bytes          = 16ULL * 1024ULL * 1024ULL;
+                // v3: SSM recurrent state (20MB h_state + 5MB conv_buf + 7MB margin = 32MB)
+                // v2: 16MB KV cache
+                ssm_cfg.kv_bytes = (peek_magic == OOSI_V3_MAGIC)
+                                   ? 32ULL * 1024ULL * 1024ULL
+                                   : 16ULL * 1024ULL * 1024ULL;
                 ssm_cfg.scratch_bytes     = 20ULL * 1024ULL * 1024ULL; // 20MB: 13MB vocab + 7MB work
                 ssm_cfg.activations_bytes =  4ULL * 1024ULL * 1024ULL;
                 ssm_cfg.zone_c_bytes      =  4ULL * 1024ULL * 1024ULL;
