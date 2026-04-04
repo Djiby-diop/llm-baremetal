@@ -6370,14 +6370,14 @@ static void llmk_repl_no_model_loop(void) {
             // Note: MAMB float32 weights not loaded yet — passing NULL is OK,
             // the engine will use OOSI int8 projections only (hybrid mode).
             sst = llmk_oo_infer_init(
-                &g_oosi_weights, NULL,  // oosi + mamb (mamb=NULL = int8-only mode)
+                &g_oosi_weights, NULL,  // oosi + mamb (mamb=NULL = standalone embedding mode)
                 g_oosi_x_buf, g_oosi_x_out, g_oosi_scratch,
                 g_oosi_logits, g_oosi_halt_buf, g_oosi_halt_h1, g_oosi_halt_h2,
-                0.7f,   // halt_threshold
-                0.8f,   // temperature
-                0.9f,   // top_p
+                0.85f,  // halt_threshold (higher = more output)
+                0.5f,   // temperature (lower = less random in embedding mode)
+                0.85f,  // top_p
                 0xDEADBEEFu,
-                g_max_new_tokens
+                (g_max_new_tokens > 12) ? 12 : g_max_new_tokens  // cap at 12 in standalone
             );
             if (sst != SSM_OK) {
                 Print(L"[OOSI] WARNING: llmk_oo_infer_init failed (code %d) - inference disabled\r\n\r\n", sst);

@@ -285,13 +285,69 @@ static void oosi_softmax(ssm_f32 *x, int n) {
 // ============================================================
 // oosi_forward_one — single token forward pass with adaptive halting
 //
-// Strategy: use MAMB float32 weights for all layers EXCEPT x_proj/dt_proj,
-// which are replaced by oosi_dequant_matvec() calls using OOSI v2 int8 data.
-// After the final layer, run HaltingHead on the hidden state.
+// Two modes:
+//  A) HYBRID (mamb != NULL): use MAMB float32 weights for all layers EXCEPT
+//     x_proj/dt_proj, which are replaced by OOSI v2 int8 matmul.
+//  B) STANDALONE (mamb == NULL): embedding-only mode — no SSM layers.
+//     Uses OOSI int8 embedding lookup + tied-weight LM head.
+//     Quality is limited (no recurrence) but produces valid diverse tokens.
 // ============================================================
 OosiHaltResult oosi_forward_one(OosiGenCtx *ctx, int token_id) {
     const MambaWeights *w = ctx->mamb;
     const OosiWeights  *q = ctx->oosi;
+
+    // ── STANDALONE mode (mamb=NULL): embedding → tied-weight LM head ────────
+    if (!w) {
+        int d_model   = (int)q->header.d_model;
+        int vocab_sz  = (int)q->header.vocab_size;
+
+        // 1. Dequantize token embedding → x_buf [d_model]
+        oosi_embed_lookup(q, token_id, ctx->x_buf);
+
+        // 2. Accumulate prompt context into x_out_buf (running mean of seen embeddings)
+        //    This gives the model a rough "context vector" without SSM recurrence.
+        int pos = ctx->tokens_generated;
+        if (pos == 0) {
+            for (int i = 0; i < d_model; i++) ctx->x_out_buf[i] = ctx->x_buf[i];
+        } else {
+            ssm_f32 alpha = 1.0f / (ssm_f32)(pos + 1);
+            for (int i = 0; i < d_model; i++)
+                ctx->x_out_buf[i] = ctx->x_out_buf[i] * (1.0f - alpha) + ctx->x_buf[i] * alpha;
+        }
+
+        // 3. LM head via tied weights (embedding matrix = lm head)
+        //    logits[i] = dot(embed_row[i], context_vector)
+        oosi_dequant_matvec(q->embed_q8, q->embed_scale,
+                            ctx->x_out_buf, ctx->logits, vocab_sz, d_model);
+
+        // 4. Sample next token (mask EOS and BOS to force content tokens)
+        ctx->logits[0] = -1.0e9f;  // mask EOS (<|endoftext|>)
+        ctx->logits[1] = -1.0e9f;  // mask BOS
+        int next_token;
+        if (ctx->temperature <= 0.0f) {
+            next_token = oosi_sample_greedy(ctx->logits, vocab_sz);
+        } else {
+            ssm_f32 inv_temp = 1.0f / ctx->temperature;
+            for (int i = 0; i < vocab_sz; i++) ctx->logits[i] *= inv_temp;
+            oosi_softmax(ctx->logits, vocab_sz);
+            next_token = oosi_sample_topp(ctx->logits, vocab_sz,
+                                          ctx->top_p, &ctx->rng_state);
+        }
+
+        // 5. HaltingHead — disabled in standalone mode.
+        //    The head was trained on SSM hidden states; raw embedding vectors
+        //    saturate it. Use positional budget only (max_tokens).
+        ctx->tokens_generated++;
+
+        OosiHaltResult r;
+        r.token     = next_token;
+        r.halt_prob = 0.0f;  // no halt in standalone
+        r.halted    = 0;
+        r.loop      = pos;
+        return r;
+    }
+
+    // ── HYBRID mode (mamb != NULL): full Mamba forward with int8 x_proj/dt_proj
     int d_model = w->d_model;
 
     // 1. Token embedding lookup (float32 from MAMB)
@@ -449,6 +505,8 @@ int oosi_generate(
     int last_tok = (prompt_len > 0) ? prompt_tokens[prompt_len - 1] : 1;  // 1 = BOS fallback
 
     // Generate with adaptive halting
+    // Note: EOS tokens are masked at logit level in standalone mode.
+    // In hybrid mode, allow EOS to stop generation naturally.
     int generated = 0;
     while (generated < ctx->max_tokens) {
         OosiHaltResult r = oosi_forward_one(ctx, last_tok);
@@ -460,6 +518,8 @@ int oosi_generate(
         last_tok = r.token;
 
         if (r.halted) break;
+        // Stop on EOS only if we've generated some content (hybrid mode)
+        if (r.token == 0 && generated >= 4) break;
     }
 
     return generated;
