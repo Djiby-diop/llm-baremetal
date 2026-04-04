@@ -101,7 +101,8 @@ SsmStatus llmk_oo_infer_init(
     uint32_t seed,
     int max_tokens
 ) {
-    if (!oosi || !mamb) return SSM_ERR_BADCONFIG;
+    if (!oosi) return SSM_ERR_BADCONFIG;
+    // mamb may be NULL when using OOSI-only mode (int8 projections only)
 
     SsmStatus s = oosi_gen_ctx_init(
         &g_oosi_ctx,

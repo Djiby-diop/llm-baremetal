@@ -83,11 +83,11 @@ static inline void djibmark_record(const CHAR8* func, UINT16 line, UINT16 phase)
 }
 
 // Convenience macros (omnipresent in code)
-#define DJIBMARK_BOOT()     djibmark_record(__func__, __LINE__, DJIBMARK_PHASE_BOOT)
-#define DJIBMARK_PREFILL()  djibmark_record(__func__, __LINE__, DJIBMARK_PHASE_PREFILL)
-#define DJIBMARK_DECODE()   djibmark_record(__func__, __LINE__, DJIBMARK_PHASE_DECODE)
-#define DJIBMARK_REPL()     djibmark_record(__func__, __LINE__, DJIBMARK_PHASE_REPL)
-#define DJIBMARK()          djibmark_record(__func__, __LINE__, DJIBMARK_PHASE_REPL)
+#define DJIBMARK_BOOT()     djibmark_record((const CHAR8*)__func__, __LINE__, DJIBMARK_PHASE_BOOT)
+#define DJIBMARK_PREFILL()  djibmark_record((const CHAR8*)__func__, __LINE__, DJIBMARK_PHASE_PREFILL)
+#define DJIBMARK_DECODE()   djibmark_record((const CHAR8*)__func__, __LINE__, DJIBMARK_PHASE_DECODE)
+#define DJIBMARK_REPL()     djibmark_record((const CHAR8*)__func__, __LINE__, DJIBMARK_PHASE_REPL)
+#define DJIBMARK()          djibmark_record((const CHAR8*)__func__, __LINE__, DJIBMARK_PHASE_REPL)
 
 // Query API
 static inline UINT32 djibmark_count(void) {

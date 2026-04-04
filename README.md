@@ -12,6 +12,20 @@ By Djiby Diop
 `llm-baremetal` is the **sovereign runtime** of the larger Operating Organism vision.
 It is meant to be preserved and evolved as the bare-metal / survival / recovery pillar of the system, not replaced.
 
+## OO-SomaMind V1 integration
+
+The current `OO-SomaMind V1` runtime contract is:
+
+- `MAMB` = executable bare-metal backbone format
+- `OOSS` = future OO sidecar / enriched extension format
+
+Reference docs:
+
+- [docs/OO_SOMAMIND_RUNTIME_CONTRACT.md](docs/OO_SOMAMIND_RUNTIME_CONTRACT.md)
+- [../oo-system/docs/OO_SOMAMIND_V1_INTEGRATION_CONTRACT.md](../oo-system/docs/OO_SOMAMIND_V1_INTEGRATION_CONTRACT.md)
+
+Runtime-compatible exports can be produced either from the local runtime-side exporter or from the model-side bridge exporter in [../oo-model/scripts/export_mamb_binary.py](../oo-model/scripts/export_mamb_binary.py).
+
 ## Build (Windows + WSL)
 
 ### Model weights (not in git)

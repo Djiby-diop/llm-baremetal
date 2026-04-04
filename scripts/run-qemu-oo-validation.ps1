@@ -20,8 +20,20 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSCommandPath
-$autorunScript = Join-Path $root 'test-qemu-autorun.ps1'
-$handoffScript = Join-Path $root 'test-qemu-handoff.ps1'
+$repoRoot = Split-Path -Parent $root
+
+$autorunCandidates = @(
+  (Join-Path $repoRoot 'tests\test-qemu-autorun.ps1'),
+  (Join-Path $repoRoot 'test-qemu-autorun.ps1')
+)
+
+$handoffCandidates = @(
+  (Join-Path $repoRoot 'tests\test-qemu-handoff.ps1'),
+  (Join-Path $repoRoot 'test-qemu-handoff.ps1')
+)
+
+$autorunScript = $autorunCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+$handoffScript = $handoffCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
 foreach ($path in @($autorunScript, $handoffScript)) {
   if (-not (Test-Path -LiteralPath $path)) {
@@ -36,37 +48,37 @@ function Invoke-Step([string]$label, [scriptblock]$action) {
 }
 
 function Invoke-AutorunMode([string]$autorunMode) {
-  $args = @{
+  $callParams = @{
     Mode = $autorunMode
     Accel = $Accel
     MemMB = $MemMB
     TimeoutSec = $TimeoutSec
   }
   if ($SkipPrebuild) {
-    $args['SkipPrebuild'] = $true
+    $callParams['SkipPrebuild'] = $true
   }
   if ($autorunMode -eq 'oo_consult_smoke') {
-    $args['ModelBin'] = $ModelBin
+    $callParams['ModelBin'] = $ModelBin
   }
-  & $autorunScript @args
+  & $autorunScript @callParams
   if ($LASTEXITCODE -ne 0) {
     throw "test-qemu-autorun.ps1 failed for mode=$autorunMode ($LASTEXITCODE)"
   }
 }
 
 function Invoke-HandoffMode {
-  $args = @{
+  $callParams = @{
     Accel = $Accel
     MemMB = $MemMB
     TimeoutSec = $TimeoutSec
   }
   if ($SkipPrebuild) {
-    $args['SkipPrebuild'] = $true
+    $callParams['SkipPrebuild'] = $true
   }
   if ($OoHostRoot) {
-    $args['OoHostRoot'] = $OoHostRoot
+    $callParams['OoHostRoot'] = $OoHostRoot
   }
-  & $handoffScript @args
+  & $handoffScript @callParams
   if ($LASTEXITCODE -ne 0) {
     throw "test-qemu-handoff.ps1 failed ($LASTEXITCODE)"
   }
