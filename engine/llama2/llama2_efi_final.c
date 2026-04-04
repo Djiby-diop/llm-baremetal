@@ -62,6 +62,18 @@
 #include "gguf_loader.h"
 #include "gguf_infer.h"
 
+// OOSI v2 + OO inference bridge
+#include "oosi_loader.h"
+#include "oosi_infer.h"
+#include "llmk_oo_infer.h"
+
+// OOSI v3 — full standalone Mamba (all weights int8)
+#include "../ssm/oosi_v3_loader.h"
+#include "../ssm/oosi_v3_infer.h"
+
+// Forward declarations for static helpers used before their definitions
+static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
+
 typedef enum {
     LLMK_MODEL_FMT_UNKNOWN = 0,
     LLMK_MODEL_FMT_BIN = 1,
@@ -466,6 +478,18 @@ static int llmk_char16_endswith_ci(const CHAR16 *s, const CHAR16 *suffix) {
     const CHAR16 *p = s + (sl - su);
     for (UINTN i = 0; i < su; i++) {
         if (llmk_char16_tolower((int)p[i]) != llmk_char16_tolower((int)suffix[i])) return 0;
+    }
+    return 1;
+}
+
+static int llmk_char16_startswith_ci(const CHAR16 *s, const CHAR16 *prefix) {
+    if (!s || !prefix) return 0;
+    UINTN sl = StrLen(s);
+    UINTN pl = StrLen(prefix);
+    if (pl == 0) return 1;
+    if (sl < pl) return 0;
+    for (UINTN i = 0; i < pl; i++) {
+        if (llmk_char16_tolower((int)s[i]) != llmk_char16_tolower((int)prefix[i])) return 0;
     }
     return 1;
 }
@@ -1625,6 +1649,44 @@ int   g_djibion_active = 0;
 
 // Root volume handle (set after OpenVolume). Used for best-effort dumps to files.
 EFI_FILE_HANDLE g_root = NULL;
+
+// ── OOSI v2 globals ──────────────────────────────────────────────────────────
+// Populated by /ssm_load <file.bin>. All pointers into WEIGHTS arena (cold zone).
+static OosiWeights  g_oosi_weights;
+static int          g_oosi_weights_valid = 0;
+
+// Warm-zone scratch buffers for inference (allocated once from SCRATCH arena)
+// Mamba-2.8B sizes: d_model=2560, d_inner=5120, vocab=50282
+#define G_OOSI_D_MODEL  2560
+#define G_OOSI_D_INNER  5120
+#define G_OOSI_VOCAB    51200
+
+static ssm_f32 *g_oosi_x_buf    = NULL;  // [2560]
+static ssm_f32 *g_oosi_x_out    = NULL;  // [2560]
+static ssm_f32 *g_oosi_scratch  = NULL;  // [8 * 5120]
+static ssm_f32 *g_oosi_logits   = NULL;  // [51200]
+static ssm_f32 *g_oosi_halt_buf = NULL;  // [2561]
+static ssm_f32 *g_oosi_halt_h1  = NULL;  // [512]
+static ssm_f32 *g_oosi_halt_h2  = NULL;  // [64]
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── OOSI v3 globals ──────────────────────────────────────────────────────────
+// Full-standalone Mamba: all weights int8, no MAMB float32 needed.
+// Activated when /ssm_load detects magic 0x4F4F5333 ("OOS3").
+static OosiV3Weights  g_oosi_v3_weights;
+static OosiV3GenCtx   g_oosi_v3_ctx;
+static int            g_oosi_v3_valid = 0;
+
+// v3 scratch buffers — allocated from zones arenas on first /ssm_load
+static ssm_f32 *g_v3_scratch   = NULL;   // [D + 4*Di + Dt + 2*S] ≈ 91 KB
+static ssm_f32 *g_v3_logits    = NULL;   // [vocab_size] ≈ 197 KB
+static ssm_f32 *g_v3_h_state   = NULL;   // [n_layer * d_inner * d_state] ≈ 20 MB
+static ssm_f32 *g_v3_conv_buf  = NULL;   // [n_layer * d_inner * d_conv]  ≈ 5 MB
+static int     *g_v3_conv_pos  = NULL;   // [n_layer]                     ≈ 256 B
+static ssm_f32 *g_v3_halt_h1  = NULL;   // [512]
+static ssm_f32 *g_v3_halt_h2  = NULL;   // [64]
+static ssm_f32 *g_v3_halt_buf  = NULL;   // [halt_d_input + 1]
+// ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
 static EFI_GRAPHICS_OUTPUT_PROTOCOL *g_gop = NULL;
@@ -5275,6 +5337,12 @@ static int llmk_is_model_file_name16(const CHAR16 *name) {
     // OO persistence / recovery files are not models, but can end up as .BIN.
     if (llmk_char16_endswith_ci(name, L"OOSTATE.BIN")) return 0;
     if (llmk_char16_endswith_ci(name, L"OORECOV.BIN")) return 0;
+    // OOSI v2 SSM binaries: loaded via /ssm_load, not auto-selected as Llama2 models.
+    if (llmk_char16_startswith_ci(name, L"oo_mamba")) return 0;
+    if (llmk_char16_startswith_ci(name, L"oo_v")) return 0;
+    if (llmk_char16_endswith_ci(name, L"_int8.bin")) return 0;
+    if (llmk_char16_startswith_ci(name, L"oosi_")) return 0;
+    if (llmk_char16_startswith_ci(name, L"oo_ssm")) return 0;
     if (llmk_char16_endswith_ci(name, L".bin")) return 1;
     if (llmk_char16_endswith_ci(name, L".gguf")) return 1;
     return 0;
@@ -5588,8 +5656,6 @@ static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT6
 
 static void llmk_repl_no_model_loop(void) {
     // Minimal repl.cfg parsing for autorun in no-model mode.
-    // (We can't rely on the main cfg loader here because this loop is used
-    // in early failure paths too.)
     int autorun_autostart = 0;
     int autorun_shutdown_when_done = 0;
     CHAR16 autorun_file[96];
@@ -5645,10 +5711,15 @@ static void llmk_repl_no_model_loop(void) {
                         autorun_autostart = (val[0] == '1' || val[0] == 't' || val[0] == 'T' || val[0] == 'y' || val[0] == 'Y');
                     } else if (my_strncmp(key, "autorun_shutdown_when_done", 26) == 0 && key[26] == 0) {
                         autorun_shutdown_when_done = (val[0] == '1' || val[0] == 't' || val[0] == 'T' || val[0] == 'y' || val[0] == 'Y');
-                    } else if (my_strncmp(key, "autorun_file", 11) == 0 && key[11] == 0) {
+                    } else if (my_strncmp(key, "autorun_file", 12) == 0 && key[12] == 0) {
                         if (val[0]) {
                             ascii_to_char16(autorun_file, val, (int)(sizeof(autorun_file) / sizeof(autorun_file[0])));
                         }
+                    } else if (my_strncmp(key, "max_new_tokens", 14) == 0 && key[14] == 0) {
+                        int v = 0;
+                        for (const char *vp = val; *vp >= '0' && *vp <= '9'; vp++)
+                            v = v * 10 + (*vp - '0');
+                        if (v > 0 && v <= 4096) g_max_new_tokens = v;
                     }
                 }
 
@@ -6195,11 +6266,348 @@ static void llmk_repl_no_model_loop(void) {
             const char *arg = prompt + 9;
             while (*arg == ' ' || *arg == '\t') arg++;
             if (!arg[0]) {
-                Print(L"\r\nUsage: /ssm_load <weight_file.mamb>\r\n");
-                Print(L"  Load Mamba SSM weights into COLD zone for inference.\r\n\r\n");
+                Print(L"\r\nUsage: /ssm_load <weight_file.bin>\r\n");
+                Print(L"  Load OOSI v2 int8 weights (generated by export_int8.py).\r\n");
+                Print(L"  File must be on the EFI partition (same folder as BOOTX64.EFI).\r\n\r\n");
                 continue;
             }
-            llmk_mind_bind_core_backbone_v1(arg, 0);
+
+            // ── Convert ASCII path to CHAR16 for EFI ─────────────────────
+            CHAR16 oosi_path16[192];
+            ascii_to_char16(oosi_path16, arg, (int)(sizeof(oosi_path16) / sizeof(oosi_path16[0])));
+            Print(L"\r\n[OOSI] Loading: %s ...\r\n", oosi_path16);
+
+            // ── Open EFI file ─────────────────────────────────────────────
+            EFI_FILE_HANDLE oosi_f = NULL;
+            EFI_STATUS ost = uefi_call_wrapper(g_root->Open, 5, g_root, &oosi_f,
+                                               oosi_path16, EFI_FILE_MODE_READ, 0ULL);
+            if (EFI_ERROR(ost)) {
+                Print(L"[OOSI] ERROR: cannot open %s (%r)\r\n\r\n", oosi_path16, ost);
+                continue;
+            }
+
+            // ── Get file size ─────────────────────────────────────────────
+            EFI_FILE_INFO *finfo = NULL;
+            UINTN finfo_sz = SIZE_OF_EFI_FILE_INFO + 512;
+            // Use AllocatePool (not arena) — finfo is small and transient.
+            {
+                EFI_STATUS fpst = uefi_call_wrapper(BS->AllocatePool, 3,
+                                                    EfiLoaderData, finfo_sz, (void **)&finfo);
+                if (EFI_ERROR(fpst) || !finfo) {
+                    Print(L"[OOSI] ERROR: alloc for file info failed (%r)\r\n\r\n", fpst);
+                    uefi_call_wrapper(oosi_f->Close, 1, oosi_f);
+                    continue;
+                }
+            }
+            ost = uefi_call_wrapper(oosi_f->GetInfo, 4, oosi_f, &gEfiFileInfoGuid,
+                                    &finfo_sz, finfo);
+            if (EFI_ERROR(ost)) {
+                Print(L"[OOSI] ERROR: GetInfo failed (%r)\r\n\r\n", ost);
+                uefi_call_wrapper(oosi_f->Close, 1, oosi_f);
+                continue;
+            }
+            UINT64 oosi_size = finfo->FileSize;
+            Print(L"[OOSI] File size: %d MB\r\n", (int)(oosi_size / (1024*1024)));
+
+            // ── Peek magic (4 bytes) to detect v2 vs v3 before zones_init ──
+            UINT32 peek_magic = 0;
+            {
+                UINT8 mb[4] = {0,0,0,0}; UINTN msz = 4;
+                uefi_call_wrapper(oosi_f->Read, 3, oosi_f, &msz, mb);
+                if (msz == 4)
+                    peek_magic = (UINT32)mb[0] | ((UINT32)mb[1]<<8)
+                               | ((UINT32)mb[2]<<16) | ((UINT32)mb[3]<<24);
+                UINT64 rewind = 0;
+                uefi_call_wrapper(oosi_f->SetPosition, 2, oosi_f, rewind);
+            }
+
+            // ── Ensure zones initialized for WEIGHTS arena ────────────────
+            // If boot happened in no-model mode, zones were not set up yet.
+            if (BS && g_zones.zone_b_base == 0) {
+                Print(L"[OOSI] Initializing memory zones (no-model boot path)...\r\n");
+                LlmkZonesConfig ssm_cfg;
+                ssm_cfg.weights_bytes     = oosi_size;
+                // v3: SSM recurrent state (20MB h_state + 5MB conv_buf + 7MB margin = 32MB)
+                // v2: 16MB KV cache
+                ssm_cfg.kv_bytes = (peek_magic == OOSI_V3_MAGIC)
+                                   ? 32ULL * 1024ULL * 1024ULL
+                                   : 16ULL * 1024ULL * 1024ULL;
+                ssm_cfg.scratch_bytes     = 20ULL * 1024ULL * 1024ULL; // 20MB: 13MB vocab + 7MB work
+                ssm_cfg.activations_bytes =  4ULL * 1024ULL * 1024ULL;
+                ssm_cfg.zone_c_bytes      =  4ULL * 1024ULL * 1024ULL;
+                ssm_cfg.total_bytes       = ssm_cfg.weights_bytes + ssm_cfg.kv_bytes
+                                          + ssm_cfg.scratch_bytes + ssm_cfg.activations_bytes
+                                          + ssm_cfg.zone_c_bytes;
+                EFI_STATUS zst = llmk_zones_init(BS, &ssm_cfg, &g_zones);
+                if (EFI_ERROR(zst)) {
+                    Print(L"[OOSI] ERROR: zones_init failed (%r)\r\n\r\n", zst);
+                    uefi_call_wrapper(oosi_f->Close, 1, oosi_f);
+                    if (finfo) uefi_call_wrapper(BS->FreePool, 1, finfo);
+                    continue;
+                }
+            }
+
+            // ── Allocate in WEIGHTS arena (cold zone) ─────────────────────
+            void *oosi_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_WEIGHTS,
+                                              oosi_size, 64);
+            if (!oosi_buf) {
+                Print(L"[OOSI] ERROR: not enough WEIGHTS arena space (%d MB needed)\r\n\r\n",
+                      (int)(oosi_size / (1024*1024)));
+                uefi_call_wrapper(oosi_f->Close, 1, oosi_f);
+                if (finfo) uefi_call_wrapper(BS->FreePool, 1, finfo);
+                continue;
+            }
+
+            // ── Read file in 4MB chunks ───────────────────────────────────
+            UINT8 *dst = (UINT8 *)oosi_buf;
+            UINT64 remaining = oosi_size;
+            int read_ok = 1;
+            while (remaining > 0) {
+                UINTN chunk = (remaining > 4*1024*1024) ? 4*1024*1024 : (UINTN)remaining;
+                ost = uefi_call_wrapper(oosi_f->Read, 3, oosi_f, &chunk, dst);
+                if (EFI_ERROR(ost) || chunk == 0) { read_ok = 0; break; }
+                dst += chunk;
+                remaining -= chunk;
+            }
+            uefi_call_wrapper(oosi_f->Close, 1, oosi_f);
+            if (!read_ok) {
+                Print(L"[OOSI] ERROR: file read failed\r\n\r\n");
+                continue;
+            }
+
+            // ── Parse OOSI binary — detect v2 or v3 ─────────────────────
+            // Check magic in first 4 bytes
+            UINT32 oosi_magic = 0;
+            if (oosi_size >= 4) {
+                const UINT8 *hbytes = (const UINT8 *)oosi_buf;
+                oosi_magic = (UINT32)hbytes[0]
+                           | ((UINT32)hbytes[1] <<  8)
+                           | ((UINT32)hbytes[2] << 16)
+                           | ((UINT32)hbytes[3] << 24);
+            }
+
+            SsmStatus sst = SSM_OK;
+
+            if (oosi_magic == OOSI_V3_MAGIC) {
+                // ── OOSI v3: full standalone Mamba ───────────────────────
+                Print(L"[OOSI] Detected v3 format (full standalone Mamba)\r\n");
+                sst = oosi_v3_load(&g_oosi_v3_weights, oosi_buf, oosi_size);
+                if (sst != SSM_OK) {
+                    Print(L"[OOSI] ERROR: oosi_v3_load failed (code %d)\r\n\r\n", sst);
+                    continue;
+                }
+                sst = oosi_v3_validate(&g_oosi_v3_weights);
+                if (sst != SSM_OK) {
+                    Print(L"[OOSI] ERROR: v3 validation failed (code %d)\r\n\r\n", sst);
+                    continue;
+                }
+                Print(L"[OOSI-v3] d_model=%d n_layer=%d vocab=%d d_inner=%d\r\n",
+                      g_oosi_v3_weights.d_model, g_oosi_v3_weights.n_layer,
+                      g_oosi_v3_weights.vocab_size, g_oosi_v3_weights.d_inner);
+
+                // Allocate v3 runtime buffers from warm arenas
+                int V3D  = g_oosi_v3_weights.d_model;
+                int V3Di = g_oosi_v3_weights.d_inner;
+                int V3S  = g_oosi_v3_weights.d_state;
+                int V3Dc = g_oosi_v3_weights.d_conv;
+                int V3Dt = g_oosi_v3_weights.dt_rank;
+                int V3N  = g_oosi_v3_weights.n_layer;
+                int V3V  = g_oosi_v3_weights.vocab_size;
+                int V3Hd = (int)g_oosi_v3_weights.halt_d_input;
+
+                UINT64 scratch_b = (UINT64)(3*V3D + 4*V3Di + V3Dt + 2*V3S + 4) * sizeof(ssm_f32);
+                UINT64 h_state_b = (UINT64)V3N * V3Di * V3S * sizeof(ssm_f32);
+                UINT64 conv_b    = (UINT64)V3N * V3Di * V3Dc * sizeof(ssm_f32);
+                UINT64 conv_pb   = (UINT64)V3N * sizeof(int);
+
+                g_v3_scratch  = llmk_arena_alloc(&g_zones, LLMK_ARENA_ACTIVATIONS, scratch_b, 64);
+                g_v3_logits   = llmk_arena_alloc(&g_zones, LLMK_ARENA_ACTIVATIONS,
+                                                  (UINT64)V3V * sizeof(ssm_f32), 16);
+                g_v3_h_state  = llmk_arena_alloc(&g_zones, LLMK_ARENA_KV_CACHE, h_state_b, 64);
+                g_v3_conv_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_KV_CACHE, conv_b, 64);
+                g_v3_conv_pos = llmk_arena_alloc(&g_zones, LLMK_ARENA_ACTIVATIONS, conv_pb, 4);
+                g_v3_halt_h1  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, 512*sizeof(ssm_f32), 16);
+                g_v3_halt_h2  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, 64*sizeof(ssm_f32), 16);
+                g_v3_halt_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH,
+                                                  (UINT64)(V3Hd + 1) * sizeof(ssm_f32), 16);
+
+                if (!g_v3_scratch || !g_v3_logits || !g_v3_h_state ||
+                    !g_v3_conv_buf || !g_v3_conv_pos || !g_v3_halt_h1 ||
+                    !g_v3_halt_h2 || !g_v3_halt_buf) {
+                    Print(L"[OOSI-v3] ERROR: buffer alloc failed (out of arena space)\r\n\r\n");
+                    Print(L"  Need ~%d MB KV-cache for h_state+conv_buf\r\n",
+                          (int)((h_state_b + conv_b) / (1024*1024)));
+                    continue;
+                }
+
+                sst = oosi_v3_gen_ctx_init(
+                    &g_oosi_v3_ctx, &g_oosi_v3_weights,
+                    g_v3_scratch, g_v3_logits,
+                    g_v3_h_state, g_v3_conv_buf, g_v3_conv_pos,
+                    g_v3_halt_h1, g_v3_halt_h2, g_v3_halt_buf,
+                    0.80f,   // halt_threshold
+                    0.7f,    // temperature
+                    0.90f,   // top_p
+                    0xCAFEBABEu,
+                    (g_max_new_tokens > 0) ? g_max_new_tokens : 128
+                );
+                if (sst != SSM_OK) {
+                    Print(L"[OOSI-v3] ERROR: gen_ctx_init failed (code %d)\r\n\r\n", sst);
+                    continue;
+                }
+                g_oosi_v3_valid = 1;
+                Print(L"[OOSI-v3] OK: full SSM inference ready. Use /ssm_infer <text>\r\n");
+
+                // ── Best-effort: load tokenizer from EFI volume ──
+                // Try gpt_neox_tokenizer.bin first (50282 vocab), fall back to tokenizer.bin (32K vocab)
+                {
+                    EFI_FILE_HANDLE tok_f = NULL;
+                    EFI_STATUS tok_st = uefi_call_wrapper(
+                        g_root->Open, 5, g_root, &tok_f,
+                        L"gpt_neox_tokenizer.bin",
+                        EFI_FILE_MODE_READ, 0);
+                    if (EFI_ERROR(tok_st) || !tok_f) {
+                        tok_f = NULL;
+                        tok_st = uefi_call_wrapper(
+                            g_root->Open, 5, g_root, &tok_f,
+                            L"tokenizer.bin",
+                            EFI_FILE_MODE_READ, 0);
+                    }
+                    if (!EFI_ERROR(tok_st) && tok_f) {
+                        EFI_FILE_INFO *tfi = NULL;
+                        UINTN tfi_sz = sizeof(EFI_FILE_INFO) + 256;
+                        uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, tfi_sz, (void**)&tfi);
+                        if (tfi) {
+                            tok_st = uefi_call_wrapper(tok_f->GetInfo, 4, tok_f,
+                                         &gEfiFileInfoGuid, &tfi_sz, tfi);
+                            if (!EFI_ERROR(tok_st)) {
+                                UINT64 tok_sz = tfi->FileSize;
+                                void *tok_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH,
+                                                                  tok_sz, 16);
+                                if (tok_buf) {
+                                    UINTN rd = (UINTN)tok_sz;
+                                    tok_st = uefi_call_wrapper(tok_f->Read, 3, tok_f, &rd, tok_buf);
+                                    if (!EFI_ERROR(tok_st) && rd == (UINTN)tok_sz) {
+                                        // Allocate vocab buffer in SCRATCH arena (~13MB for 50280 entries)
+                                        int voc_cap = V3V > 0 ? V3V : 50282;
+                                        UINT64 voc_bytes = (UINT64)voc_cap * sizeof(BpeVocabEntry);
+                                        BpeVocabEntry *vbuf = (BpeVocabEntry *)llmk_arena_alloc(
+                                            &g_zones, LLMK_ARENA_SCRATCH, voc_bytes, 16);
+                                        if (vbuf) {
+                                            SsmStatus ts = llmk_oo_infer_tokenizer_init(
+                                                vbuf, voc_cap, tok_buf, tok_sz);
+                                            if (ts == SSM_OK) {
+                                                Print(L"[OOSI-v3] Tokenizer loaded (%d KB)\r\n",
+                                                      (int)(tok_sz / 1024));
+                                            } else {
+                                                Print(L"[OOSI-v3] WARN: tokenizer parse failed (%d)\r\n", ts);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            uefi_call_wrapper(BS->FreePool, 1, tfi);
+                        }
+                        uefi_call_wrapper(tok_f->Close, 1, tok_f);
+                    } else {
+                        Print(L"[OOSI-v3] WARN: no tokenizer found (tried gpt_neox_tokenizer.bin, tokenizer.bin)\r\n");
+                    }
+                }
+                Print(L"\r\n");
+                continue;
+            }
+            // ── OOSI v2: quantized x_proj/dt_proj subset ──────────────────
+            sst = oosi_load(&g_oosi_weights, oosi_buf, oosi_size);
+            if (sst != SSM_OK) {
+                Print(L"[OOSI] ERROR: oosi_load failed (code %d)\r\n\r\n", sst);
+                Print(L"  Is this a valid OOSI v2 binary (export_int8.py output)?\r\n\r\n");
+                continue;
+            }
+            g_oosi_weights_valid = 1;
+            Print(L"[OOSI] Weights parsed OK (d_model=%d n_layer=%d vocab=%d)\r\n",
+                  (int)g_oosi_weights.header.d_model,
+                  (int)g_oosi_weights.header.n_layer,
+                  (int)g_oosi_weights.header.vocab_size);
+
+            // ── Allocate warm scratch buffers ─────────────────────────────
+            g_oosi_x_buf   = (ssm_f32 *)llmk_arena_alloc(&g_zones, LLMK_ARENA_ACTIVATIONS,
+                                 G_OOSI_D_MODEL * sizeof(ssm_f32), 16);
+            g_oosi_x_out   = (ssm_f32 *)llmk_arena_alloc(&g_zones, LLMK_ARENA_ACTIVATIONS,
+                                 G_OOSI_D_MODEL * sizeof(ssm_f32), 16);
+            g_oosi_scratch = (ssm_f32 *)llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH,
+                                 8 * G_OOSI_D_INNER * sizeof(ssm_f32), 16);
+            g_oosi_logits  = (ssm_f32 *)llmk_arena_alloc(&g_zones, LLMK_ARENA_ACTIVATIONS,
+                                 G_OOSI_VOCAB * sizeof(ssm_f32), 16);
+            g_oosi_halt_buf= (ssm_f32 *)llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH,
+                                 (G_OOSI_D_MODEL + 1) * sizeof(ssm_f32), 16);
+            g_oosi_halt_h1 = (ssm_f32 *)llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH,
+                                 512 * sizeof(ssm_f32), 16);
+            g_oosi_halt_h2 = (ssm_f32 *)llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH,
+                                 64 * sizeof(ssm_f32), 16);
+
+            if (!g_oosi_x_buf || !g_oosi_x_out || !g_oosi_scratch ||
+                !g_oosi_logits || !g_oosi_halt_buf || !g_oosi_halt_h1 || !g_oosi_halt_h2) {
+                Print(L"[OOSI] ERROR: scratch buffer allocation failed\r\n\r\n");
+                g_oosi_weights_valid = 0;
+                continue;
+            }
+
+            // ── Init OO inference engine ──────────────────────────────────
+            // Note: MAMB float32 weights not loaded yet — passing NULL is OK,
+            // the engine will use OOSI int8 projections only (hybrid mode).
+            sst = llmk_oo_infer_init(
+                &g_oosi_weights, NULL,  // oosi + mamb (mamb=NULL = standalone embedding mode)
+                g_oosi_x_buf, g_oosi_x_out, g_oosi_scratch,
+                g_oosi_logits, g_oosi_halt_buf, g_oosi_halt_h1, g_oosi_halt_h2,
+                0.85f,  // halt_threshold (higher = more output)
+                0.5f,   // temperature (lower = less random in embedding mode)
+                0.85f,  // top_p
+                0xDEADBEEFu,
+                (g_max_new_tokens > 12) ? 12 : g_max_new_tokens  // cap at 12 in standalone
+            );
+            if (sst != SSM_OK) {
+                Print(L"[OOSI] WARNING: llmk_oo_infer_init failed (code %d) - inference disabled\r\n\r\n", sst);
+                g_oosi_weights_valid = 0;
+                continue;
+            }
+
+            // ── Load GPT-NeoX tokenizer (gpt_neox_tokenizer.bin) ──────────
+            {
+                void *tok_raw = NULL; UINTN tok_len = 0;
+                EFI_STATUS tst = llmk_read_entire_file_best_effort(
+                        L"gpt_neox_tokenizer.bin", &tok_raw, &tok_len);
+                if (EFI_ERROR(tst) || !tok_raw || tok_len == 0) {
+                    if (tok_raw) uefi_call_wrapper(BS->FreePool, 1, tok_raw);
+                    tok_raw = NULL; tok_len = 0;
+                    tst = llmk_read_entire_file_best_effort(
+                            L"tokenizer.bin", &tok_raw, &tok_len);
+                }
+                if (!EFI_ERROR(tst) && tok_raw && tok_len > 0) {
+                    // BpeVocabEntry[vocab_size] buffer — allocate from SCRATCH arena
+                    int vocab_sz = (int)g_oosi_weights.header.vocab_size;
+                    if (vocab_sz <= 0) vocab_sz = 50280; // GPT-NeoX default
+                    UINTN vocab_buf_sz = (UINTN)vocab_sz * sizeof(BpeVocabEntry);
+                    BpeVocabEntry *vbuf = llmk_arena_alloc(&g_zones,
+                            LLMK_ARENA_SCRATCH, vocab_buf_sz, 8);
+                    if (vbuf) {
+                        SsmStatus tss = llmk_oo_infer_tokenizer_init(
+                                vbuf, vocab_sz, tok_raw, (uint64_t)tok_len);
+                        if (tss == SSM_OK)
+                            Print(L"[OOSI] Tokenizer loaded (vocab=%d, %d bytes)\r\n",
+                                  vocab_sz, (int)tok_len);
+                        else
+                            Print(L"[OOSI] WARNING: tokenizer init failed (code %d) - char-level fallback\r\n", tss);
+                    } else {
+                        Print(L"[OOSI] WARNING: no SCRATCH arena space for vocab buf - char-level fallback\r\n");
+                    }
+                    uefi_call_wrapper(BS->FreePool, 1, tok_raw);
+                } else {
+                    Print(L"[OOSI] WARNING: tokenizer file not found - char-level fallback\r\n");
+                }
+            }
+
+            llmk_mind_mark_core_active(arg, "oosi-v2");
+            Print(L"[OOSI] OK: inference engine ready. Use /ssm_infer <text>\r\n\r\n");
             continue;
         }
         if (my_strncmp(prompt, "/ssm_infer", 10) == 0) {
@@ -6207,12 +6615,106 @@ static void llmk_repl_no_model_loop(void) {
             while (*text == ' ' || *text == '\t') text++;
             if (!text[0]) {
                 Print(L"\r\nUsage: /ssm_infer <text>\r\n");
-                Print(L"  Run Mamba SSM inference on input text (model must be loaded).\r\n\r\n");
+                Print(L"  Run Mamba OOSI inference. Load with /ssm_load first.\r\n\r\n");
                 continue;
             }
-            Print(L"\r\n[SSM] Input: ");
-            for (const char *c = text; *c; c++) Print(L"%c", (CHAR16)*c);
-            Print(L"\r\n[SSM] Inference: model not yet loaded. Use /ssm_load first.\r\n\r\n");
+            if (!g_oosi_v3_valid && (!g_oosi_weights_valid || !llmk_oo_infer_is_ready())) {
+                Print(L"\r\n[OOSI] No model loaded. Use /ssm_load <file.bin> first.\r\n\r\n");
+                continue;
+            }
+
+            Print(L"\r\n[OOSI] Input: ");
+            llmk_print_ascii(text);
+            Print(L"\r\n[OOSI] Thinking...\r\n");
+
+            // ── OOSI v3: full standalone Mamba SSM inference ─────────────
+            if (g_oosi_v3_valid) {
+                // Tokenize using v2 tokenizer (shared BPE vocab)
+                int prompt_tokens[512];
+                int prompt_len = llmk_oo_infer_tokenize(text, prompt_tokens, 512);
+                if (prompt_len <= 0) {
+                    // Fallback: encode raw bytes as token IDs
+                    prompt_len = 0;
+                    for (int i = 0; text[i] && prompt_len < 512; i++)
+                        prompt_tokens[prompt_len++] = (unsigned char)text[i] + 3;
+                }
+
+                Print(L"[OOSI-v3] Prompt tokens: %d — generating (SSM recurrent)...\r\n",
+                      prompt_len);
+
+                // Callback prints each token as it is generated
+                struct { int count; } cb_state; cb_state.count = 0;
+                // Simple blocking generate (tokens decoded inline)
+                int out_ids[256];
+                int n_out = 0;
+
+                oosi_v3_gen_ctx_reset(&g_oosi_v3_ctx);
+                // Feed prompt
+                for (int pi = 0; pi < prompt_len; pi++)
+                    oosi_v3_forward_one(&g_oosi_v3_ctx, prompt_tokens[pi]);
+                g_oosi_v3_ctx.tokens_generated = 0;
+
+                // Generate
+                int last = (prompt_len > 0) ? prompt_tokens[prompt_len - 1] : 0;
+                Print(L"[OOSI-v3] ");
+                while (n_out < g_oosi_v3_ctx.max_tokens && n_out < 256) {
+                    OosiV3HaltResult r = oosi_v3_forward_one(&g_oosi_v3_ctx, last);
+                    out_ids[n_out++] = r.token;
+                    // Print decoded token (best-effort)
+                    char tok_str[32]; int tok_len_out = 0;
+                    tok_len_out = llmk_oo_infer_decode_token(r.token,
+                                      tok_str, sizeof(tok_str));
+                    if (tok_len_out > 0) {
+                        for (int ci = 0; ci < tok_len_out; ci++) {
+                            CHAR16 ch16[2];
+                            ch16[0] = (CHAR16)(unsigned char)tok_str[ci];
+                            ch16[1] = 0;
+                            Print(ch16);
+                        }
+                    } else {
+                        // Debug: show raw token ID when decode fails
+                        Print(L"<tok%d>", r.token);
+                    }
+                    last = r.token;
+                    if (r.halted) {
+                        Print(L"\r\n[OOSI-v3] halted (halt_prob=%.2f)\r\n",
+                              (double)r.halt_prob);
+                        break;
+                    }
+                    if (r.token == 0) {
+                        Print(L"\r\n[OOSI-v3] EOS token\r\n");
+                        break;
+                    }
+                }
+                Print(L"\r\n[OOSI-v3] Done: %d tokens generated\r\n\r\n", n_out);
+                continue;
+            }
+
+            // Tokenize
+            int prompt_tokens[256];
+            int prompt_len = llmk_oo_infer_tokenize(text, prompt_tokens, 256);
+            if (prompt_len <= 0) {
+                Print(L"[OOSI] ERROR: tokenization failed\r\n\r\n");
+                continue;
+            }
+
+            // Run inference
+            OoThinkResult result;
+            int n = llmk_oo_infer_think(prompt_tokens, prompt_len, &result);
+            if (n <= 0) {
+                Print(L"[OOSI] ERROR: inference failed (n=%d)\r\n\r\n", n);
+                continue;
+            }
+
+            // Display result
+            Print(L"[OOSI] Output (%d tokens, %d loops, P=%.2f%s):\r\n",
+                  result.tokens_generated,
+                  result.loops_taken,
+                  result.final_halt_prob,
+                  result.halted_naturally ? L"" : L" max");
+            Print(L"  ");
+            llmk_print_ascii(result.text);
+            Print(L"\r\n\r\n");
             continue;
         }
         if (my_strncmp(prompt, "/ssm_reset", 10) == 0) {
