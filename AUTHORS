@@ -1,0 +1,57 @@
+# AUTHORS — OO (Operating Organism) / llm-baremetal
+#
+# This file documents the intellectual property and contributions
+# to this project. Git history is the authoritative record.
+
+## Original Author & Architect
+
+Djiby Diop (@Djiby-diop)
+  - Project creator and sole architect (2024-present)
+  - All original code, design, and architecture decisions
+
+## Architecture & Systems designed by Djiby Diop:
+
+  - OO (Operating Organism) concept and vision
+  - Bare-metal UEFI boot system (efi_entry, efi_phases, 7-phase boot)
+  - Custom memory manager (zones, arenas, allocator)
+  - LLM inference engine without OS (Llama2 + GGUF + SSM)
+  - OOSI binary format (v2 int8-quantized, v3 full standalone Mamba)
+  - OOSI v3 loader and SSM recurrent inference engine
+  - SSM/Mamba bare-metal integration (oosi_v3_loader.c, oosi_v3_infer.c)
+  - HaltingHead mechanism (adaptive inference termination)
+  - OO-SomaMind runtime contract
+  - D+ policy engine (decision-making DSL)
+  - Sentinel/Warden safety system
+  - DjiBLAS (custom BLAS for bare-metal, AVX2 kernels)
+  - Memory pressure as pain signal (oo-warden/pressure)
+  - Hebbian arena learning (hot tensor reordering)
+  - Split-brain dual inference (RATIONAL + CREATIVE paths)
+  - Journal as auto-training dataset
+  - OO-Bus inter-subsystem messaging
+  - Hermes channel protocol
+  - All OO modules: diopion, diagnostion, memorion, orchestrion,
+    calibrion, compatibilion, synaption, conscience, immunion,
+    symbion, metabion, pheromion, cellion, collectivion, dreamion,
+    evolvion, ghost, morphion, neuralfs
+  - REPL system with autorun, /ssm_load, /ssm_infer commands
+  - USB boot image creation pipeline
+  - GPT-NeoX tokenizer integration for Mamba models
+
+## Third-party code incorporated (with attribution):
+
+  - llama2.c by Andrej Karpathy (MIT) — base transformer inference
+  - gnu-efi (BSD) — UEFI application framework
+  - ARM optimized-routines (MIT) — expf() math functions
+
+## Contributors:
+
+  - batteryphil (@batteryphil) — fork maintainer, testing, model hosting
+    NOTE: batteryphil's fork (github.com/batteryphil/llm-baremetal) is a
+    derivative of this repository. The original architecture, design, and
+    all subsystem code remain the intellectual property of Djiby Diop.
+
+## Contact:
+
+  Djiby Diop — djibydiop@proton.me
+  GitHub: https://github.com/Djiby-diop
+  HuggingFace: https://huggingface.co/djibydiop

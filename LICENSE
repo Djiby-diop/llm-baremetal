@@ -1,24 +1,38 @@
-MIT License
+                    GNU AFFERO GENERAL PUBLIC LICENSE
+                       Version 3, 19 November 2007
 
-Copyright (c) 2025 Djiby Diop
+Copyright (c) 2024-2026 Djiby Diop
+All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+============================================================================
+ADDITIONAL TERMS (pursuant to Section 7 of the AGPL-3.0):
+
+1. ATTRIBUTION — Any fork, derivative work, or deployment of this software
+   must prominently display:
+     "Based on OO (Operating Organism) by Djiby Diop"
+     "Original: https://github.com/Djiby-diop/llm-baremetal"
+
+2. COMMERCIAL USE — Commercial use, embedding in proprietary products, or
+   deployment as a service requires a separate commercial license from the
+   original author (Djiby Diop).
+
+3. NO TRADEMARK LICENSE — This license does not grant permission to use the
+   names "OO", "Operating Organism", "OO-SomaMind", "OOSI", or
+   "llm-baremetal" except as required for attribution under term 1.
+============================================================================
 
 ---
 
@@ -62,12 +76,12 @@ Users must download model weights separately via the provided setup.sh script.
 When using this software, please provide attribution:
 
 ```
-LLaMA2 Bare-Metal
-Copyright (c) 2025 Djiby Diop
-https://github.com/djibydiop/llm-baremetal
-Licensed under MIT License
+OO (Operating Organism) — Bare-Metal UEFI LLM/SSM Inference Engine
+Copyright (c) 2024-2026 Djiby Diop
+https://github.com/Djiby-diop/llm-baremetal
+Licensed under AGPL-3.0 with additional terms (see LICENSE)
 ```
 
 ---
 
-For questions about licensing, contact: djiby@example.com
+For licensing inquiries, contact: djibydiop@proton.me

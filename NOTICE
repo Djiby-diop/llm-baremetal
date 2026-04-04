@@ -1,0 +1,42 @@
+NOTICE — Intellectual Property Declaration
+==========================================
+
+Project: OO (Operating Organism) / llm-baremetal
+Author:  Djiby Diop
+Date:    2024-2026
+
+This notice serves as a formal declaration of intellectual property.
+
+1. ORIGINAL WORK
+   The OO (Operating Organism) architecture, including but not limited to:
+   - The bare-metal UEFI LLM/SSM inference engine
+   - The OOSI binary format (v2 and v3)
+   - The 7-phase boot system
+   - The zone-based memory allocator
+   - The D+ policy engine
+   - The Sentinel/Warden safety system
+   - The OO-Bus messaging protocol
+   - The HaltingHead inference mechanism
+   - The OO-SomaMind runtime contract
+   - All OO subsystem modules (20+ engines)
+   - The DjiBLAS bare-metal BLAS library
+   is the original work of Djiby Diop, created starting 2024.
+
+2. GIT HISTORY AS PROOF
+   The complete Git history of this repository constitutes legal proof
+   of authorship and timeline. All commits by "Djiby Diop" and "npdji"
+   are by the same person (Djiby Diop).
+
+3. DERIVATIVE WORKS
+   Any fork or derivative of this repository (including but not limited
+   to github.com/batteryphil/llm-baremetal) is subject to the terms of
+   the AGPL-3.0 license with additional terms as specified in LICENSE.
+
+4. PRIOR ART
+   This project builds upon llama2.c by Andrej Karpathy (MIT License)
+   for the base transformer inference logic. All other systems-level
+   architecture is original work by Djiby Diop.
+
+5. CONTACT
+   For licensing, partnership, or IP inquiries:
+   Djiby Diop — djibydiop@proton.me
