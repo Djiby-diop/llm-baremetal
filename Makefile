@@ -78,7 +78,7 @@ METABION_PROFILE_DEFAULT = metabion_profile_default.h
 REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
 	ssm_infer.o mamba_block.o mamba_weights.o bpe_tokenizer.o \
-	oosi_loader.o oosi_infer.o \
+	oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o \
 	oo-modules/djibion-engine/core/djibion.o \
 	oo-modules/diopion-engine/core/diopion.o \
 	oo-modules/diagnostion-engine/core/diagnostion.o \
@@ -99,7 +99,11 @@ all: repl
 .PHONY: all repl clean rebuild genome test oo-subsystems
 
 oo-subsystems:
-	$(MAKE) -C $(OO_WORKTREE) -f tools/build/Makefile.oo-build OO_ROOT=. SRC_ROOT=../../llm-baremetal all
+	@if test -f $(OO_BUILD_DIR)/liboo-kernel.a; then \
+	    echo "OK: oo-subsystems: using cached archives"; \
+	else \
+	    $(MAKE) -C $(OO_WORKTREE) -f tools/build/Makefile.oo-build OO_ROOT=. SRC_ROOT=../../llm-baremetal all; \
+	fi
 
 repl: $(TARGET)
 	@echo "OK: Build complete: $(TARGET)"
@@ -245,9 +249,15 @@ oosi_loader.o: engine/ssm/oosi_loader.c engine/ssm/oosi_loader.h engine/ssm/ssm_
 oosi_infer.o: engine/ssm/oosi_infer.c engine/ssm/oosi_infer.h engine/ssm/oosi_loader.h engine/ssm/mamba_weights.h engine/ssm/ssm_types.h
 	$(CC) $(CFLAGS) -c engine/ssm/oosi_infer.c -o oosi_infer.o
 
+oosi_v3_loader.o: engine/ssm/oosi_v3_loader.c engine/ssm/oosi_v3_loader.h engine/ssm/ssm_types.h
+	$(CC) $(CFLAGS) -c engine/ssm/oosi_v3_loader.c -o oosi_v3_loader.o
+
+oosi_v3_infer.o: engine/ssm/oosi_v3_infer.c engine/ssm/oosi_v3_infer.h engine/ssm/oosi_v3_loader.h
+	$(CC) $(CFLAGS) -c engine/ssm/oosi_v3_infer.c -o oosi_v3_infer.o
+
 clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
-	rm -f oosi_loader.o oosi_infer.o llmk_oo_infer.o
+	rm -f oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o llmk_oo_infer.o
 	rm -rf $(OO_BUILD_DIR)
 	@echo "OK: Clean complete"
 

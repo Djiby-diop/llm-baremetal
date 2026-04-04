@@ -67,6 +67,10 @@
 #include "oosi_infer.h"
 #include "llmk_oo_infer.h"
 
+// OOSI v3 — full standalone Mamba (all weights int8)
+#include "../ssm/oosi_v3_loader.h"
+#include "../ssm/oosi_v3_infer.h"
+
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 
@@ -1664,6 +1668,24 @@ static ssm_f32 *g_oosi_logits   = NULL;  // [51200]
 static ssm_f32 *g_oosi_halt_buf = NULL;  // [2561]
 static ssm_f32 *g_oosi_halt_h1  = NULL;  // [512]
 static ssm_f32 *g_oosi_halt_h2  = NULL;  // [64]
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── OOSI v3 globals ──────────────────────────────────────────────────────────
+// Full-standalone Mamba: all weights int8, no MAMB float32 needed.
+// Activated when /ssm_load detects magic 0x4F4F5333 ("OOS3").
+static OosiV3Weights  g_oosi_v3_weights;
+static OosiV3GenCtx   g_oosi_v3_ctx;
+static int            g_oosi_v3_valid = 0;
+
+// v3 scratch buffers — allocated from zones arenas on first /ssm_load
+static ssm_f32 *g_v3_scratch   = NULL;   // [D + 4*Di + Dt + 2*S] ≈ 91 KB
+static ssm_f32 *g_v3_logits    = NULL;   // [vocab_size] ≈ 197 KB
+static ssm_f32 *g_v3_h_state   = NULL;   // [n_layer * d_inner * d_state] ≈ 20 MB
+static ssm_f32 *g_v3_conv_buf  = NULL;   // [n_layer * d_inner * d_conv]  ≈ 5 MB
+static int     *g_v3_conv_pos  = NULL;   // [n_layer]                     ≈ 256 B
+static ssm_f32 *g_v3_halt_h1  = NULL;   // [512]
+static ssm_f32 *g_v3_halt_h2  = NULL;   // [64]
+static ssm_f32 *g_v3_halt_buf  = NULL;   // [halt_d_input + 1]
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -6330,8 +6352,88 @@ static void llmk_repl_no_model_loop(void) {
                 continue;
             }
 
-            // ── Parse OOSI v2 binary ──────────────────────────────────────
-            SsmStatus sst = oosi_load(&g_oosi_weights, oosi_buf, oosi_size);
+            // ── Parse OOSI binary — detect v2 or v3 ─────────────────────
+            // Check magic in first 4 bytes
+            UINT32 oosi_magic = 0;
+            if (oosi_size >= 4) {
+                const UINT8 *hbytes = (const UINT8 *)oosi_buf;
+                oosi_magic = (UINT32)hbytes[0]
+                           | ((UINT32)hbytes[1] <<  8)
+                           | ((UINT32)hbytes[2] << 16)
+                           | ((UINT32)hbytes[3] << 24);
+            }
+
+            if (oosi_magic == OOSI_V3_MAGIC) {
+                // ── OOSI v3: full standalone Mamba ───────────────────────
+                Print(L"[OOSI] Detected v3 format (full standalone Mamba)\r\n");
+                SsmStatus sst = oosi_v3_load(&g_oosi_v3_weights, oosi_buf, oosi_size);
+                if (sst != SSM_OK) {
+                    Print(L"[OOSI] ERROR: oosi_v3_load failed (code %d)\r\n\r\n", sst);
+                    continue;
+                }
+                sst = oosi_v3_validate(&g_oosi_v3_weights);
+                if (sst != SSM_OK) {
+                    Print(L"[OOSI] ERROR: v3 validation failed (code %d)\r\n\r\n", sst);
+                    continue;
+                }
+                Print(L"[OOSI-v3] d_model=%d n_layer=%d vocab=%d d_inner=%d\r\n",
+                      g_oosi_v3_weights.d_model, g_oosi_v3_weights.n_layer,
+                      g_oosi_v3_weights.vocab_size, g_oosi_v3_weights.d_inner);
+
+                // Allocate v3 runtime buffers from warm arenas
+                int V3D  = g_oosi_v3_weights.d_model;
+                int V3Di = g_oosi_v3_weights.d_inner;
+                int V3S  = g_oosi_v3_weights.d_state;
+                int V3Dc = g_oosi_v3_weights.d_conv;
+                int V3Dt = g_oosi_v3_weights.dt_rank;
+                int V3N  = g_oosi_v3_weights.n_layer;
+                int V3V  = g_oosi_v3_weights.vocab_size;
+                int V3Hd = (int)g_oosi_v3_weights.halt_d_input;
+
+                UINT64 scratch_b = (UINT64)(3*V3D + 4*V3Di + V3Dt + 2*V3S + 4) * sizeof(ssm_f32);
+                UINT64 h_state_b = (UINT64)V3N * V3Di * V3S * sizeof(ssm_f32);
+                UINT64 conv_b    = (UINT64)V3N * V3Di * V3Dc * sizeof(ssm_f32);
+                UINT64 conv_pb   = (UINT64)V3N * sizeof(int);
+
+                g_v3_scratch  = llmk_arena_alloc(&g_zones, LLMK_ARENA_ACTIVATIONS, scratch_b, 64);
+                g_v3_logits   = llmk_arena_alloc(&g_zones, LLMK_ARENA_ACTIVATIONS,
+                                                  (UINT64)V3V * sizeof(ssm_f32), 16);
+                g_v3_h_state  = llmk_arena_alloc(&g_zones, LLMK_ARENA_KV_CACHE, h_state_b, 64);
+                g_v3_conv_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_KV_CACHE, conv_b, 64);
+                g_v3_conv_pos = llmk_arena_alloc(&g_zones, LLMK_ARENA_ACTIVATIONS, conv_pb, 4);
+                g_v3_halt_h1  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, 512*sizeof(ssm_f32), 16);
+                g_v3_halt_h2  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, 64*sizeof(ssm_f32), 16);
+                g_v3_halt_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH,
+                                                  (UINT64)(V3Hd + 1) * sizeof(ssm_f32), 16);
+
+                if (!g_v3_scratch || !g_v3_logits || !g_v3_h_state ||
+                    !g_v3_conv_buf || !g_v3_conv_pos || !g_v3_halt_h1 ||
+                    !g_v3_halt_h2 || !g_v3_halt_buf) {
+                    Print(L"[OOSI-v3] ERROR: buffer alloc failed (out of arena space)\r\n\r\n");
+                    Print(L"  Need ~%d MB KV-cache for h_state+conv_buf\r\n",
+                          (int)((h_state_b + conv_b) / (1024*1024)));
+                    continue;
+                }
+
+                sst = oosi_v3_gen_ctx_init(
+                    &g_oosi_v3_ctx, &g_oosi_v3_weights,
+                    g_v3_scratch, g_v3_logits,
+                    g_v3_h_state, g_v3_conv_buf, g_v3_conv_pos,
+                    g_v3_halt_h1, g_v3_halt_h2, g_v3_halt_buf,
+                    0.80f,   // halt_threshold
+                    0.7f,    // temperature
+                    0.90f,   // top_p
+                    0xCAFEBABEu,
+                    (g_max_new_tokens > 0) ? g_max_new_tokens : 128
+                );
+                if (sst != SSM_OK) {
+                    Print(L"[OOSI-v3] ERROR: gen_ctx_init failed (code %d)\r\n\r\n", sst);
+                    continue;
+                }
+                g_oosi_v3_valid = 1;
+                Print(L"[OOSI-v3] OK: full SSM inference ready. Use /ssm_infer <text>\r\n\r\n");
+                continue;
+            }
             if (sst != SSM_OK) {
                 Print(L"[OOSI] ERROR: oosi_load failed (code %d)\r\n\r\n", sst);
                 Print(L"  Is this a valid OOSI v2 binary (export_int8.py output)?\r\n\r\n");
@@ -6429,10 +6531,10 @@ static void llmk_repl_no_model_loop(void) {
             while (*text == ' ' || *text == '\t') text++;
             if (!text[0]) {
                 Print(L"\r\nUsage: /ssm_infer <text>\r\n");
-                Print(L"  Run Mamba OOSI v2 inference. Load with /ssm_load first.\r\n\r\n");
+                Print(L"  Run Mamba OOSI inference. Load with /ssm_load first.\r\n\r\n");
                 continue;
             }
-            if (!g_oosi_weights_valid || !llmk_oo_infer_is_ready()) {
+            if (!g_oosi_v3_valid && (!g_oosi_weights_valid || !llmk_oo_infer_is_ready())) {
                 Print(L"\r\n[OOSI] No model loaded. Use /ssm_load <file.bin> first.\r\n\r\n");
                 continue;
             }
@@ -6440,6 +6542,58 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n[OOSI] Input: ");
             llmk_print_ascii(text);
             Print(L"\r\n[OOSI] Thinking...\r\n");
+
+            // ── OOSI v3: full standalone Mamba SSM inference ─────────────
+            if (g_oosi_v3_valid) {
+                // Tokenize using v2 tokenizer (shared BPE vocab)
+                int prompt_tokens[512];
+                int prompt_len = llmk_oo_infer_tokenize(text, prompt_tokens, 512);
+                if (prompt_len <= 0) {
+                    // Fallback: encode raw bytes as token IDs
+                    prompt_len = 0;
+                    for (int i = 0; text[i] && prompt_len < 512; i++)
+                        prompt_tokens[prompt_len++] = (unsigned char)text[i] + 3;
+                }
+
+                Print(L"[OOSI-v3] Prompt tokens: %d — generating (SSM recurrent)...\r\n",
+                      prompt_len);
+
+                // Callback prints each token as it is generated
+                struct { int count; } cb_state; cb_state.count = 0;
+                // Simple blocking generate (tokens decoded inline)
+                int out_ids[256];
+                int n_out = 0;
+
+                oosi_v3_gen_ctx_reset(&g_oosi_v3_ctx);
+                // Feed prompt
+                for (int pi = 0; pi < prompt_len; pi++)
+                    oosi_v3_forward_one(&g_oosi_v3_ctx, prompt_tokens[pi]);
+                g_oosi_v3_ctx.tokens_generated = 0;
+
+                // Generate
+                int last = (prompt_len > 0) ? prompt_tokens[prompt_len - 1] : 0;
+                Print(L"[OOSI-v3] ");
+                while (n_out < g_oosi_v3_ctx.max_tokens) {
+                    OosiV3HaltResult r = oosi_v3_forward_one(&g_oosi_v3_ctx, last);
+                    out_ids[n_out++] = r.token;
+                    // Print decoded token (best-effort)
+                    char tok_str[32]; int tok_len_out = 0;
+                    tok_len_out = llmk_oo_infer_decode_token(r.token,
+                                      tok_str, sizeof(tok_str));
+                    if (tok_len_out > 0) {
+                        for (int ci = 0; ci < tok_len_out; ci++) {
+                            CHAR16 ch16[2];
+                            ch16[0] = (CHAR16)(unsigned char)tok_str[ci];
+                            ch16[1] = 0;
+                            Print(ch16);
+                        }
+                    }
+                    last = r.token;
+                    if (r.halted || r.token == 0) break;
+                }
+                Print(L"\r\n[OOSI-v3] Done: %d tokens generated\r\n\r\n", n_out);
+                continue;
+            }
 
             // Tokenize
             int prompt_tokens[256];
