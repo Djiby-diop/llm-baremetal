@@ -19,6 +19,40 @@ The current `OO-SomaMind V1` runtime contract is:
 - `MAMB` = executable bare-metal backbone format
 - `OOSS` = future OO sidecar / enriched extension format
 
+Current runtime skeleton commands:
+
+- `/core_load <file.mamb>`
+- `/mind_diag`
+- `/mind_halt_probe [loop_pos]`
+- `/mind_halt_decide [loop_pos] [threshold]`
+- `/mind_halt_sweep [start] [end] [step] [threshold]`
+- `/mind_halt_policy [threshold] [on|off]`
+- `/mind_halt_policy_save`
+- `/mind_halt_policy_load`
+- `/mind_halt_policy_apply_saved`
+- `/mind_halt_policy_reset`
+- `/mind_halt_policy_diff`
+- `/oo_sidecar <file.ooss>`
+- `/oo_sidecar_unload`
+- `/attach_load <file>`
+- `/attach_unload`
+- `/mind_status`
+
+Current sidecar behavior:
+
+- validates a minimal `OOSS` header
+- keeps the validated sidecar blob resident in memory
+- exposes a first `HaltingHead` hook when the exported layout matches the expected V1 sidecar layout
+- can now early-stop active decode loops at runtime when `halt_prob >= threshold`
+- exposes a configurable runtime halt policy via `/mind_halt_policy`
+- separates runtime changes from disk persistence with `/mind_halt_policy_save` and `/mind_halt_policy_load`
+- can re-apply the saved `repl.cfg` policy as the runtime source of truth via `/mind_halt_policy_apply_saved`
+- stores persisted values in `repl.cfg` via `mind_halt_enabled` and `mind_halt_threshold`
+- can restore runtime V1 halt defaults via `/mind_halt_policy_reset`
+- shows whether runtime halt policy is in sync with `repl.cfg` in `/mind_status`
+- can print explicit runtime vs persisted halt deltas with `/mind_halt_policy_diff`
+- does not yet execute broader sidecar semantics (budgets, tool metadata, richer OO policies)
+
 Reference docs:
 
 - [docs/OO_SOMAMIND_RUNTIME_CONTRACT.md](docs/OO_SOMAMIND_RUNTIME_CONTRACT.md)

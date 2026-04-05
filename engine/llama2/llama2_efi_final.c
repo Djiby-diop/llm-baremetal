@@ -86,6 +86,10 @@ static volatile UINT32 g_loaded_model_path16_canary = 0xD1B1D1B1u;
 static GgufSummary g_loaded_model_gguf;
 static int g_loaded_model_gguf_valid = 0;
 
+#define LLMK_MIND_RUNTIME_HALT_THRESHOLD 0.50f
+static int g_mind_runtime_halt_enabled = 1;
+static float g_mind_runtime_halt_threshold = LLMK_MIND_RUNTIME_HALT_THRESHOLD;
+
 typedef struct {
     char core_path[192];
     char core_kind[32];
@@ -108,9 +112,12 @@ typedef struct {
     UINT32 sidecar_vocab_size;
     UINT32 sidecar_halting_d_input;
     int sidecar_header_valid;
+    char sidecar_last_validation[96];
 } LlmkMindRuntimeState;
 
 static LlmkMindRuntimeState g_mind_runtime_state;
+static void *g_mind_sidecar_blob = NULL;
+static UINTN g_mind_sidecar_blob_len = 0;
 
 typedef struct {
     UINT32 magic;
@@ -124,10 +131,26 @@ typedef struct {
     UINT32 halting_head_d_input;
 } LlmkOoSidecarHeader;
 
+typedef struct {
+    const float *layer0_weight;
+    const float *layer0_bias;
+    const float *layer2_weight;
+    const float *layer2_bias;
+    const float *layer4_weight;
+    const float *layer4_bias;
+    UINT32 d_input;
+    UINT32 hidden0;
+    UINT32 hidden1;
+    UINT32 d_output;
+    int ready;
+} LlmkOoHaltingHeadView;
+
 #define LLMK_OOSS_MAGIC 0x4F4F5353u
+static LlmkOoHaltingHeadView g_mind_halting_view;
 
 // Forward decl used by early GGUF summary printer.
 static void llmk_print_ascii(const char *s);
+float fast_exp(float x);
 
 static void llmk_copy_ascii_bounded(char *dst, int dst_cap, const char *src) {
     if (!dst || dst_cap <= 0) return;
@@ -141,6 +164,18 @@ static void llmk_copy_ascii_bounded(char *dst, int dst_cap, const char *src) {
     dst[i] = 0;
 }
 
+static void llmk_mind_release_sidecar_blob(void) {
+    if (g_mind_sidecar_blob) {
+        uefi_call_wrapper(BS->FreePool, 1, g_mind_sidecar_blob);
+        g_mind_sidecar_blob = NULL;
+    }
+    g_mind_sidecar_blob_len = 0;
+}
+
+static void llmk_mind_clear_halting_view(void) {
+    SetMem(&g_mind_halting_view, sizeof(g_mind_halting_view), 0);
+}
+
 static void llmk_mind_clear_core(void) {
     g_mind_runtime_state.core_requested = 0;
     g_mind_runtime_state.core_active = 0;
@@ -150,6 +185,8 @@ static void llmk_mind_clear_core(void) {
 }
 
 static void llmk_mind_clear_sidecar(void) {
+    llmk_mind_release_sidecar_blob();
+    llmk_mind_clear_halting_view();
     g_mind_runtime_state.sidecar_requested = 0;
     g_mind_runtime_state.sidecar_active = 0;
     g_mind_runtime_state.sidecar_path[0] = 0;
@@ -163,6 +200,7 @@ static void llmk_mind_clear_sidecar(void) {
     g_mind_runtime_state.sidecar_vocab_size = 0;
     g_mind_runtime_state.sidecar_halting_d_input = 0;
     g_mind_runtime_state.sidecar_header_valid = 0;
+    g_mind_runtime_state.sidecar_last_validation[0] = 0;
 }
 
 static void llmk_mind_clear_attach(void) {
@@ -194,6 +232,11 @@ static void llmk_mind_set_sidecar_request(const char *path, const char *kind) {
     g_mind_runtime_state.sidecar_active = 0;
 }
 
+static void llmk_mind_mark_sidecar_active(UINTN blob_len) {
+    g_mind_runtime_state.sidecar_active = g_mind_runtime_state.sidecar_requested ? 1 : 0;
+    g_mind_sidecar_blob_len = blob_len;
+}
+
 static UINT32 llmk_u32le_read(const UINT8 *p) {
     if (!p) return 0;
     return ((UINT32)p[0]) |
@@ -217,6 +260,60 @@ static int llmk_ooss_parse_header(const void *buf, UINTN len, LlmkOoSidecarHeade
     return out->magic == LLMK_OOSS_MAGIC;
 }
 
+static UINT64 llmk_ooss_expected_halting_offset_bytes(const LlmkOoSidecarHeader *hdr) {
+    if (!hdr) return 0;
+    UINT64 d_model = (UINT64)hdr->d_model;
+    UINT64 n_layer = (UINT64)hdr->n_layer;
+    UINT64 d_state = (UINT64)hdr->d_state;
+    UINT64 expand = (UINT64)hdr->expand;
+    UINT64 vocab_size = (UINT64)hdr->vocab_size;
+    UINT64 d_inner = d_model * expand;
+    UINT64 dt_rank = (d_model + 15ULL) / 16ULL;
+    if (dt_rank == 0) dt_rank = 1;
+
+    UINT64 per_layer = ((dt_rank + 2ULL * d_state) * d_inner);
+    per_layer += (d_inner * dt_rank);
+    per_layer += d_inner;
+    per_layer *= 4ULL;
+
+    return 36ULL + (n_layer * per_layer) + (vocab_size * d_model * 4ULL);
+}
+
+static int llmk_ooss_bind_halting_view(const LlmkOoSidecarHeader *hdr, const void *blob, UINTN blob_len) {
+    llmk_mind_clear_halting_view();
+    if (!hdr || !blob) return 0;
+
+    UINT64 offset = llmk_ooss_expected_halting_offset_bytes(hdr);
+    UINT64 d_input = (UINT64)hdr->halting_head_d_input;
+    UINT64 hidden0 = 512ULL;
+    UINT64 hidden1 = 64ULL;
+    UINT64 d_output = 1ULL;
+
+    UINT64 needed = offset;
+    needed += hidden0 * d_input * 4ULL;
+    needed += hidden0 * 4ULL;
+    needed += hidden1 * hidden0 * 4ULL;
+    needed += hidden1 * 4ULL;
+    needed += d_output * hidden1 * 4ULL;
+    needed += d_output * 4ULL;
+    if (needed > (UINT64)blob_len) return 0;
+
+    const UINT8 *base = (const UINT8 *)blob;
+    const UINT8 *p = base + offset;
+    g_mind_halting_view.layer0_weight = (const float *)p; p += hidden0 * d_input * 4ULL;
+    g_mind_halting_view.layer0_bias   = (const float *)p; p += hidden0 * 4ULL;
+    g_mind_halting_view.layer2_weight = (const float *)p; p += hidden1 * hidden0 * 4ULL;
+    g_mind_halting_view.layer2_bias   = (const float *)p; p += hidden1 * 4ULL;
+    g_mind_halting_view.layer4_weight = (const float *)p; p += d_output * hidden1 * 4ULL;
+    g_mind_halting_view.layer4_bias   = (const float *)p;
+    g_mind_halting_view.d_input = (UINT32)d_input;
+    g_mind_halting_view.hidden0 = (UINT32)hidden0;
+    g_mind_halting_view.hidden1 = (UINT32)hidden1;
+    g_mind_halting_view.d_output = (UINT32)d_output;
+    g_mind_halting_view.ready = 1;
+    return 1;
+}
+
 static void llmk_mind_store_sidecar_header(const LlmkOoSidecarHeader *hdr) {
     if (!hdr) return;
     g_mind_runtime_state.sidecar_version = hdr->version;
@@ -230,6 +327,14 @@ static void llmk_mind_store_sidecar_header(const LlmkOoSidecarHeader *hdr) {
     g_mind_runtime_state.sidecar_header_valid = 1;
 }
 
+static void llmk_mind_set_sidecar_validation(const char *msg) {
+    llmk_copy_ascii_bounded(
+        g_mind_runtime_state.sidecar_last_validation,
+        (int)sizeof(g_mind_runtime_state.sidecar_last_validation),
+        msg ? msg : ""
+    );
+}
+
 static void llmk_mind_set_attach_request(const char *path, const char *kind) {
     llmk_copy_ascii_bounded(g_mind_runtime_state.attach_path, (int)sizeof(g_mind_runtime_state.attach_path), path);
     llmk_copy_ascii_bounded(g_mind_runtime_state.attach_kind, (int)sizeof(g_mind_runtime_state.attach_kind), kind ? kind : "attach-model");
@@ -237,10 +342,51 @@ static void llmk_mind_set_attach_request(const char *path, const char *kind) {
     g_mind_runtime_state.attach_active = 0;
 }
 
+/* Forward declarations for mind halt policy helpers (defined later) */
+static EFI_STATUS llmk_mind_persist_halt_policy_best_effort(void);
+static EFI_STATUS llmk_mind_query_halt_policy_cfg_best_effort(
+    int *out_enabled, float *out_threshold,
+    int *out_found_enabled, int *out_found_threshold);
+static EFI_STATUS llmk_mind_load_halt_policy_best_effort(void);
+
 static void llmk_mind_print_status(void) {
     Print(L"\r\n[Mind] OO-SomaMind runtime topology\r\n");
     Print(L"  identity: internal native core\r\n");
     Print(L"  v1 execution path: MAMB backbone via /ssm_load\r\n");
+    Print(L"  halt_policy: ");
+    if (g_mind_runtime_halt_enabled) {
+        Print(L"enabled threshold=%d.%03d\r\n",
+              (int)g_mind_runtime_halt_threshold,
+              (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+    } else {
+        Print(L"disabled threshold=%d.%03d\r\n",
+              (int)g_mind_runtime_halt_threshold,
+              (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+    }
+    {
+        int cfg_enabled = g_mind_runtime_halt_enabled;
+        float cfg_threshold = g_mind_runtime_halt_threshold;
+        int found_enabled = 0;
+        int found_threshold = 0;
+        EFI_STATUS cfg_st = llmk_mind_query_halt_policy_cfg_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold);
+        Print(L"  halt_policy_cfg: ");
+        if (!EFI_ERROR(cfg_st) && (found_enabled || found_threshold)) {
+            Print(L"enabled=%d threshold=%d.%03d sync=",
+                  found_enabled ? cfg_enabled : g_mind_runtime_halt_enabled,
+                  (int)(found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold),
+                  (int)((((found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold) >= 0.0f ?
+                          (found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold) - (int)(found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold) :
+                          ((int)(found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold) - (found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold))) * 1000.0f)));
+            int eff_enabled = found_enabled ? cfg_enabled : g_mind_runtime_halt_enabled;
+            float eff_threshold = found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold;
+            float diff = eff_threshold - g_mind_runtime_halt_threshold;
+            if (diff < 0.0f) diff = -diff;
+            if (eff_enabled == g_mind_runtime_halt_enabled && diff < 0.0005f) Print(L"in-sync\r\n");
+            else Print(L"runtime!=repl.cfg\r\n");
+        } else {
+            Print(L"not found\r\n");
+        }
+    }
 
     Print(L"  core: ");
     if (g_mind_runtime_state.core_requested) {
@@ -261,6 +407,12 @@ static void llmk_mind_print_status(void) {
         else Print(L"requested\r\n");
         Print(L"    kind="); llmk_print_ascii(g_mind_runtime_state.sidecar_kind[0] ? g_mind_runtime_state.sidecar_kind : "ooss-sidecar"); Print(L"\r\n");
         Print(L"    path="); llmk_print_ascii(g_mind_runtime_state.sidecar_path); Print(L"\r\n");
+        if (g_mind_sidecar_blob && g_mind_sidecar_blob_len > 0) {
+            Print(L"    bytes=%lu\r\n", (UINT64)g_mind_sidecar_blob_len);
+        }
+        if (g_mind_runtime_state.sidecar_last_validation[0]) {
+            Print(L"    validation="); llmk_print_ascii(g_mind_runtime_state.sidecar_last_validation); Print(L"\r\n");
+        }
         if (g_mind_runtime_state.sidecar_header_valid) {
             Print(L"    header: version=%u d_model=%u n_layer=%u vocab=%u halt_in=%u\r\n",
                   g_mind_runtime_state.sidecar_version,
@@ -269,8 +421,19 @@ static void llmk_mind_print_status(void) {
                   g_mind_runtime_state.sidecar_vocab_size,
                   g_mind_runtime_state.sidecar_halting_d_input);
         }
+        Print(L"    halting_hook=");
+        if (g_mind_halting_view.ready) {
+            Print(L"ready (in=%u h0=%u h1=%u out=%u)\r\n",
+                  g_mind_halting_view.d_input,
+                  g_mind_halting_view.hidden0,
+                  g_mind_halting_view.hidden1,
+                  g_mind_halting_view.d_output);
+        } else {
+            Print(L"not ready\r\n");
+        }
         Print(L"    route=");
-        if (g_mind_runtime_state.sidecar_active) Print(L"active OO sidecar backend\r\n");
+        if (g_mind_runtime_state.sidecar_active && g_mind_halting_view.ready) Print(L"OOSS blob resident; HaltingHead can early-stop active decode loops\r\n");
+        else if (g_mind_runtime_state.sidecar_active) Print(L"OOSS blob resident in memory; semantic loader pending\r\n");
         else if (g_mind_runtime_state.core_active) Print(L"registered; waiting for OO sidecar loader\r\n");
         else Print(L"registered; core backbone not active yet\r\n");
     } else {
@@ -291,6 +454,294 @@ static void llmk_mind_print_status(void) {
     }
 
     Print(L"  note: attach models are optional and must not redefine the OO core.\r\n\r\n");
+}
+
+static void llmk_mind_print_halt_policy_diff(void) {
+    int cfg_enabled = g_mind_runtime_halt_enabled;
+    float cfg_threshold = g_mind_runtime_halt_threshold;
+    int found_enabled = 0;
+    int found_threshold = 0;
+    EFI_STATUS st = llmk_mind_query_halt_policy_cfg_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold);
+
+    Print(L"\r\n[MindHaltPolicyDiff]\r\n");
+    Print(L"  runtime.enabled=%d runtime.threshold=%d.%03d\r\n",
+          g_mind_runtime_halt_enabled,
+          (int)g_mind_runtime_halt_threshold,
+          (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+
+    if (EFI_ERROR(st) || (!found_enabled && !found_threshold)) {
+        Print(L"  persisted=(not found in repl.cfg)\r\n\r\n");
+        return;
+    }
+
+    int eff_enabled = found_enabled ? cfg_enabled : g_mind_runtime_halt_enabled;
+    float eff_threshold = found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold;
+    float delta = g_mind_runtime_halt_threshold - eff_threshold;
+    float abs_delta = delta < 0.0f ? -delta : delta;
+
+    Print(L"  persisted.enabled=%d persisted.threshold=%d.%03d\r\n",
+          eff_enabled,
+          (int)eff_threshold,
+          (int)((eff_threshold >= 0.0f ? eff_threshold - (int)eff_threshold : ((int)eff_threshold - eff_threshold)) * 1000.0f));
+    Print(L"  delta.threshold=%d.%03d\r\n",
+          (int)delta,
+          (int)((delta >= 0.0f ? delta - (int)delta : ((int)delta - delta)) * 1000.0f));
+    Print(L"  sync=");
+    if (eff_enabled == g_mind_runtime_halt_enabled && abs_delta < 0.0005f) Print(L"in-sync\r\n\r\n");
+    else Print(L"runtime!=repl.cfg\r\n\r\n");
+}
+
+static void llmk_mind_print_diag(void) {
+    Print(L"\r\n[MindDiag] OO-SomaMind runtime diagnostics\r\n");
+    Print(L"  core.requested=%d core.active=%d\r\n",
+        g_mind_runtime_state.core_requested,
+        g_mind_runtime_state.core_active);
+    Print(L"  sidecar.requested=%d sidecar.active=%d sidecar.header_valid=%d\r\n",
+        g_mind_runtime_state.sidecar_requested,
+        g_mind_runtime_state.sidecar_active,
+        g_mind_runtime_state.sidecar_header_valid);
+    Print(L"  attach.requested=%d attach.active=%d\r\n",
+        g_mind_runtime_state.attach_requested,
+        g_mind_runtime_state.attach_active);
+
+    Print(L"  core.path=");
+    if (g_mind_runtime_state.core_path[0]) llmk_print_ascii(g_mind_runtime_state.core_path);
+    else Print(L"(none)");
+    Print(L"\r\n");
+
+    Print(L"  sidecar.path=");
+    if (g_mind_runtime_state.sidecar_path[0]) llmk_print_ascii(g_mind_runtime_state.sidecar_path);
+    else Print(L"(none)");
+    Print(L"\r\n");
+
+    Print(L"  attach.path=");
+    if (g_mind_runtime_state.attach_path[0]) llmk_print_ascii(g_mind_runtime_state.attach_path);
+    else Print(L"(none)");
+    Print(L"\r\n");
+
+    Print(L"  sidecar.blob_ptr=0x%lx sidecar.blob_bytes=%lu\r\n",
+        (UINT64)(UINTN)g_mind_sidecar_blob,
+        (UINT64)g_mind_sidecar_blob_len);
+
+    Print(L"  sidecar.validation=");
+    if (g_mind_runtime_state.sidecar_last_validation[0]) llmk_print_ascii(g_mind_runtime_state.sidecar_last_validation);
+    else Print(L"(none)");
+    Print(L"\r\n");
+
+    if (g_mind_runtime_state.sidecar_header_valid) {
+      Print(L"  sidecar.header.version=%u\r\n", g_mind_runtime_state.sidecar_version);
+      Print(L"  sidecar.header.d_model=%u n_layer=%u d_state=%u d_conv=%u expand=%u\r\n",
+          g_mind_runtime_state.sidecar_d_model,
+          g_mind_runtime_state.sidecar_n_layer,
+          g_mind_runtime_state.sidecar_d_state,
+          g_mind_runtime_state.sidecar_d_conv,
+          g_mind_runtime_state.sidecar_expand);
+      Print(L"  sidecar.header.vocab=%u halt_in=%u\r\n",
+          g_mind_runtime_state.sidecar_vocab_size,
+          g_mind_runtime_state.sidecar_halting_d_input);
+    }
+
+    Print(L"  halting.ready=%d halting.enabled=%d halting.threshold=%d.%03d\r\n",
+        g_mind_halting_view.ready,
+        g_mind_runtime_halt_enabled,
+        (int)g_mind_runtime_halt_threshold,
+        (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+    if (g_mind_halting_view.ready) {
+            Print(L"  halting.runtime_policy=decode-stop@%d.%03d when sidecar.active=1 and halting.enabled=1\r\n",
+                    (int)g_mind_runtime_halt_threshold,
+                    (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+      Print(L"  halting.shape in=%u h0=%u h1=%u out=%u\r\n",
+          g_mind_halting_view.d_input,
+          g_mind_halting_view.hidden0,
+          g_mind_halting_view.hidden1,
+          g_mind_halting_view.d_output);
+      Print(L"  halting.ptrs w0=0x%lx b0=0x%lx w2=0x%lx b2=0x%lx w4=0x%lx b4=0x%lx\r\n",
+          (UINT64)(UINTN)g_mind_halting_view.layer0_weight,
+          (UINT64)(UINTN)g_mind_halting_view.layer0_bias,
+          (UINT64)(UINTN)g_mind_halting_view.layer2_weight,
+          (UINT64)(UINTN)g_mind_halting_view.layer2_bias,
+          (UINT64)(UINTN)g_mind_halting_view.layer4_weight,
+          (UINT64)(UINTN)g_mind_halting_view.layer4_bias);
+    }
+
+    Print(L"\r\n");
+}
+
+static float llmk_mind_sigmoid(float x) {
+    if (x >= 0.0f) {
+        float z = fast_exp(-x);
+        return 1.0f / (1.0f + z);
+    }
+    float z = fast_exp(x);
+    return z / (1.0f + z);
+}
+
+static int llmk_mind_halting_eval(float loop_pos, float *out_logit, float *out_prob) {
+    if (!g_mind_halting_view.ready) {
+        return 0;
+    }
+
+    UINT32 d_input = g_mind_halting_view.d_input;
+    UINT32 hidden0 = g_mind_halting_view.hidden0;
+    UINT32 hidden1 = g_mind_halting_view.hidden1;
+    if (d_input == 0 || hidden0 == 0 || hidden1 == 0) {
+        return 0;
+    }
+
+    float h0[512];
+    float h1[64];
+    UINT32 loop_idx = d_input - 1;
+
+    for (UINT32 i = 0; i < hidden0; i++) {
+        float acc = g_mind_halting_view.layer0_bias[i];
+        acc += g_mind_halting_view.layer0_weight[i * d_input + loop_idx] * loop_pos;
+        h0[i] = acc > 0.0f ? acc : 0.0f;
+    }
+
+    for (UINT32 j = 0; j < hidden1; j++) {
+        float acc = g_mind_halting_view.layer2_bias[j];
+        const float *w = g_mind_halting_view.layer2_weight + (j * hidden0);
+        for (UINT32 i = 0; i < hidden0; i++) acc += w[i] * h0[i];
+        h1[j] = acc > 0.0f ? acc : 0.0f;
+    }
+
+    float logit = g_mind_halting_view.layer4_bias[0];
+    for (UINT32 j = 0; j < hidden1; j++) {
+        logit += g_mind_halting_view.layer4_weight[j] * h1[j];
+    }
+    float prob = llmk_mind_sigmoid(logit);
+
+    if (out_logit) *out_logit = logit;
+    if (out_prob) *out_prob = prob;
+    return 1;
+}
+
+static int llmk_mind_runtime_should_halt(float loop_pos, float *out_logit, float *out_prob) {
+    float logit = 0.0f;
+    float prob = 0.0f;
+    if (!g_mind_runtime_halt_enabled || !g_mind_runtime_state.sidecar_active || !g_mind_halting_view.ready) {
+        return 0;
+    }
+    if (!llmk_mind_halting_eval(loop_pos, &logit, &prob)) {
+        return 0;
+    }
+    if (out_logit) *out_logit = logit;
+    if (out_prob) *out_prob = prob;
+    return prob >= g_mind_runtime_halt_threshold;
+}
+
+static void llmk_mind_reset_halt_policy_defaults(void) {
+    g_mind_runtime_halt_enabled = 1;
+    g_mind_runtime_halt_threshold = LLMK_MIND_RUNTIME_HALT_THRESHOLD;
+}
+
+static void llmk_mind_halting_probe(float loop_pos) {
+    float logit = 0.0f;
+    float prob = 0.0f;
+    if (!g_mind_halting_view.ready) {
+        Print(L"\r\n[MindHalt] Halting hook not ready. Load a compatible OOSS sidecar first.\r\n\r\n");
+        return;
+    }
+    if (!llmk_mind_halting_eval(loop_pos, &logit, &prob)) {
+        Print(L"\r\n[MindHalt] Invalid halting view dimensions.\r\n\r\n");
+        return;
+    }
+
+    Print(L"\r\n[MindHalt] loop_pos=%d.%03d\r\n",
+          (int)loop_pos,
+          (int)((loop_pos >= 0.0f ? loop_pos - (int)loop_pos : ((int)loop_pos - loop_pos)) * 1000.0f));
+    Print(L"  logit=%d.%03d\r\n",
+          (int)logit,
+          (int)((logit >= 0.0f ? logit - (int)logit : ((int)logit - logit)) * 1000.0f));
+    Print(L"  halt_prob=%d.%03d\r\n",
+          (int)prob,
+          (int)((prob >= 0.0f ? prob - (int)prob : ((int)prob - prob)) * 1000.0f));
+    Print(L"  interpretation=");
+    if (prob >= 0.80f) Print(L"high-stop-bias\r\n\r\n");
+    else if (prob >= 0.50f) Print(L"balanced-stop-bias\r\n\r\n");
+    else Print(L"continue-bias\r\n\r\n");
+}
+
+static void llmk_mind_halting_decide(float loop_pos, float threshold) {
+    float logit = 0.0f;
+    float prob = 0.0f;
+    if (!g_mind_halting_view.ready) {
+        Print(L"\r\n[MindHalt] Halting hook not ready. Load a compatible OOSS sidecar first.\r\n\r\n");
+        return;
+    }
+    if (!llmk_mind_halting_eval(loop_pos, &logit, &prob)) {
+        Print(L"\r\n[MindHalt] Invalid halting view dimensions.\r\n\r\n");
+        return;
+    }
+    if (threshold < 0.0f) threshold = 0.0f;
+    if (threshold > 1.0f) threshold = 1.0f;
+
+    Print(L"\r\n[MindHaltDecision] loop_pos=%d.%03d threshold=%d.%03d\r\n",
+          (int)loop_pos,
+          (int)((loop_pos >= 0.0f ? loop_pos - (int)loop_pos : ((int)loop_pos - loop_pos)) * 1000.0f),
+          (int)threshold,
+          (int)((threshold >= 0.0f ? threshold - (int)threshold : ((int)threshold - threshold)) * 1000.0f));
+    Print(L"  logit=%d.%03d halt_prob=%d.%03d\r\n",
+          (int)logit,
+          (int)((logit >= 0.0f ? logit - (int)logit : ((int)logit - logit)) * 1000.0f),
+          (int)prob,
+          (int)((prob >= 0.0f ? prob - (int)prob : ((int)prob - prob)) * 1000.0f));
+    Print(L"  decision=");
+    if (prob >= threshold) Print(L"HALT\r\n\r\n");
+    else Print(L"CONTINUE\r\n\r\n");
+}
+
+static void llmk_mind_halting_sweep(float start, float end, float step, float threshold) {
+    if (!g_mind_halting_view.ready) {
+        Print(L"\r\n[MindHalt] Halting hook not ready. Load a compatible OOSS sidecar first.\r\n\r\n");
+        return;
+    }
+    if (step <= 0.0f) {
+        Print(L"\r\n[MindHaltSweep] step must be > 0.0\r\n\r\n");
+        return;
+    }
+    if (end < start) {
+        float tmp = start;
+        start = end;
+        end = tmp;
+    }
+    if (threshold < 0.0f) threshold = 0.0f;
+    if (threshold > 1.0f) threshold = 1.0f;
+
+    Print(L"\r\n[MindHaltSweep] start=%d.%03d end=%d.%03d step=%d.%03d threshold=%d.%03d\r\n",
+          (int)start,
+          (int)((start >= 0.0f ? start - (int)start : ((int)start - start)) * 1000.0f),
+          (int)end,
+          (int)((end >= 0.0f ? end - (int)end : ((int)end - end)) * 1000.0f),
+          (int)step,
+          (int)((step >= 0.0f ? step - (int)step : ((int)step - step)) * 1000.0f),
+          (int)threshold,
+          (int)((threshold >= 0.0f ? threshold - (int)threshold : ((int)threshold - threshold)) * 1000.0f));
+
+    int samples = 0;
+    for (float loop_pos = start; loop_pos <= end + 0.0001f && samples < 256; loop_pos += step, samples++) {
+        float logit = 0.0f;
+        float prob = 0.0f;
+        if (!llmk_mind_halting_eval(loop_pos, &logit, &prob)) {
+            Print(L"  invalid halting view dimensions\r\n\r\n");
+            return;
+        }
+
+        Print(L"  x=%d.%03d logit=%d.%03d halt_prob=%d.%03d decision=",
+              (int)loop_pos,
+              (int)((loop_pos >= 0.0f ? loop_pos - (int)loop_pos : ((int)loop_pos - loop_pos)) * 1000.0f),
+              (int)logit,
+              (int)((logit >= 0.0f ? logit - (int)logit : ((int)logit - logit)) * 1000.0f),
+              (int)prob,
+              (int)((prob >= 0.0f ? prob - (int)prob : ((int)prob - prob)) * 1000.0f));
+        if (prob >= threshold) Print(L"HALT\r\n");
+        else Print(L"CONTINUE\r\n");
+    }
+
+    if (samples == 256) {
+        Print(L"  note=sweep capped at 256 samples\r\n");
+    }
+    Print(L"\r\n");
 }
 
 static void llmk_mind_bind_core_backbone_v1(const char *path, int via_core_alias) {
@@ -5606,7 +6057,18 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /oo_outcome           Tail OOOUTCOME.LOG and show pending feedback\r\n");
     Print(L"  /oo_infermini [text]  Run tiny built-in inference selftest (no-model)\r\n");
     Print(L"  /core_load <file>     Register the OO-SomaMind internal core target\r\n");
+    Print(L"  /mind_diag            Show detailed OO-SomaMind runtime diagnostics\r\n");
+    Print(L"  /mind_halt_probe [x]  Run a tiny HaltingHead probe with loop_pos=x (default 1.0)\r\n");
+    Print(L"  /mind_halt_decide [x] [t]  Decide HALT/CONTINUE using loop_pos=x and threshold t\r\n");
+    Print(L"  /mind_halt_sweep [a] [b] [s] [t]  Sweep loop_pos from a to b with step s\r\n");
+    Print(L"  /mind_halt_policy [t] [on|off]  Show or set runtime halt policy\r\n");
+    Print(L"  /mind_halt_policy_save  Persist current halt policy to repl.cfg\r\n");
+    Print(L"  /mind_halt_policy_load  Reload halt policy from repl.cfg\r\n");
+    Print(L"  /mind_halt_policy_apply_saved  Apply the saved halt policy to runtime\r\n");
+    Print(L"  /mind_halt_policy_reset  Restore the V1 runtime halt policy defaults\r\n");
+    Print(L"  /mind_halt_policy_diff  Compare runtime halt policy vs repl.cfg\r\n");
     Print(L"  /oo_sidecar <file>    Register an OO sidecar extension (future OOSS path)\r\n");
+    Print(L"  /oo_sidecar_unload    Remove the registered OO sidecar\r\n");
     Print(L"  /attach_load <file>   Register an optional attached external model\r\n");
     Print(L"  /attach_unload        Detach the optional external model\r\n");
     Print(L"  /mind_status          Show core vs attach runtime topology\r\n");
@@ -5720,6 +6182,18 @@ static void llmk_repl_no_model_loop(void) {
                         for (const char *vp = val; *vp >= '0' && *vp <= '9'; vp++)
                             v = v * 10 + (*vp - '0');
                         if (v > 0 && v <= 4096) g_max_new_tokens = v;
+                    } else if (my_strncmp(key, "mind_halt_enabled", 17) == 0 && key[17] == 0) {
+                        int b = 0;
+                        if (llmk_cfg_parse_bool(val, &b)) {
+                            g_mind_runtime_halt_enabled = (b != 0);
+                        }
+                    } else if (my_strncmp(key, "mind_halt_threshold", 19) == 0 && key[19] == 0) {
+                        float v = 0.0f;
+                        if (llmk_cfg_parse_f32(val, &v)) {
+                            if (v < 0.0f) v = 0.0f;
+                            if (v > 1.0f) v = 1.0f;
+                            g_mind_runtime_halt_threshold = v;
+                        }
                     }
                 }
 
@@ -6167,6 +6641,210 @@ static void llmk_repl_no_model_loop(void) {
             llmk_mind_print_status();
             continue;
         }
+        if (my_strncmp(prompt, "/mind_diag", 10) == 0) {
+            llmk_mind_print_diag();
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_probe", 16) == 0) {
+            const char *arg = prompt + 16;
+            while (*arg == ' ' || *arg == '\t') arg++;
+            float loop_pos = 1.0f;
+            if (*arg) {
+                float parsed = 0.0f;
+                if (!llmk_cfg_parse_f32(arg, &parsed)) {
+                    Print(L"\r\nUsage: /mind_halt_probe [loop_pos]\r\n");
+                    Print(L"  Example: /mind_halt_probe 1.0\r\n\r\n");
+                    continue;
+                }
+                loop_pos = parsed;
+            }
+            llmk_mind_halting_probe(loop_pos);
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_decide", 17) == 0) {
+            const char *arg = prompt + 17;
+            while (*arg == ' ' || *arg == '\t') arg++;
+            float loop_pos = 1.0f;
+            float threshold = 0.5f;
+            if (*arg) {
+                float parsed = 0.0f;
+                if (!llmk_cfg_parse_f32(arg, &parsed)) {
+                    Print(L"\r\nUsage: /mind_halt_decide [loop_pos] [threshold]\r\n");
+                    Print(L"  Example: /mind_halt_decide 1.0 0.5\r\n\r\n");
+                    continue;
+                }
+                loop_pos = parsed;
+                while (*arg && *arg != ' ' && *arg != '\t') arg++;
+                while (*arg == ' ' || *arg == '\t') arg++;
+                if (*arg) {
+                    if (!llmk_cfg_parse_f32(arg, &parsed)) {
+                        Print(L"\r\nUsage: /mind_halt_decide [loop_pos] [threshold]\r\n");
+                        Print(L"  Example: /mind_halt_decide 1.0 0.5\r\n\r\n");
+                        continue;
+                    }
+                    threshold = parsed;
+                }
+            }
+            llmk_mind_halting_decide(loop_pos, threshold);
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_sweep", 16) == 0) {
+            const char *arg = prompt + 16;
+            while (*arg == ' ' || *arg == '\t') arg++;
+            float start = 0.0f;
+            float end = 4.0f;
+            float step = 0.5f;
+            float threshold = 0.5f;
+            if (*arg) {
+                float parsed = 0.0f;
+                if (!llmk_cfg_parse_f32(arg, &parsed)) {
+                    Print(L"\r\nUsage: /mind_halt_sweep [start] [end] [step] [threshold]\r\n");
+                    Print(L"  Example: /mind_halt_sweep 0.0 4.0 0.5 0.5\r\n\r\n");
+                    continue;
+                }
+                start = parsed;
+                while (*arg && *arg != ' ' && *arg != '\t') arg++;
+                while (*arg == ' ' || *arg == '\t') arg++;
+                if (*arg) {
+                    if (!llmk_cfg_parse_f32(arg, &parsed)) {
+                        Print(L"\r\nUsage: /mind_halt_sweep [start] [end] [step] [threshold]\r\n");
+                        Print(L"  Example: /mind_halt_sweep 0.0 4.0 0.5 0.5\r\n\r\n");
+                        continue;
+                    }
+                    end = parsed;
+                    while (*arg && *arg != ' ' && *arg != '\t') arg++;
+                    while (*arg == ' ' || *arg == '\t') arg++;
+                    if (*arg) {
+                        if (!llmk_cfg_parse_f32(arg, &parsed)) {
+                            Print(L"\r\nUsage: /mind_halt_sweep [start] [end] [step] [threshold]\r\n");
+                            Print(L"  Example: /mind_halt_sweep 0.0 4.0 0.5 0.5\r\n\r\n");
+                            continue;
+                        }
+                        step = parsed;
+                        while (*arg && *arg != ' ' && *arg != '\t') arg++;
+                        while (*arg == ' ' || *arg == '\t') arg++;
+                        if (*arg) {
+                            if (!llmk_cfg_parse_f32(arg, &parsed)) {
+                                Print(L"\r\nUsage: /mind_halt_sweep [start] [end] [step] [threshold]\r\n");
+                                Print(L"  Example: /mind_halt_sweep 0.0 4.0 0.5 0.5\r\n\r\n");
+                                continue;
+                            }
+                            threshold = parsed;
+                        }
+                    }
+                }
+            }
+            llmk_mind_halting_sweep(start, end, step, threshold);
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_policy", 17) == 0) {
+            const char *arg = prompt + 17;
+            while (*arg == ' ' || *arg == '\t') arg++;
+            if (!*arg) {
+                Print(L"\r\n[MindHaltPolicy] enabled=%d threshold=%d.%03d\r\n\r\n",
+                      g_mind_runtime_halt_enabled,
+                      (int)g_mind_runtime_halt_threshold,
+                      (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+                continue;
+            }
+
+            float parsed = 0.0f;
+            int parsed_threshold = 0;
+            if (llmk_cfg_parse_f32(arg, &parsed)) {
+                parsed_threshold = 1;
+                g_mind_runtime_halt_threshold = parsed;
+                if (g_mind_runtime_halt_threshold < 0.0f) g_mind_runtime_halt_threshold = 0.0f;
+                if (g_mind_runtime_halt_threshold > 1.0f) g_mind_runtime_halt_threshold = 1.0f;
+                while (*arg && *arg != ' ' && *arg != '\t') arg++;
+                while (*arg == ' ' || *arg == '\t') arg++;
+            }
+
+            if (*arg) {
+                if ((arg[0] == 'o' || arg[0] == 'O') && (arg[1] == 'n' || arg[1] == 'N') && !arg[2]) {
+                    g_mind_runtime_halt_enabled = 1;
+                } else if ((arg[0] == 'o' || arg[0] == 'O') && (arg[1] == 'f' || arg[1] == 'F') && (arg[2] == 'f' || arg[2] == 'F') && !arg[3]) {
+                    g_mind_runtime_halt_enabled = 0;
+                } else {
+                    Print(L"\r\nUsage: /mind_halt_policy [threshold] [on|off]\r\n");
+                    Print(L"  Examples: /mind_halt_policy\r\n");
+                    Print(L"            /mind_halt_policy 0.65\r\n");
+                    Print(L"            /mind_halt_policy 0.65 on\r\n");
+                    Print(L"            /mind_halt_policy off\r\n\r\n");
+                    continue;
+                }
+            } else if (!parsed_threshold) {
+                if ((arg[0] == 'o' || arg[0] == 'O') && (arg[1] == 'n' || arg[1] == 'N') && !arg[2]) {
+                    g_mind_runtime_halt_enabled = 1;
+                } else if ((arg[0] == 'o' || arg[0] == 'O') && (arg[1] == 'f' || arg[1] == 'F') && (arg[2] == 'f' || arg[2] == 'F') && !arg[3]) {
+                    g_mind_runtime_halt_enabled = 0;
+                } else {
+                    Print(L"\r\nUsage: /mind_halt_policy [threshold] [on|off]\r\n");
+                    Print(L"  Examples: /mind_halt_policy\r\n");
+                    Print(L"            /mind_halt_policy 0.65\r\n");
+                    Print(L"            /mind_halt_policy 0.65 on\r\n");
+                    Print(L"            /mind_halt_policy off\r\n\r\n");
+                    continue;
+                }
+            }
+
+            Print(L"\r\n[MindHaltPolicy] enabled=%d threshold=%d.%03d\r\n\r\n",
+                  g_mind_runtime_halt_enabled,
+                  (int)g_mind_runtime_halt_threshold,
+                  (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_policy_save", 22) == 0) {
+            EFI_STATUS pst = llmk_mind_persist_halt_policy_best_effort();
+            if (EFI_ERROR(pst)) {
+                Print(L"\r\n[MindHaltPolicy] warning: repl.cfg persistence failed (%r)\r\n\r\n", pst);
+            } else {
+                Print(L"\r\n[MindHaltPolicy] repl.cfg updated enabled=%d threshold=%d.%03d\r\n\r\n",
+                      g_mind_runtime_halt_enabled,
+                      (int)g_mind_runtime_halt_threshold,
+                      (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_policy_load", 22) == 0) {
+            EFI_STATUS lst = llmk_mind_load_halt_policy_best_effort();
+            if (EFI_ERROR(lst)) {
+                Print(L"\r\n[MindHaltPolicy] warning: repl.cfg load failed (%r)\r\n\r\n", lst);
+            } else {
+                Print(L"\r\n[MindHaltPolicy] repl.cfg loaded enabled=%d threshold=%d.%03d\r\n\r\n",
+                      g_mind_runtime_halt_enabled,
+                      (int)g_mind_runtime_halt_threshold,
+                      (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_policy_apply_saved", 29) == 0) {
+            int changed_enabled = 0;
+            int changed_threshold = 0;
+            EFI_STATUS ast = llmk_mind_apply_saved_halt_policy_best_effort(&changed_enabled, &changed_threshold);
+            if (EFI_ERROR(ast)) {
+                Print(L"\r\n[MindHaltPolicy] warning: saved policy apply failed (%r)\r\n\r\n", ast);
+            } else {
+                Print(L"\r\n[MindHaltPolicy] saved policy applied enabled=%d threshold=%d.%03d changed.enabled=%d changed.threshold=%d sync=in-sync\r\n\r\n",
+                      g_mind_runtime_halt_enabled,
+                      (int)g_mind_runtime_halt_threshold,
+                      (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f),
+                      changed_enabled,
+                      changed_threshold);
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_policy_reset", 23) == 0) {
+            llmk_mind_reset_halt_policy_defaults();
+            Print(L"\r\n[MindHaltPolicy] runtime reset to V1 defaults enabled=%d threshold=%d.%03d\r\n\r\n",
+                  g_mind_runtime_halt_enabled,
+                  (int)g_mind_runtime_halt_threshold,
+                  (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_policy_diff", 22) == 0) {
+            llmk_mind_print_halt_policy_diff();
+            continue;
+        }
         if (my_strncmp(prompt, "/core_load", 10) == 0) {
             const char *arg = prompt + 10;
             while (*arg == ' ' || *arg == '\t') arg++;
@@ -6185,16 +6863,18 @@ static void llmk_repl_no_model_loop(void) {
             if (!arg[0]) {
                 Print(L"\r\nUsage: /oo_sidecar <file.ooss>\r\n");
                 Print(L"  Register an OO-SomaMind sidecar extension for future OOSS loading.\r\n");
-                Print(L"  Current state: metadata/skeleton only; loader backend not wired yet.\r\n\r\n");
+                Print(L"  Current state: validates header and keeps the OOSS blob resident in memory.\r\n\r\n");
                 continue;
             }
             CHAR16 path16[192];
             ascii_to_char16(path16, arg, (int)(sizeof(path16) / sizeof(path16[0])));
             void *raw = NULL;
             UINTN raw_len = 0;
+            llmk_mind_set_sidecar_validation("checking header");
             EFI_STATUS st = llmk_read_entire_file_best_effort(path16, &raw, &raw_len);
             if (EFI_ERROR(st) || !raw || raw_len < 36) {
                 if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+                llmk_mind_set_sidecar_validation("open/read failed");
                 Print(L"\r\n[Mind] OO sidecar open failed: %s (%r)\r\n", path16, st);
                 Print(L"  Need a valid OOSS file with a readable header.\r\n\r\n");
                 continue;
@@ -6203,24 +6883,51 @@ static void llmk_repl_no_model_loop(void) {
             LlmkOoSidecarHeader hdr;
             if (!llmk_ooss_parse_header(raw, raw_len, &hdr)) {
                 uefi_call_wrapper(BS->FreePool, 1, raw);
+                llmk_mind_set_sidecar_validation("invalid OOSS header");
                 Print(L"\r\n[Mind] OO sidecar invalid: %s\r\n", path16);
                 Print(L"  Expected magic=OOSS and a 36-byte minimum header.\r\n\r\n");
                 continue;
             }
-            uefi_call_wrapper(BS->FreePool, 1, raw);
+
+            llmk_mind_release_sidecar_blob();
 
             llmk_mind_set_sidecar_request(arg, "ooss-sidecar");
             llmk_mind_store_sidecar_header(&hdr);
+            g_mind_sidecar_blob = raw;
+            llmk_mind_mark_sidecar_active(raw_len);
+            if (llmk_ooss_bind_halting_view(&hdr, g_mind_sidecar_blob, g_mind_sidecar_blob_len)) {
+                llmk_mind_set_sidecar_validation("valid OOSS header; halting hook ready");
+            } else {
+                llmk_mind_set_sidecar_validation("valid OOSS header; halting hook unavailable");
+            }
             Print(L"\r\n[Mind] OO sidecar registered: %s\r\n", path16);
             Print(L"  Role: future OO-SomaMind enriched extension\r\n");
             Print(L"  Header: version=%u d_model=%u n_layer=%u vocab=%u halt_in=%u\r\n",
                   hdr.version, hdr.d_model, hdr.n_layer, hdr.vocab_size, hdr.halting_head_d_input);
-            if (g_mind_runtime_state.core_active) {
-                Print(L"  State: core backbone active, sidecar loader pending.\r\n");
+            Print(L"  Blob: %lu bytes retained in memory\r\n", (UINT64)raw_len);
+            if (g_mind_halting_view.ready) {
+                Print(L"  Halting hook: ready (MLP layout discovered in sidecar)\r\n");
             } else {
-                Print(L"  State: waiting for core backbone activation and sidecar loader.\r\n");
+                Print(L"  Halting hook: not ready (layout/size mismatch)\r\n");
+            }
+            if (g_mind_runtime_state.core_active) {
+                Print(L"  State: core backbone active, sidecar blob resident, semantic loader pending.\r\n");
+            } else {
+                Print(L"  State: sidecar blob resident, waiting for core backbone activation.\r\n");
             }
             Print(L"  Rule: OOSS complements MAMB; it does not replace the V1 runtime backbone.\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_sidecar_unload", 18) == 0) {
+            if (g_mind_runtime_state.sidecar_requested) {
+                Print(L"\r\n[Mind] OO sidecar removed: ");
+                llmk_print_ascii(g_mind_runtime_state.sidecar_path);
+                Print(L"\r\n");
+            } else {
+                Print(L"\r\n[Mind] No OO sidecar registered.\r\n");
+            }
+            llmk_mind_clear_sidecar();
+            Print(L"  Core backbone remains unchanged.\r\n\r\n");
             continue;
         }
         if (my_strncmp(prompt, "/attach_load", 12) == 0) {
@@ -6255,7 +6962,7 @@ static void llmk_repl_no_model_loop(void) {
         if (my_strncmp(prompt, "/ssm_info", 9) == 0) {
             Print(L"\r\n[SSM] Mamba bare-metal engine v0.1\r\n");
             Print(L"  Commands: /ssm_load <file>, /ssm_infer <text>, /ssm_reset\r\n");
-            Print(L"  Mind cmds: /core_load <file>, /oo_sidecar <file>, /attach_load <file>, /attach_unload, /mind_status\r\n");
+            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_reset, /mind_halt_policy_diff, /oo_sidecar <file>, /oo_sidecar_unload, /attach_load <file>, /attach_unload, /mind_status\r\n");
             Print(L"  Weight format: MAMB binary\r\n");
             Print(L"  Exporters: runtime export_mamba_baremetal.py | oo-model export_mamb_binary.py\r\n");
             Print(L"  Architecture: Mamba SSM, freestanding, O(1) memory per token\r\n");
@@ -6641,24 +7348,62 @@ static void llmk_repl_no_model_loop(void) {
 
                 Print(L"[OOSI-v3] Prompt tokens: %d — generating (SSM recurrent)...\r\n",
                       prompt_len);
+                // Show first 5 prompt token IDs for debug
+                Print(L"[OOSI-v3] tok_ids:");
+                for (int di = 0; di < prompt_len && di < 5; di++)
+                    Print(L" %d", prompt_tokens[di]);
+                if (prompt_len > 5) Print(L" ...");
+                Print(L"\r\n");
 
-                // Callback prints each token as it is generated
-                struct { int count; } cb_state; cb_state.count = 0;
                 // Simple blocking generate (tokens decoded inline)
                 int out_ids[256];
                 int n_out = 0;
 
                 oosi_v3_gen_ctx_reset(&g_oosi_v3_ctx);
-                // Feed prompt
-                for (int pi = 0; pi < prompt_len; pi++)
+                // Feed prompt (all except last — last token fed in generate loop)
+                for (int pi = 0; pi < prompt_len - 1; pi++)
                     oosi_v3_forward_one(&g_oosi_v3_ctx, prompt_tokens[pi]);
                 g_oosi_v3_ctx.tokens_generated = 0;
 
-                // Generate
+                // Generate — first call uses last prompt token
                 int last = (prompt_len > 0) ? prompt_tokens[prompt_len - 1] : 0;
                 Print(L"[OOSI-v3] ");
                 while (n_out < g_oosi_v3_ctx.max_tokens && n_out < 256) {
                     OosiV3HaltResult r = oosi_v3_forward_one(&g_oosi_v3_ctx, last);
+
+                    // ── Diagnostic: show logits range on first 2 generated tokens ──
+                    if (n_out < 2) {
+                        ssm_f32 *lg = g_oosi_v3_ctx.logits;
+                        int V = g_oosi_v3_ctx.w->vocab_size;
+                        ssm_f32 lmin = lg[0], lmax = lg[0];
+                        int nan_count = 0;
+                        for (int qi = 1; qi < V; qi++) {
+                            if (lg[qi] != lg[qi]) { nan_count++; continue; }
+                            if (lg[qi] < lmin) lmin = lg[qi];
+                            if (lg[qi] > lmax) lmax = lg[qi];
+                        }
+                        Print(L"\r\n[DBG] tok#%d: id=%d logits[0..4]=",
+                              n_out, r.token);
+                        for (int qi = 0; qi < 5; qi++) {
+                            int iv = (int)(lg[qi] * 100.0f);
+                            Print(L"%d ", iv);
+                        }
+                        int imin = (int)(lmin * 100.0f);
+                        int imax = (int)(lmax * 100.0f);
+                        Print(L" min=%d max=%d nan=%d\r\n",
+                              imin, imax, nan_count);
+                        // Show embed_scale for input token
+                        Print(L"[DBG] embed_scale[%d]=", last);
+                        {
+                            ssm_f32 es = g_oosi_v3_ctx.w->embed_scale[last];
+                            int ies = (int)(es * 10000.0f);
+                            Print(L"%d/10000", ies);
+                        }
+                        Print(L" temp=%d/1000 top_p=%d/1000\r\n",
+                              (int)(g_oosi_v3_ctx.temperature * 1000.0f),
+                              (int)(g_oosi_v3_ctx.top_p * 1000.0f));
+                        Print(L"[OOSI-v3] ");
+                    }
                     out_ids[n_out++] = r.token;
                     // Print decoded token (best-effort)
                     char tok_str[32]; int tok_len_out = 0;
@@ -6680,6 +7425,20 @@ static void llmk_repl_no_model_loop(void) {
                         Print(L"\r\n[OOSI-v3] halted (halt_prob=%.2f)\r\n",
                               (double)r.halt_prob);
                         break;
+                    }
+                    {
+                        float mind_logit = 0.0f;
+                        float mind_prob = 0.0f;
+                        if (llmk_mind_runtime_should_halt((float)n_out, &mind_logit, &mind_prob)) {
+                            Print(L"\r\n[MindHaltRuntime] halted at loop_pos=%d.%03d halt_prob=%d.%03d threshold=%d.%03d\r\n",
+                                  n_out,
+                                  0,
+                                  (int)mind_prob,
+                                  (int)((mind_prob >= 0.0f ? mind_prob - (int)mind_prob : ((int)mind_prob - mind_prob)) * 1000.0f),
+                                  (int)g_mind_runtime_halt_threshold,
+                                  (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+                            break;
+                        }
                     }
                     if (r.token == 0) {
                         Print(L"\r\n[OOSI-v3] EOS token\r\n");
@@ -9297,6 +10056,20 @@ static void llmk_load_repl_cfg_best_effort(
                 *max_gen_tokens = v;
                 applied = 1;
             }
+        } else if (llmk_cfg_streq_ci(key, "mind_halt_enabled")) {
+            int b;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                g_mind_runtime_halt_enabled = (b != 0);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "mind_halt_threshold")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                g_mind_runtime_halt_threshold = v;
+                applied = 1;
+            }
         } else if (llmk_cfg_streq_ci(key, "autotune") || llmk_cfg_streq_ci(key, "m18_autotune")) {
             int b;
             if (llmk_cfg_parse_bool(val, &b)) {
@@ -10635,6 +11408,137 @@ static EFI_STATUS llmk_repl_cfg_set_kv_best_effort(const char *key, const char *
 
     if (EFI_ERROR(st)) return st;
     if (EFI_ERROR(flush_st)) return flush_st;
+    return EFI_SUCCESS;
+}
+
+static void llmk_mind_format_threshold_ascii(char *out, int out_cap, float threshold) {
+    if (!out || out_cap <= 0) return;
+    out[0] = 0;
+
+    if (threshold < 0.0f) threshold = 0.0f;
+    if (threshold > 1.0f) threshold = 1.0f;
+
+    int milli = (int)(threshold * 1000.0f + 0.5f);
+    if (milli < 0) milli = 0;
+    if (milli > 1000) milli = 1000;
+
+    int op = 0;
+    llmk_ascii_append_u64(out, out_cap, &op, (UINT64)(milli / 1000));
+    llmk_ascii_append_char(out, out_cap, &op, '.');
+    llmk_ascii_append_char(out, out_cap, &op, (char)('0' + ((milli / 100) % 10)));
+    llmk_ascii_append_char(out, out_cap, &op, (char)('0' + ((milli / 10) % 10)));
+    llmk_ascii_append_char(out, out_cap, &op, (char)('0' + (milli % 10)));
+}
+
+static EFI_STATUS llmk_mind_persist_halt_policy_best_effort(void) {
+    char threshold[32];
+    llmk_mind_format_threshold_ascii(threshold, (int)sizeof(threshold), g_mind_runtime_halt_threshold);
+
+    EFI_STATUS st = llmk_repl_cfg_set_kv_best_effort("mind_halt_enabled", g_mind_runtime_halt_enabled ? "1" : "0");
+    if (EFI_ERROR(st)) return st;
+    return llmk_repl_cfg_set_kv_best_effort("mind_halt_threshold", threshold);
+}
+
+static EFI_STATUS llmk_mind_query_halt_policy_cfg_best_effort(
+    int *out_enabled,
+    float *out_threshold,
+    int *out_found_enabled,
+    int *out_found_threshold
+) {
+    if (out_found_enabled) *out_found_enabled = 0;
+    if (out_found_threshold) *out_found_threshold = 0;
+    if (!g_root) return EFI_NOT_READY;
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"repl.cfg", &raw, &raw_len);
+    if (EFI_ERROR(st) || !raw || raw_len == 0) {
+        if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+        return EFI_NOT_FOUND;
+    }
+
+    char *buf = NULL;
+    EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&buf);
+    if (EFI_ERROR(st2) || !buf) {
+        uefi_call_wrapper(BS->FreePool, 1, raw);
+        return EFI_OUT_OF_RESOURCES;
+    }
+    CopyMem(buf, raw, raw_len);
+    buf[raw_len] = 0;
+    uefi_call_wrapper(BS->FreePool, 1, raw);
+
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        llmk_cfg_trim(&line);
+        if (line[0] == 0 || line[0] == '#' || line[0] == ';') continue;
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0) continue;
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        if (llmk_cfg_streq_ci(key, "mind_halt_enabled")) {
+            int b = 0;
+            if (llmk_cfg_parse_bool(val, &b)) {
+                if (out_enabled) *out_enabled = (b != 0);
+                if (out_found_enabled) *out_found_enabled = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "mind_halt_threshold")) {
+            float v = 0.0f;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                if (out_threshold) *out_threshold = v;
+                if (out_found_threshold) *out_found_threshold = 1;
+            }
+        }
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    if ((out_found_enabled && *out_found_enabled) || (out_found_threshold && *out_found_threshold)) {
+        return EFI_SUCCESS;
+    }
+    return EFI_NOT_FOUND;
+}
+
+static EFI_STATUS llmk_mind_load_halt_policy_best_effort(void) {
+    int cfg_enabled = g_mind_runtime_halt_enabled;
+    float cfg_threshold = g_mind_runtime_halt_threshold;
+    int found_enabled = 0;
+    int found_threshold = 0;
+    EFI_STATUS st = llmk_mind_query_halt_policy_cfg_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold);
+    if (EFI_ERROR(st)) return st;
+    if (found_enabled) g_mind_runtime_halt_enabled = cfg_enabled;
+    if (found_threshold) g_mind_runtime_halt_threshold = cfg_threshold;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS llmk_mind_apply_saved_halt_policy_best_effort(int *out_changed_enabled, int *out_changed_threshold) {
+    int prev_enabled = g_mind_runtime_halt_enabled;
+    float prev_threshold = g_mind_runtime_halt_threshold;
+    EFI_STATUS st = llmk_mind_load_halt_policy_best_effort();
+    if (EFI_ERROR(st)) return st;
+    if (out_changed_enabled) *out_changed_enabled = (prev_enabled != g_mind_runtime_halt_enabled);
+    if (out_changed_threshold) {
+        float diff = g_mind_runtime_halt_threshold - prev_threshold;
+        if (diff < 0.0f) diff = -diff;
+        *out_changed_threshold = (diff >= 0.0005f);
+    }
     return EFI_SUCCESS;
 }
 
@@ -21904,6 +22808,26 @@ snap_autoload_done:
             // Append to context and apply a simple loop-stop heuristic.
             if (n_context_tokens < (int)(sizeof(context_tokens) / sizeof(context_tokens[0]))) {
                 context_tokens[n_context_tokens++] = next;
+            }
+            {
+                float mind_logit = 0.0f;
+                float mind_prob = 0.0f;
+                float loop_pos = (float)(generated_count > 0 ? generated_count : (step + 1));
+                if (llmk_mind_runtime_should_halt(loop_pos, &mind_logit, &mind_prob)) {
+                    if (!stop_reason) {
+                        stop_reason = L"mind_halt";
+                        stop_token = next;
+                        stop_step = step;
+                        stop_pos = pos;
+                    }
+                    Print(L"\r\n[MindHaltRuntime] stop step=%d halt_prob=%d.%03d threshold=%d.%03d\r\n",
+                          step,
+                          (int)mind_prob,
+                          (int)((mind_prob >= 0.0f ? mind_prob - (int)mind_prob : ((int)mind_prob - mind_prob)) * 1000.0f),
+                          (int)g_mind_runtime_halt_threshold,
+                          (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+                    break;
+                }
             }
             // Loop heuristic (suffix repeat): do not hard-stop.
             // Under small GGUF models this can trigger very early and mask real generation.
