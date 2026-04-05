@@ -239,10 +239,14 @@ int bpe_decode_token(
 
     // Handle <0xNN> byte tokens (llama byte fallback)
     if (len == 6 && s[0] == '<' && s[1] == '0' && s[2] == 'x' && s[5] == '>') {
-        // Decode hex byte
         char hi = s[3], lo = s[4];
-        int hv = (hi >= '0' && hi <= '9') ? hi-'0' : (hi >= 'a' && hi <= 'f') ? hi-'a'+10 : hi-'A'+10;
-        int lv = (lo >= '0' && lo <= '9') ? lo-'0' : (lo >= 'a' && lo <= 'f') ? lo-'a'+10 : lo-'A'+10;
+        int hv = (hi >= '0' && hi <= '9') ? hi-'0'
+               : (hi >= 'a' && hi <= 'f') ? hi-'a'+10
+               : (hi >= 'A' && hi <= 'F') ? hi-'A'+10 : -1;
+        int lv = (lo >= '0' && lo <= '9') ? lo-'0'
+               : (lo >= 'a' && lo <= 'f') ? lo-'a'+10
+               : (lo >= 'A' && lo <= 'F') ? lo-'A'+10 : -1;
+        if (hv < 0 || lv < 0) { buf[0] = 0; return 0; }
         buf[0] = (char)((hv << 4) | lv);
         if (buf_size > 1) buf[1] = 0;
         return 1;

@@ -351,6 +351,10 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
         &ctx->halt_head, x_out,
         ctx->halt_h1, ctx->halt_h2, ctx->halt_buf, D);
 
+    // NaN guard: untrained HaltingHead may produce NaN
+    if (halt_p != halt_p || halt_p < 0.0f) halt_p = 0.0f;
+    if (halt_p > 1.0f) halt_p = 1.0f;
+
     OosiV3HaltResult r;
     r.token     = next_token;
     r.halt_prob = halt_p;

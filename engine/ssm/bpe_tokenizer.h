@@ -14,7 +14,7 @@ extern "C" {
 // ============================================================
 // Tokenizer config
 // ============================================================
-#define BPE_MAX_VOCAB       32000
+#define BPE_MAX_VOCAB       52000
 #define BPE_MAX_TOKEN_LEN   256    // max bytes per token string
 #define BPE_MAX_MERGE_LEN   512    // max bytes per merge rule
 #define BPE_MAX_INPUT_LEN   2048   // max input string length
