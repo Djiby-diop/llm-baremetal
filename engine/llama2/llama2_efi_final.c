@@ -7906,7 +7906,7 @@ static void llmk_repl_no_model_loop(void) {
                     g_v3_h_state, g_v3_conv_buf, g_v3_conv_pos,
                     g_v3_halt_h1, g_v3_halt_h2, g_v3_halt_buf,
                     0.80f,   // halt_threshold
-                    0.0f,    // temperature (0=argmax for diagnostic)
+                    0.0f,    // temperature (0=argmax — switch to 0.5 once validated)
                     0.90f,   // top_p
                     0xCAFEBABEu,
                     (g_max_new_tokens > 0) ? g_max_new_tokens : 128
@@ -8184,25 +8184,21 @@ static void llmk_repl_no_model_loop(void) {
                         Print(L"<tok%d>", r.token);
                     }
                     last = r.token;
-                    if (r.halted) {
-                        Print(L"\r\n[OOSI-v3] halted (halt_prob=%.2f)\r\n",
-                              (double)r.halt_prob);
-                        break;
-                    }
-                    {
-                        float mind_logit = 0.0f;
-                        float mind_prob = 0.0f;
-                        if (llmk_mind_runtime_should_halt((float)n_out, &mind_logit, &mind_prob)) {
-                            Print(L"\r\n[MindHaltRuntime] halted at loop_pos=%d.%03d halt_prob=%d.%03d threshold=%d.%03d\r\n",
-                                  n_out,
-                                  0,
-                                  (int)mind_prob,
-                                  (int)((mind_prob >= 0.0f ? mind_prob - (int)mind_prob : ((int)mind_prob - mind_prob)) * 1000.0f),
-                                  (int)g_mind_runtime_halt_threshold,
-                                  (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
-                            break;
-                        }
-                    }
+                    // HaltingHead disabled for now — generates false positives
+                    // TODO: re-enable once halt_forward is validated
+                    // if (r.halted) {
+                    //     Print(L"\r\n[OOSI-v3] halted (halt_prob=%d/100)\r\n",
+                    //           (int)(r.halt_prob * 100.0f));
+                    //     break;
+                    // }
+                    // MindHaltRuntime also disabled for validation
+                    // {
+                    //     float mind_logit = 0.0f;
+                    //     float mind_prob = 0.0f;
+                    //     if (llmk_mind_runtime_should_halt((float)n_out, &mind_logit, &mind_prob)) {
+                    //         break;
+                    //     }
+                    // }
                     if (r.token == 0) {
                         Print(L"\r\n[OOSI-v3] EOS token\r\n");
                         break;
