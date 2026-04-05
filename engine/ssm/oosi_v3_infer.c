@@ -76,6 +76,7 @@ SsmStatus oosi_v3_gen_ctx_init(
     ctx->halt_threshold = (halt_threshold > 0.0f) ? halt_threshold : 0.7f;
     ctx->temperature    = temperature;
     ctx->top_p          = top_p;
+    ctx->repetition_penalty = 1.3f;  // default: moderate penalty
     ctx->rng_state      = seed ^ 0xDEADBEEFu;
     ctx->max_tokens     = (max_tokens > 0) ? max_tokens : 64;
     ctx->tokens_generated = 0;
@@ -104,6 +105,7 @@ void oosi_v3_gen_ctx_reset(OosiV3GenCtx *ctx) {
     for (int i = 0; i < N * Di * Dc; i++) ctx->conv_buf[i] = 0.0f;
     for (int i = 0; i < N; i++) ctx->conv_pos[i] = 0;
     ctx->tokens_generated = 0;
+    ctx->rep_count = 0;
 }
 
 // ============================================================
@@ -311,6 +313,20 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
         }
     }
 
+    // 5b. Repetition penalty: penalize tokens already generated
+    if (ctx->repetition_penalty > 1.0f && ctx->rep_count > 0) {
+        ssm_f32 rp = ctx->repetition_penalty;
+        for (int ri = 0; ri < ctx->rep_count && ri < 128; ri++) {
+            int tid = ctx->rep_history[ri];
+            if (tid >= 0 && tid < w->vocab_size) {
+                if (ctx->logits[tid] > 0.0f)
+                    ctx->logits[tid] /= rp;
+                else
+                    ctx->logits[tid] *= rp;
+            }
+        }
+    }
+
     // 6. Sample next token
     int next_token;
     if (ctx->temperature <= 0.0f) {
@@ -321,6 +337,11 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
         _v3_softmax(ctx->logits, w->vocab_size);
         next_token = _v3_sample_topp(ctx->logits, w->vocab_size,
                                      ctx->top_p, &ctx->rng_state);
+    }
+
+    // Track generated token for repetition penalty
+    if (ctx->rep_count < 128) {
+        ctx->rep_history[ctx->rep_count++] = next_token;
     }
 
     // 7. HaltingHead

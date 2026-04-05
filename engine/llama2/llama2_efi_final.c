@@ -7906,7 +7906,7 @@ static void llmk_repl_no_model_loop(void) {
                     g_v3_h_state, g_v3_conv_buf, g_v3_conv_pos,
                     g_v3_halt_h1, g_v3_halt_h2, g_v3_halt_buf,
                     0.80f,   // halt_threshold
-                    0.7f,    // temperature
+                    0.0f,    // temperature (0=argmax for diagnostic)
                     0.90f,   // top_p
                     0xCAFEBABEu,
                     (g_max_new_tokens > 0) ? g_max_new_tokens : 128
@@ -8124,28 +8124,47 @@ static void llmk_repl_no_model_loop(void) {
                 while (n_out < g_oosi_v3_ctx.max_tokens && n_out < 256) {
                     OosiV3HaltResult r = oosi_v3_forward_one(&g_oosi_v3_ctx, last);
 
-                    // ── Diagnostic: show logits range on first 2 generated tokens ──
-                    if (n_out < 2) {
+                    // ── Diagnostic: show logits range on first 3 generated tokens ──
+                    if (n_out < 3) {
                         // Show RAW logits (before masking/softmax)
-                        Print(L"\r\n[DBG] tok#%d: id=%d RAW_logits[0..4]=",
-                              n_out, r.token);
-                        for (int qi = 0; qi < 5; qi++) {
-                            int iv = (int)(g_oosi_v3_ctx.dbg_raw_logits[qi] * 100.0f);
-                            Print(L"%d ", iv);
-                        }
-                        int imin = (int)(g_oosi_v3_ctx.dbg_raw_min * 100.0f);
-                        int imax = (int)(g_oosi_v3_ctx.dbg_raw_max * 100.0f);
-                        Print(L" min=%d max=%d\r\n", imin, imax);
-                        // Show embed_scale for input token
-                        Print(L"[DBG] embed_scale[%d]=", last);
+                        Print(L"\r\n[DBG] tok#%d: id=%d RAW min=%d max=%d",
+                              n_out, r.token,
+                              (int)(g_oosi_v3_ctx.dbg_raw_min * 100.0f),
+                              (int)(g_oosi_v3_ctx.dbg_raw_max * 100.0f));
+                        // Show top-5 tokens by raw logits
                         {
-                            ssm_f32 es = g_oosi_v3_ctx.w->embed_scale[last];
-                            int ies = (int)(es * 10000.0f);
-                            Print(L"%d/10000", ies);
+                            ssm_f32 *rl = g_oosi_v3_ctx.dbg_raw_logits;
+                            int V = g_oosi_v3_ctx.w->vocab_size;
+                            int top5[5] = {2,2,2,2,2};
+                            // Find top 5 from raw logits saved in ctx
+                            // Use dbg_raw_logits for first 5, but we need full scan
+                            // Actually dbg_raw_logits only has [0..4] — use logits array
+                            // (already modified by masking but tokens 2-50256 are intact)
+                            ssm_f32 *lg = g_oosi_v3_ctx.logits;
+                            for (int ti = 2; ti < V && ti < 50257; ti++) {
+                                for (int k = 0; k < 5; k++) {
+                                    if (lg[ti] > lg[top5[k]]) {
+                                        for (int m = 4; m > k; m--) top5[m] = top5[m-1];
+                                        top5[k] = ti;
+                                        break;
+                                    }
+                                }
+                            }
+                            Print(L" top5:");
+                            for (int k = 0; k < 5; k++) {
+                                char ts[16]; int tl = llmk_oo_infer_decode_token(top5[k], ts, 15);
+                                if (tl > 0) {
+                                    ts[tl] = 0;
+                                    Print(L"[%d:", top5[k]);
+                                    llmk_print_ascii(ts);
+                                    Print(L"]");
+                                } else {
+                                    Print(L"[%d]", top5[k]);
+                                }
+                            }
                         }
-                        Print(L" temp=%d/1000 top_p=%d/1000\r\n",
-                              (int)(g_oosi_v3_ctx.temperature * 1000.0f),
-                              (int)(g_oosi_v3_ctx.top_p * 1000.0f));
+                        Print(L" temp=%d/1000\r\n",
+                              (int)(g_oosi_v3_ctx.temperature * 1000.0f));
                         Print(L"[OOSI-v3] ");
                     }
                     out_ids[n_out++] = r.token;

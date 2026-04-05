@@ -45,11 +45,16 @@ typedef struct {
     float    halt_threshold;
     float    temperature;
     float    top_p;
+    float    repetition_penalty;   // 1.0 = off, 1.2 = typical
     uint32_t rng_state;
 
     // Generation state
     int max_tokens;
     int tokens_generated;
+
+    // Repetition penalty: track last N generated tokens
+    int  rep_history[128];
+    int  rep_count;
 
     // Debug: raw logits before masking/softmax (first 5 + min/max)
     ssm_f32 dbg_raw_logits[5];
