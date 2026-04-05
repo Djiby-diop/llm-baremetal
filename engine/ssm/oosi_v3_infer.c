@@ -298,9 +298,18 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
         ctx->dbg_raw_max = rmax;
     }
 
-    // 5. Mask EOS/BOS (token 0 and 1) to prevent degenerate output
+    // 5. Mask special tokens to prevent degenerate output
+    //    GPT-NeoX vocab: 0=<|endoftext|>, 1=<|padding|>, 2..50256=BPE tokens
+    //    Tokens >= 50257 are padding/unused added to align vocab size
     ctx->logits[0] = -1.0e9f;
     ctx->logits[1] = -1.0e9f;
+    {
+        int real_vocab = 50257;  // GPT-NeoX standard BPE vocab boundary
+        if (real_vocab < w->vocab_size) {
+            for (int i = real_vocab; i < w->vocab_size; i++)
+                ctx->logits[i] = -1.0e9f;
+        }
+    }
 
     // 6. Sample next token
     int next_token;

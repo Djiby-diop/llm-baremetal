@@ -47,6 +47,7 @@ Le squelette runtime OO expose aussi désormais :
 - `/mind_halt_policy_audit`
 - `/mind_audit`
 - `/mind_doctor`
+- `/mind_next`
 - `/mind_ready`
 - `/mind_bootstrap_v1`
 - `/mind_path_v1`
@@ -75,6 +76,7 @@ Le squelette runtime OO expose aussi désormais :
 - audit dédié via `/mind_halt_policy_audit` pour résumer le runtime, le persistant, l'état de synchronisation et le dernier effet d'application ;
 - audit global via `/mind_audit` pour agréger les audits `halt policy`, `sidecar` et `attach` dans un seul rapport runtime ;
 - guidance corrective via `/mind_doctor` pour séparer les actions sûres auto-corrigeables des suivis manuels à partir de l'état runtime courant ;
+- guidage compact via `/mind_next` pour exposer une seule meilleure action suivante à partir de l'état runtime courant ;
 - verdict binaire via `/mind_ready` pour dire si le chemin runtime V1 est prêt ou non ;
 - amorçage prudent via `/mind_bootstrap_v1` pour appliquer automatiquement les étapes V1 évidentes et sûres, y compris la réutilisation des chemins core/sidecar déjà mémorisés quand ils existent, puis signaler les bloqueurs restants ;
 - chemin minimal via `/mind_path_v1` pour imprimer la séquence V1 recommandée la plus courte depuis l'état runtime courant, avec recours à `/mind_bootstrap_v1` quand c'est le meilleur raccourci ;

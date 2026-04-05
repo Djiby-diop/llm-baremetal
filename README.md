@@ -36,6 +36,7 @@ Current runtime skeleton commands:
 - `/mind_halt_policy_audit`
 - `/mind_audit`
 - `/mind_doctor`
+- `/mind_next`
 - `/mind_ready`
 - `/mind_bootstrap_v1`
 - `/mind_path_v1`
@@ -66,6 +67,7 @@ Current sidecar behavior:
 - exposes `/mind_halt_policy_audit` to summarize runtime policy, persisted policy, sync state, and last apply/sync effect
 - exposes `/mind_audit` to aggregate halt-policy, sidecar, and attach audits into one global runtime report
 - exposes `/mind_doctor` to split the next safe corrective sequence into auto-fixable actions vs manual follow-up from current runtime state
+- exposes `/mind_next` to print exactly one best next action from current runtime state
 - exposes `/mind_ready` as a short binary readiness check for the V1 runtime path
 - exposes `/mind_bootstrap_v1` to auto-apply the obvious safe V1 bootstrap steps, including reusing stored core/sidecar requests when available, and then report remaining blockers
 - exposes `/mind_path_v1` to print the shortest recommended V1 startup sequence from the current runtime state, including `/mind_bootstrap_v1` when it is the best shortcut

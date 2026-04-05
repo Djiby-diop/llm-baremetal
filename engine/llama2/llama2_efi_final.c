@@ -6760,6 +6760,7 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /mind_halt_policy_audit  Audit runtime, persisted policy, and last apply state\r\n");
     Print(L"  /mind_audit  Run a global OO-SomaMind runtime audit\r\n");
     Print(L"  /mind_doctor  Propose the next safe corrective sequence for the runtime\r\n");
+    Print(L"  /mind_next  Print the single best next runtime action\r\n");
     Print(L"  /mind_ready  Report whether the V1 runtime is ready\r\n");
     Print(L"  /mind_bootstrap_v1  Auto-apply the obvious safe V1 bootstrap steps\r\n");
     Print(L"  /mind_path_v1  Print the minimal recommended V1 startup path\r\n");
@@ -7579,6 +7580,10 @@ static void llmk_repl_no_model_loop(void) {
             llmk_mind_print_doctor();
             continue;
         }
+        if (my_strncmp(prompt, "/mind_next", 10) == 0) {
+            llmk_mind_print_next();
+            continue;
+        }
         if (my_strncmp(prompt, "/mind_ready", 11) == 0) {
             llmk_mind_print_ready();
             continue;
@@ -7710,7 +7715,7 @@ static void llmk_repl_no_model_loop(void) {
         if (my_strncmp(prompt, "/ssm_info", 9) == 0) {
             Print(L"\r\n[SSM] Mamba bare-metal engine v0.1\r\n");
             Print(L"  Commands: /ssm_load <file>, /ssm_infer <text>, /ssm_reset\r\n");
-            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_apply_saved_if_needed, /mind_halt_policy_sync, /mind_halt_policy_sync_force, /mind_halt_policy_audit, /mind_audit, /mind_doctor, /mind_ready, /mind_bootstrap_v1, /mind_path_v1, /oo_sidecar <file>, /oo_sidecar_audit, /oo_sidecar_unload, /attach_load <file>, /attach_audit, /attach_unload, /mind_halt_policy_reset, /mind_halt_policy_diff, /mind_status\r\n");
+            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_apply_saved_if_needed, /mind_halt_policy_sync, /mind_halt_policy_sync_force, /mind_halt_policy_audit, /mind_audit, /mind_doctor, /mind_next, /mind_ready, /mind_bootstrap_v1, /mind_path_v1, /oo_sidecar <file>, /oo_sidecar_audit, /oo_sidecar_unload, /attach_load <file>, /attach_audit, /attach_unload, /mind_halt_policy_reset, /mind_halt_policy_diff, /mind_status\r\n");
             Print(L"  Weight format: MAMB binary\r\n");
             Print(L"  Exporters: runtime export_mamba_baremetal.py | oo-model export_mamb_binary.py\r\n");
             Print(L"  Architecture: Mamba SSM, freestanding, O(1) memory per token\r\n");
