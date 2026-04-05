@@ -132,6 +132,21 @@ static void *g_mind_sidecar_blob = NULL;
 static UINTN g_mind_sidecar_blob_len = 0;
 
 typedef struct {
+    int cfg_enabled;
+    float cfg_threshold;
+    int found_enabled;
+    int found_threshold;
+    int found_any;
+    int in_sync;
+    EFI_STATUS cfg_st;
+    int core_ready;
+    int halt_ready;
+    int sidecar_ready;
+    int ready;
+    int bootstrap_can_help;
+} LlmkMindRuntimeSnapshot;
+
+typedef struct {
     UINT32 magic;
     UINT32 version;
     UINT32 d_model;
@@ -365,6 +380,9 @@ static EFI_STATUS llmk_mind_apply_saved_halt_policy_if_needed_best_effort(int *o
 static EFI_STATUS llmk_read_entire_file_best_effort(const CHAR16 *name, void **out_buf, UINTN *out_len);
 static void llmk_mind_bind_core_backbone_v1(const char *path, int via_core_alias);
 static EFI_STATUS llmk_mind_register_sidecar_best_effort(const char *path, LlmkOoSidecarHeader *out_hdr, UINTN *out_raw_len);
+static void llmk_mind_collect_runtime_snapshot(LlmkMindRuntimeSnapshot *out);
+static void llmk_mind_select_next_action_from_snapshot(const LlmkMindRuntimeSnapshot *snapshot, const CHAR16 **out_action, const CHAR16 **out_reason);
+static void llmk_mind_select_next_action(const CHAR16 **out_action, const CHAR16 **out_reason, int *out_ready, int *out_core_ready, int *out_halt_ready, int *out_sidecar_ready);
 
 static void llmk_mind_record_halt_apply(LlmkMindHaltApplyMode mode, int changed_enabled, int changed_threshold) {
     g_mind_runtime_halt_apply_seen = 1;
@@ -407,6 +425,35 @@ static EFI_STATUS llmk_mind_query_halt_policy_sync_state_best_effort(
         if (out_in_sync) *out_in_sync = (eff_enabled == g_mind_runtime_halt_enabled && diff < 0.0005f) ? 1 : 0;
     }
     return EFI_SUCCESS;
+}
+
+static void llmk_mind_collect_runtime_snapshot(LlmkMindRuntimeSnapshot *out) {
+    LlmkMindRuntimeSnapshot snapshot;
+    SetMem(&snapshot, sizeof(snapshot), 0);
+
+    snapshot.cfg_enabled = g_mind_runtime_halt_enabled;
+    snapshot.cfg_threshold = g_mind_runtime_halt_threshold;
+    snapshot.cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(
+        &snapshot.cfg_enabled,
+        &snapshot.cfg_threshold,
+        &snapshot.found_enabled,
+        &snapshot.found_threshold,
+        &snapshot.found_any,
+        &snapshot.in_sync
+    );
+
+    snapshot.core_ready = g_mind_runtime_state.core_active ? 1 : 0;
+    snapshot.halt_ready = (!EFI_ERROR(snapshot.cfg_st) && snapshot.found_any && snapshot.in_sync) ? 1 : 0;
+    snapshot.sidecar_ready = (!g_mind_runtime_state.sidecar_requested) ||
+                             (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && g_mind_halting_view.ready);
+    snapshot.ready = (snapshot.core_ready && snapshot.halt_ready && snapshot.sidecar_ready) ? 1 : 0;
+    if ((g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && g_mind_runtime_state.core_path[0]) ||
+        (EFI_ERROR(snapshot.cfg_st) || !snapshot.found_any || !snapshot.in_sync) ||
+        (g_mind_runtime_state.sidecar_requested && !g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_path[0])) {
+        snapshot.bootstrap_can_help = 1;
+    }
+
+    if (out) *out = snapshot;
 }
 
 static void llmk_mind_print_halt_apply_mode(LlmkMindHaltApplyMode mode) {
@@ -617,6 +664,12 @@ static void llmk_mind_print_attach_audit(void) {
 }
 
 static void llmk_mind_print_global_audit(void) {
+    const CHAR16 *next_action = L"/mind_doctor";
+    const CHAR16 *next_reason = L"state is not fully ready and needs a broader corrective snapshot";
+    LlmkMindRuntimeSnapshot snapshot;
+    llmk_mind_collect_runtime_snapshot(&snapshot);
+    llmk_mind_select_next_action_from_snapshot(&snapshot, &next_action, &next_reason);
+
     Print(L"\r\n[MindAudit]\r\n");
     Print(L"  scope=topology+halt_policy+sidecar+attach\r\n");
     Print(L"  identity=oo-somamind-core-primary\r\n");
@@ -624,16 +677,20 @@ static void llmk_mind_print_global_audit(void) {
     llmk_mind_print_halt_policy_audit();
     llmk_mind_print_sidecar_audit();
     llmk_mind_print_attach_audit();
+    Print(L"  ready=%d\r\n", snapshot.ready);
+    Print(L"  readiness.core=%s\r\n", snapshot.core_ready ? L"ready" : L"not-ready");
+    Print(L"  readiness.halt_policy=%s\r\n", snapshot.halt_ready ? L"ready" : L"not-ready");
+    Print(L"  readiness.sidecar=%s\r\n", snapshot.sidecar_ready ? L"ready" : L"not-ready");
+    Print(L"  next_action=%s\r\n", next_action);
+    Print(L"  next_reason=%s\r\n\r\n", next_reason);
 }
 
 static void llmk_mind_print_doctor(void) {
-    int cfg_enabled = g_mind_runtime_halt_enabled;
-    float cfg_threshold = g_mind_runtime_halt_threshold;
-    int found_enabled = 0;
-    int found_threshold = 0;
-    int found_any = 0;
-    int in_sync = 0;
-    EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
+    const CHAR16 *next_action = L"/mind_doctor";
+    const CHAR16 *next_reason = L"state is not fully ready and needs a broader corrective snapshot";
+    LlmkMindRuntimeSnapshot snapshot;
+    llmk_mind_collect_runtime_snapshot(&snapshot);
+    llmk_mind_select_next_action(&next_action, &next_reason, NULL, NULL, NULL, NULL);
 
     Print(L"\r\n[MindDoctor]\r\n");
     Print(L"  goal=produce-next-safe-runtime-fixes\r\n");
@@ -644,13 +701,7 @@ static void llmk_mind_print_doctor(void) {
     int manual_step = 1;
     int auto_count = 0;
     int manual_count = 0;
-    int bootstrap_can_help = 0;
-
-    if ((g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && g_mind_runtime_state.core_path[0]) ||
-        (EFI_ERROR(cfg_st) || !found_any || !in_sync) ||
-        (g_mind_runtime_state.sidecar_requested && !g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_path[0])) {
-        bootstrap_can_help = 1;
-    }
+    int bootstrap_can_help = snapshot.bootstrap_can_help;
 
     Print(L"  [auto-fixable]\r\n");
     if (bootstrap_can_help) {
@@ -666,10 +717,10 @@ static void llmk_mind_print_doctor(void) {
     }
 
     if (!bootstrap_can_help) {
-        if (EFI_ERROR(cfg_st) || !found_any) {
+        if (EFI_ERROR(snapshot.cfg_st) || !snapshot.found_any) {
             Print(L"    step%u=/mind_halt_policy_save  ; persist runtime halt policy into repl.cfg\r\n", auto_step++);
             auto_count++;
-        } else if (!in_sync) {
+        } else if (!snapshot.in_sync) {
             Print(L"    step%u=/mind_halt_policy_sync  ; align runtime halt policy with repl.cfg\r\n", auto_step++);
             auto_count++;
         }
@@ -700,29 +751,98 @@ static void llmk_mind_print_doctor(void) {
     if (auto_count == 0 && manual_count == 0) {
         Print(L"  status=healthy-v1-runtime\r\n");
         Print(L"  suggestion=use /mind_audit for a full snapshot\r\n\r\n");
+        Print(L"  next_action=%s\r\n", next_action);
+        Print(L"  next_reason=%s\r\n\r\n", next_reason);
         return;
     }
 
     Print(L"  summary=auto:%u manual:%u\r\n", (UINT32)auto_count, (UINT32)manual_count);
-    if (auto_count > 0 && manual_count == 0) Print(L"  next=/mind_bootstrap_v1\r\n\r\n");
-    else if (auto_count > 0) Print(L"  next=/mind_bootstrap_v1 then review manual-follow-up\r\n\r\n");
-    else Print(L"  next=manual-follow-up required\r\n\r\n");
+    if (auto_count > 0 && manual_count == 0) Print(L"  next=/mind_bootstrap_v1\r\n");
+    else if (auto_count > 0) Print(L"  next=/mind_bootstrap_v1 then review manual-follow-up\r\n");
+    else Print(L"  next=manual-follow-up required\r\n");
+    Print(L"  next_action=%s\r\n", next_action);
+    Print(L"  next_reason=%s\r\n\r\n", next_reason);
+}
+
+static void llmk_mind_select_next_action_from_snapshot(
+    const LlmkMindRuntimeSnapshot *snapshot,
+    const CHAR16 **out_action,
+    const CHAR16 **out_reason
+) {
+    if (!snapshot) return;
+
+    if (snapshot->ready) {
+        if (out_action) *out_action = L"/mind_audit";
+        if (out_reason) *out_reason = L"runtime already ready; audit is the next useful snapshot";
+        return;
+    }
+
+    if (snapshot->bootstrap_can_help) {
+        if (out_action) *out_action = L"/mind_bootstrap_v1";
+        if (out_reason) *out_reason = L"stored/runtime-safe fixes are available right now";
+        return;
+    }
+
+    if (!g_mind_runtime_state.core_requested ||
+        (g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && !g_mind_runtime_state.core_path[0])) {
+        if (out_action) *out_action = L"/core_load <file.mamb>";
+        if (out_reason) *out_reason = L"core backbone is missing or cannot be reactivated automatically";
+        return;
+    }
+
+    if (g_mind_runtime_state.sidecar_requested) {
+        if (!g_mind_runtime_state.sidecar_active && !g_mind_runtime_state.sidecar_path[0]) {
+            if (out_action) *out_action = L"/oo_sidecar <file.ooss>";
+            if (out_reason) *out_reason = L"requested sidecar is inactive and no reusable path is stored";
+            return;
+        }
+        if (g_mind_runtime_state.sidecar_active && !g_mind_runtime_state.sidecar_header_valid) {
+            if (out_action) *out_action = L"/oo_sidecar <file.ooss>";
+            if (out_reason) *out_reason = L"current sidecar header is invalid";
+            return;
+        }
+        if (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && !g_mind_halting_view.ready) {
+            if (out_action) *out_action = L"inspect sidecar layout/export";
+            if (out_reason) *out_reason = L"HaltingHead view is not ready and requires manual follow-up";
+            return;
+        }
+    }
+
+    if (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active) {
+        if (out_action) *out_action = L"wait for future attach backend";
+        if (out_reason) *out_reason = L"attach is optional and currently not wired";
+        return;
+    }
+
+    if (out_action) *out_action = L"/mind_doctor";
+    if (out_reason) *out_reason = L"state is not fully ready and needs a broader corrective snapshot";
+}
+
+static void llmk_mind_select_next_action(
+    const CHAR16 **out_action,
+    const CHAR16 **out_reason,
+    int *out_ready,
+    int *out_core_ready,
+    int *out_halt_ready,
+    int *out_sidecar_ready
+) {
+    LlmkMindRuntimeSnapshot snapshot;
+    llmk_mind_collect_runtime_snapshot(&snapshot);
+    if (out_ready) *out_ready = snapshot.ready;
+    if (out_core_ready) *out_core_ready = snapshot.core_ready;
+    if (out_halt_ready) *out_halt_ready = snapshot.halt_ready;
+    if (out_sidecar_ready) *out_sidecar_ready = snapshot.sidecar_ready;
+    llmk_mind_select_next_action_from_snapshot(&snapshot, out_action, out_reason);
 }
 
 static void llmk_mind_print_ready(void) {
-    int cfg_enabled = g_mind_runtime_halt_enabled;
-    float cfg_threshold = g_mind_runtime_halt_threshold;
-    int found_enabled = 0;
-    int found_threshold = 0;
-    int found_any = 0;
-    int in_sync = 0;
-    EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
-
-    int core_ready = g_mind_runtime_state.core_active ? 1 : 0;
-    int halt_ready = (!EFI_ERROR(cfg_st) && found_any && in_sync) ? 1 : 0;
-    int sidecar_ready = (!g_mind_runtime_state.sidecar_requested) ||
-                        (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && g_mind_halting_view.ready);
-    int ready = (core_ready && halt_ready && sidecar_ready) ? 1 : 0;
+    const CHAR16 *next_action = L"/mind_doctor";
+    const CHAR16 *next_reason = L"state is not fully ready and needs a broader corrective snapshot";
+    int core_ready = 0;
+    int halt_ready = 0;
+    int sidecar_ready = 0;
+    int ready = 0;
+    llmk_mind_select_next_action(&next_action, &next_reason, &ready, &core_ready, &halt_ready, &sidecar_ready);
 
     Print(L"\r\n[MindReady]\r\n");
     Print(L"  ready=%d\r\n", ready);
@@ -731,24 +851,15 @@ static void llmk_mind_print_ready(void) {
     Print(L"  sidecar=%s\r\n", sidecar_ready ? L"ready" : L"not-ready");
     Print(L"  attach=optional\r\n");
     Print(L"  scenario=v1-runtime\r\n");
-    if (ready) {
-        Print(L"  next=runtime-ready\r\n\r\n");
-    } else {
-        Print(L"  next=/mind_doctor\r\n\r\n");
-    }
+    Print(L"  next=%s\r\n", next_action);
+    Print(L"  next_reason=%s\r\n\r\n", next_reason);
 }
 
 static void llmk_mind_bootstrap_v1(void) {
     int actions = 0;
     int blockers = 0;
-
-    int cfg_enabled = g_mind_runtime_halt_enabled;
-    float cfg_threshold = g_mind_runtime_halt_threshold;
-    int found_enabled = 0;
-    int found_threshold = 0;
-    int found_any = 0;
-    int in_sync = 0;
-    EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
+    LlmkMindRuntimeSnapshot snapshot;
+    llmk_mind_collect_runtime_snapshot(&snapshot);
 
     Print(L"\r\n[MindBootstrapV1]\r\n");
     Print(L"  mode=conservative-safe-autofix\r\n");
@@ -773,7 +884,7 @@ static void llmk_mind_bootstrap_v1(void) {
         }
     }
 
-    if (EFI_ERROR(cfg_st) || !found_any) {
+    if (EFI_ERROR(snapshot.cfg_st) || !snapshot.found_any) {
         EFI_STATUS pst = llmk_mind_persist_halt_policy_best_effort();
         if (EFI_ERROR(pst)) {
             Print(L"  blocker=unable to persist runtime halt policy to repl.cfg (%r)\r\n", pst);
@@ -782,7 +893,7 @@ static void llmk_mind_bootstrap_v1(void) {
             Print(L"  action=/mind_halt_policy_save auto-applied\r\n");
             actions++;
         }
-    } else if (!in_sync) {
+    } else if (!snapshot.in_sync) {
         int was_needed = 0;
         int changed_enabled = 0;
         int changed_threshold = 0;
@@ -831,60 +942,39 @@ static void llmk_mind_bootstrap_v1(void) {
         Print(L"  note=attach remains optional; backend not wired yet\r\n");
     }
 
-    cfg_enabled = g_mind_runtime_halt_enabled;
-    cfg_threshold = g_mind_runtime_halt_threshold;
-    found_enabled = 0;
-    found_threshold = 0;
-    found_any = 0;
-    in_sync = 0;
-    cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
+    llmk_mind_collect_runtime_snapshot(&snapshot);
 
     {
-        int core_ready = g_mind_runtime_state.core_active ? 1 : 0;
-        int halt_ready = (!EFI_ERROR(cfg_st) && found_any && in_sync) ? 1 : 0;
-        int sidecar_ready = (!g_mind_runtime_state.sidecar_requested) ||
-                            (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && g_mind_halting_view.ready);
-        int ready = (core_ready && halt_ready && sidecar_ready) ? 1 : 0;
-        Print(L"  actions=%u blockers=%u ready=%d\r\n", (UINT32)actions, (UINT32)blockers, ready);
-        if (ready) Print(L"  next=runtime-ready\r\n\r\n");
-        else Print(L"  next=/mind_doctor\r\n\r\n");
+        const CHAR16 *next_action = L"/mind_doctor";
+        const CHAR16 *next_reason = L"state is not fully ready and needs a broader corrective snapshot";
+        llmk_mind_select_next_action_from_snapshot(&snapshot, &next_action, &next_reason);
+        Print(L"  actions=%u blockers=%u ready=%d\r\n", (UINT32)actions, (UINT32)blockers, snapshot.ready);
+        Print(L"  next_action=%s\r\n", next_action);
+        Print(L"  next_reason=%s\r\n\r\n", next_reason);
     }
 }
 
 static void llmk_mind_print_path_v1(void) {
-    int cfg_enabled = g_mind_runtime_halt_enabled;
-    float cfg_threshold = g_mind_runtime_halt_threshold;
-    int found_enabled = 0;
-    int found_threshold = 0;
-    int found_any = 0;
-    int in_sync = 0;
-    EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
-
-    int core_ready = g_mind_runtime_state.core_active ? 1 : 0;
-    int halt_ready = (!EFI_ERROR(cfg_st) && found_any && in_sync) ? 1 : 0;
-    int sidecar_ready = (!g_mind_runtime_state.sidecar_requested) ||
-                        (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && g_mind_halting_view.ready);
-    int ready = (core_ready && halt_ready && sidecar_ready) ? 1 : 0;
-    int bootstrap_can_help = 0;
+    const CHAR16 *next_action = L"/mind_doctor";
+    const CHAR16 *next_reason = L"state is not fully ready and needs a broader corrective snapshot";
+    LlmkMindRuntimeSnapshot snapshot;
     int step = 1;
-
-    if ((g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && g_mind_runtime_state.core_path[0]) ||
-        (EFI_ERROR(cfg_st) || !found_any || !in_sync) ||
-        (g_mind_runtime_state.sidecar_requested && !g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_path[0])) {
-        bootstrap_can_help = 1;
-    }
+    llmk_mind_collect_runtime_snapshot(&snapshot);
+    llmk_mind_select_next_action_from_snapshot(&snapshot, &next_action, &next_reason);
 
     Print(L"\r\n[MindPathV1]\r\n");
     Print(L"  goal=shortest-next-v1-sequence\r\n");
-    Print(L"  ready=%d\r\n", ready);
+    Print(L"  ready=%d\r\n", snapshot.ready);
 
-    if (ready) {
+    if (snapshot.ready) {
         Print(L"  status=runtime-ready\r\n");
-        Print(L"  next=/mind_audit\r\n\r\n");
+        Print(L"  next=/mind_audit\r\n");
+        Print(L"  next_action=%s\r\n", next_action);
+        Print(L"  next_reason=%s\r\n\r\n", next_reason);
         return;
     }
 
-    if (bootstrap_can_help) {
+    if (snapshot.bootstrap_can_help) {
         Print(L"  step%u=/mind_bootstrap_v1  ; shortest safe shortcut from current state\r\n", step++);
     }
 
@@ -894,10 +984,10 @@ static void llmk_mind_print_path_v1(void) {
         Print(L"  step%u=/core_load <file.mamb>  ; requested core has no reusable stored path\r\n", step++);
     }
 
-    if (!bootstrap_can_help) {
-        if (EFI_ERROR(cfg_st) || !found_any) {
+    if (!snapshot.bootstrap_can_help) {
+        if (EFI_ERROR(snapshot.cfg_st) || !snapshot.found_any) {
             Print(L"  step%u=/mind_halt_policy_save  ; persist current runtime halt policy first\r\n", step++);
-        } else if (!in_sync) {
+        } else if (!snapshot.in_sync) {
             Print(L"  step%u=/mind_halt_policy_sync  ; align runtime halt policy with repl.cfg\r\n", step++);
         }
     }
@@ -914,83 +1004,79 @@ static void llmk_mind_print_path_v1(void) {
         Print(L"  optional=/oo_sidecar <file.ooss>  ; only if enriched V1 halting is desired\r\n");
     }
 
-    Print(L"  step%u=/mind_ready  ; confirm the final V1 readiness verdict\r\n\r\n", step);
+    Print(L"  step%u=/mind_ready  ; confirm the final V1 readiness verdict\r\n", step);
+    Print(L"  next_action=%s\r\n", next_action);
+    Print(L"  next_reason=%s\r\n\r\n", next_reason);
 }
 
 static void llmk_mind_print_next(void) {
-    int cfg_enabled = g_mind_runtime_halt_enabled;
-    float cfg_threshold = g_mind_runtime_halt_threshold;
-    int found_enabled = 0;
-    int found_threshold = 0;
-    int found_any = 0;
-    int in_sync = 0;
-    EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
-
-    int core_ready = g_mind_runtime_state.core_active ? 1 : 0;
-    int halt_ready = (!EFI_ERROR(cfg_st) && found_any && in_sync) ? 1 : 0;
-    int sidecar_ready = (!g_mind_runtime_state.sidecar_requested) ||
-                        (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && g_mind_halting_view.ready);
-    int ready = (core_ready && halt_ready && sidecar_ready) ? 1 : 0;
-    int bootstrap_can_help = 0;
-
-    if ((g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && g_mind_runtime_state.core_path[0]) ||
-        (EFI_ERROR(cfg_st) || !found_any || !in_sync) ||
-        (g_mind_runtime_state.sidecar_requested && !g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_path[0])) {
-        bootstrap_can_help = 1;
-    }
+    const CHAR16 *next_action = L"/mind_doctor";
+    const CHAR16 *next_reason = L"state is not fully ready and needs a broader corrective snapshot";
+    int ready = 0;
+    llmk_mind_select_next_action(&next_action, &next_reason, &ready, NULL, NULL, NULL);
 
     Print(L"\r\n[MindNext]\r\n");
     Print(L"  goal=single-best-next-action\r\n");
     Print(L"  ready=%d\r\n", ready);
+    Print(L"  action=%s\r\n", next_action);
+    Print(L"  reason=%s\r\n\r\n", next_reason);
+}
 
-    if (ready) {
-        Print(L"  action=/mind_audit\r\n");
-        Print(L"  reason=runtime already ready; audit is the next useful snapshot\r\n\r\n");
-        return;
+static void llmk_mind_print_snapshot(void) {
+    const CHAR16 *next_action = L"/mind_doctor";
+    const CHAR16 *next_reason = L"state is not fully ready and needs a broader corrective snapshot";
+    LlmkMindRuntimeSnapshot snapshot;
+    llmk_mind_collect_runtime_snapshot(&snapshot);
+    llmk_mind_select_next_action_from_snapshot(&snapshot, &next_action, &next_reason);
+
+    Print(L"\r\n[MindSnapshot]\r\n");
+    Print(L"  format=kv-v1\r\n");
+    Print(L"  schema=llmk-mind-snapshot-v1\r\n");
+    Print(L"  field_order=fixed\r\n");
+    Print(L"  identity=oo-somamind-core-primary\r\n");
+    Print(L"  scenario=v1-runtime\r\n");
+    Print(L"  ready=%d\r\n", snapshot.ready);
+    Print(L"  core_ready=%d\r\n", snapshot.core_ready);
+    Print(L"  halt_ready=%d\r\n", snapshot.halt_ready);
+    Print(L"  sidecar_ready=%d\r\n", snapshot.sidecar_ready);
+    Print(L"  core_requested=%d\r\n", g_mind_runtime_state.core_requested);
+    Print(L"  core_active=%d\r\n", g_mind_runtime_state.core_active);
+    Print(L"  sidecar_requested=%d\r\n", g_mind_runtime_state.sidecar_requested);
+    Print(L"  sidecar_active=%d\r\n", g_mind_runtime_state.sidecar_active);
+    Print(L"  sidecar_header_valid=%d\r\n", g_mind_runtime_state.sidecar_header_valid);
+    Print(L"  halting_hook_ready=%d\r\n", g_mind_halting_view.ready ? 1 : 0);
+    Print(L"  attach_requested=%d\r\n", g_mind_runtime_state.attach_requested);
+    Print(L"  attach_active=%d\r\n", g_mind_runtime_state.attach_active);
+    Print(L"  halt_policy_enabled=%d\r\n", g_mind_runtime_halt_enabled);
+    Print(L"  halt_policy_threshold=%d.%03d\r\n",
+          (int)g_mind_runtime_halt_threshold,
+          (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+    Print(L"  cfg_found_any=%d\r\n", snapshot.found_any);
+    Print(L"  cfg_in_sync=%d\r\n", snapshot.in_sync);
+    if (EFI_ERROR(snapshot.cfg_st)) Print(L"  cfg_status=error\r\n");
+    else if (!snapshot.found_any) Print(L"  cfg_status=not-found\r\n");
+    else Print(L"  cfg_status=available\r\n");
+    if (!EFI_ERROR(snapshot.cfg_st) && snapshot.found_any) {
+        Print(L"  cfg_enabled=%d\r\n", snapshot.cfg_enabled);
+        Print(L"  cfg_threshold=%d.%03d\r\n",
+              (int)snapshot.cfg_threshold,
+              (int)((snapshot.cfg_threshold >= 0.0f ? snapshot.cfg_threshold - (int)snapshot.cfg_threshold : ((int)snapshot.cfg_threshold - snapshot.cfg_threshold)) * 1000.0f));
+    } else {
+        Print(L"  cfg_enabled=0\r\n");
+        Print(L"  cfg_threshold=0.000\r\n");
     }
-
-    if (bootstrap_can_help) {
-        Print(L"  action=/mind_bootstrap_v1\r\n");
-        Print(L"  reason=stored/runtime-safe fixes are available right now\r\n\r\n");
-        return;
-    }
-
-    if (!g_mind_runtime_state.core_requested ||
-        (g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && !g_mind_runtime_state.core_path[0])) {
-        Print(L"  action=/core_load <file.mamb>\r\n");
-        Print(L"  reason=core backbone is missing or cannot be reactivated automatically\r\n\r\n");
-        return;
-    }
-
-    if (g_mind_runtime_state.sidecar_requested) {
-        if (!g_mind_runtime_state.sidecar_active && !g_mind_runtime_state.sidecar_path[0]) {
-            Print(L"  action=/oo_sidecar <file.ooss>\r\n");
-            Print(L"  reason=requested sidecar is inactive and no reusable path is stored\r\n\r\n");
-            return;
-        }
-        if (g_mind_runtime_state.sidecar_active && !g_mind_runtime_state.sidecar_header_valid) {
-            Print(L"  action=/oo_sidecar <file.ooss>\r\n");
-            Print(L"  reason=current sidecar header is invalid\r\n\r\n");
-            return;
-        }
-        if (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && !g_mind_halting_view.ready) {
-            Print(L"  action=inspect sidecar layout/export\r\n");
-            Print(L"  reason=HaltingHead view is not ready and requires manual follow-up\r\n\r\n");
-            return;
-        }
-    }
-
-    if (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active) {
-        Print(L"  action=wait for future attach backend\r\n");
-        Print(L"  reason=attach is optional and currently not wired\r\n\r\n");
-        return;
-    }
-
-    Print(L"  action=/mind_doctor\r\n");
-    Print(L"  reason=state is not fully ready and needs a broader corrective snapshot\r\n\r\n");
+    Print(L"  bootstrap_can_help=%d\r\n", snapshot.bootstrap_can_help);
+    Print(L"  next_action=%s\r\n", next_action);
+    Print(L"  next_reason=%s\r\n\r\n", next_reason);
 }
 
 static void llmk_mind_print_status(void) {
+    const CHAR16 *next_action = L"/mind_doctor";
+    const CHAR16 *next_reason = L"state is not fully ready and needs a broader corrective snapshot";
+    LlmkMindRuntimeSnapshot snapshot;
+    llmk_mind_collect_runtime_snapshot(&snapshot);
+    llmk_mind_select_next_action_from_snapshot(&snapshot, &next_action, &next_reason);
+
     Print(L"\r\n[Mind] OO-SomaMind runtime topology\r\n");
     Print(L"  identity: internal native core\r\n");
     Print(L"  v1 execution path: MAMB backbone via /ssm_load\r\n");
@@ -1005,20 +1091,13 @@ static void llmk_mind_print_status(void) {
               (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
     }
     {
-        int cfg_enabled = g_mind_runtime_halt_enabled;
-        float cfg_threshold = g_mind_runtime_halt_threshold;
-        int found_enabled = 0;
-        int found_threshold = 0;
-        int found_any = 0;
-        int in_sync = 0;
-        EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
         Print(L"  halt_policy_cfg: ");
-        if (!EFI_ERROR(cfg_st) && found_any) {
+        if (!EFI_ERROR(snapshot.cfg_st) && snapshot.found_any) {
             Print(L"enabled=%d threshold=%d.%03d sync=",
-                  cfg_enabled,
-                  (int)cfg_threshold,
-                  (int)(((cfg_threshold >= 0.0f ? cfg_threshold - (int)cfg_threshold : ((int)cfg_threshold - cfg_threshold)) * 1000.0f)));
-            if (in_sync) Print(L"in-sync\r\n");
+                  snapshot.cfg_enabled,
+                  (int)snapshot.cfg_threshold,
+                  (int)(((snapshot.cfg_threshold >= 0.0f ? snapshot.cfg_threshold - (int)snapshot.cfg_threshold : ((int)snapshot.cfg_threshold - snapshot.cfg_threshold)) * 1000.0f)));
+            if (snapshot.in_sync) Print(L"in-sync\r\n");
             else Print(L"runtime!=repl.cfg\r\n");
         } else {
             Print(L"not found\r\n");
@@ -1102,6 +1181,12 @@ static void llmk_mind_print_status(void) {
         Print(L"none\r\n");
     }
 
+    Print(L"  ready=%d\r\n", snapshot.ready);
+    Print(L"  readiness.core=%s\r\n", snapshot.core_ready ? L"ready" : L"not-ready");
+    Print(L"  readiness.halt_policy=%s\r\n", snapshot.halt_ready ? L"ready" : L"not-ready");
+    Print(L"  readiness.sidecar=%s\r\n", snapshot.sidecar_ready ? L"ready" : L"not-ready");
+    Print(L"  next_action=%s\r\n", next_action);
+    Print(L"  next_reason=%s\r\n", next_reason);
     Print(L"  note: attach models are optional and must not redefine the OO core.\r\n\r\n");
 }
 
@@ -6761,6 +6846,7 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /mind_audit  Run a global OO-SomaMind runtime audit\r\n");
     Print(L"  /mind_doctor  Propose the next safe corrective sequence for the runtime\r\n");
     Print(L"  /mind_next  Print the single best next runtime action\r\n");
+    Print(L"  /mind_snapshot  Print a compact stable key=value runtime snapshot\r\n");
     Print(L"  /mind_ready  Report whether the V1 runtime is ready\r\n");
     Print(L"  /mind_bootstrap_v1  Auto-apply the obvious safe V1 bootstrap steps\r\n");
     Print(L"  /mind_path_v1  Print the minimal recommended V1 startup path\r\n");
@@ -6816,6 +6902,10 @@ static int llmk_repl_cfg_read_ctx_seq_best_effort(int *out_ctx, int *out_seq);
 static void llmk_oo_consult_process_suggestion(UINT64 ram_mb, UINT32 mode, UINT64 boots,
                                                int ctx, int seq,
                                                const char *llm_suggestion);
+
+/* Forward declarations for variables defined later in this TU */
+extern int g_boot_verbose;
+static unsigned long long tsc_per_sec;
 
 static void llmk_repl_no_model_loop(void) {
     // Minimal repl.cfg parsing for autorun in no-model mode.
@@ -7584,6 +7674,10 @@ static void llmk_repl_no_model_loop(void) {
             llmk_mind_print_next();
             continue;
         }
+        if (my_strncmp(prompt, "/mind_snapshot", 14) == 0) {
+            llmk_mind_print_snapshot();
+            continue;
+        }
         if (my_strncmp(prompt, "/mind_ready", 11) == 0) {
             llmk_mind_print_ready();
             continue;
@@ -7715,7 +7809,7 @@ static void llmk_repl_no_model_loop(void) {
         if (my_strncmp(prompt, "/ssm_info", 9) == 0) {
             Print(L"\r\n[SSM] Mamba bare-metal engine v0.1\r\n");
             Print(L"  Commands: /ssm_load <file>, /ssm_infer <text>, /ssm_reset\r\n");
-            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_apply_saved_if_needed, /mind_halt_policy_sync, /mind_halt_policy_sync_force, /mind_halt_policy_audit, /mind_audit, /mind_doctor, /mind_next, /mind_ready, /mind_bootstrap_v1, /mind_path_v1, /oo_sidecar <file>, /oo_sidecar_audit, /oo_sidecar_unload, /attach_load <file>, /attach_audit, /attach_unload, /mind_halt_policy_reset, /mind_halt_policy_diff, /mind_status\r\n");
+            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_apply_saved_if_needed, /mind_halt_policy_sync, /mind_halt_policy_sync_force, /mind_halt_policy_audit, /mind_audit, /mind_doctor, /mind_next, /mind_snapshot, /mind_ready, /mind_bootstrap_v1, /mind_path_v1, /oo_sidecar <file>, /oo_sidecar_audit, /oo_sidecar_unload, /attach_load <file>, /attach_audit, /attach_unload, /mind_halt_policy_reset, /mind_halt_policy_diff, /mind_status\r\n");
             Print(L"  Weight format: MAMB binary\r\n");
             Print(L"  Exporters: runtime export_mamba_baremetal.py | oo-model export_mamb_binary.py\r\n");
             Print(L"  Architecture: Mamba SSM, freestanding, O(1) memory per token\r\n");
@@ -7906,7 +8000,7 @@ static void llmk_repl_no_model_loop(void) {
                     g_v3_h_state, g_v3_conv_buf, g_v3_conv_pos,
                     g_v3_halt_h1, g_v3_halt_h2, g_v3_halt_buf,
                     0.80f,   // halt_threshold
-                    0.0f,    // temperature (0=argmax — switch to 0.5 once validated)
+                    0.7f,    // temperature
                     0.90f,   // top_p
                     0xCAFEBABEu,
                     (g_max_new_tokens > 0) ? g_max_new_tokens : 128
@@ -8101,16 +8195,18 @@ static void llmk_repl_no_model_loop(void) {
 
                 Print(L"[OOSI-v3] Prompt tokens: %d — generating (SSM recurrent)...\r\n",
                       prompt_len);
-                // Show first 5 prompt token IDs for debug
-                Print(L"[OOSI-v3] tok_ids:");
-                for (int di = 0; di < prompt_len && di < 5; di++)
-                    Print(L" %d", prompt_tokens[di]);
-                if (prompt_len > 5) Print(L" ...");
-                Print(L"\r\n");
+                if (g_boot_verbose) {
+                    Print(L"[OOSI-v3] tok_ids:");
+                    for (int di = 0; di < prompt_len && di < 5; di++)
+                        Print(L" %d", prompt_tokens[di]);
+                    if (prompt_len > 5) Print(L" ...");
+                    Print(L"\r\n");
+                }
 
                 // Simple blocking generate (tokens decoded inline)
                 int out_ids[256];
                 int n_out = 0;
+                UINT64 gen_start_tsc = __rdtsc();
 
                 oosi_v3_gen_ctx_reset(&g_oosi_v3_ctx);
                 // Feed prompt (all except last — last token fed in generate loop)
@@ -8124,47 +8220,26 @@ static void llmk_repl_no_model_loop(void) {
                 while (n_out < g_oosi_v3_ctx.max_tokens && n_out < 256) {
                     OosiV3HaltResult r = oosi_v3_forward_one(&g_oosi_v3_ctx, last);
 
-                    // ── Diagnostic: show logits range on first 3 generated tokens ──
-                    if (n_out < 3) {
-                        // Show RAW logits (before masking/softmax)
-                        Print(L"\r\n[DBG] tok#%d: id=%d RAW min=%d max=%d",
-                              n_out, r.token,
-                              (int)(g_oosi_v3_ctx.dbg_raw_min * 100.0f),
-                              (int)(g_oosi_v3_ctx.dbg_raw_max * 100.0f));
-                        // Show top-5 tokens by raw logits
-                        {
-                            ssm_f32 *rl = g_oosi_v3_ctx.dbg_raw_logits;
-                            int V = g_oosi_v3_ctx.w->vocab_size;
-                            int top5[5] = {2,2,2,2,2};
-                            // Find top 5 from raw logits saved in ctx
-                            // Use dbg_raw_logits for first 5, but we need full scan
-                            // Actually dbg_raw_logits only has [0..4] — use logits array
-                            // (already modified by masking but tokens 2-50256 are intact)
-                            ssm_f32 *lg = g_oosi_v3_ctx.logits;
-                            for (int ti = 2; ti < V && ti < 50257; ti++) {
-                                for (int k = 0; k < 5; k++) {
-                                    if (lg[ti] > lg[top5[k]]) {
-                                        for (int m = 4; m > k; m--) top5[m] = top5[m-1];
-                                        top5[k] = ti;
-                                        break;
-                                    }
-                                }
-                            }
-                            Print(L" top5:");
-                            for (int k = 0; k < 5; k++) {
-                                char ts[16]; int tl = llmk_oo_infer_decode_token(top5[k], ts, 15);
-                                if (tl > 0) {
-                                    ts[tl] = 0;
-                                    Print(L"[%d:", top5[k]);
-                                    llmk_print_ascii(ts);
-                                    Print(L"]");
-                                } else {
-                                    Print(L"[%d]", top5[k]);
-                                }
-                            }
+                    // Verbose diagnostic (boot_verbose=2)
+                    if (g_boot_verbose >= 2 && n_out < 2) {
+                        Print(L"\r\n[DBG] tok#%d: id=%d RAW_logits[0..4]=",
+                              n_out, r.token);
+                        for (int qi = 0; qi < 5; qi++) {
+                            int iv = (int)(g_oosi_v3_ctx.dbg_raw_logits[qi] * 100.0f);
+                            Print(L"%d ", iv);
                         }
-                        Print(L" temp=%d/1000\r\n",
-                              (int)(g_oosi_v3_ctx.temperature * 1000.0f));
+                        int imin = (int)(g_oosi_v3_ctx.dbg_raw_min * 100.0f);
+                        int imax = (int)(g_oosi_v3_ctx.dbg_raw_max * 100.0f);
+                        Print(L" min=%d max=%d\r\n", imin, imax);
+                        Print(L"[DBG] embed_scale[%d]=", last);
+                        {
+                            ssm_f32 es = g_oosi_v3_ctx.w->embed_scale[last];
+                            int ies = (int)(es * 10000.0f);
+                            Print(L"%d/10000", ies);
+                        }
+                        Print(L" temp=%d/1000 top_p=%d/1000\r\n",
+                              (int)(g_oosi_v3_ctx.temperature * 1000.0f),
+                              (int)(g_oosi_v3_ctx.top_p * 1000.0f));
                         Print(L"[OOSI-v3] ");
                     }
                     out_ids[n_out++] = r.token;
@@ -8184,27 +8259,45 @@ static void llmk_repl_no_model_loop(void) {
                         Print(L"<tok%d>", r.token);
                     }
                     last = r.token;
-                    // HaltingHead disabled for now — generates false positives
-                    // TODO: re-enable once halt_forward is validated
-                    // if (r.halted) {
-                    //     Print(L"\r\n[OOSI-v3] halted (halt_prob=%d/100)\r\n",
-                    //           (int)(r.halt_prob * 100.0f));
-                    //     break;
-                    // }
-                    // MindHaltRuntime also disabled for validation
-                    // {
-                    //     float mind_logit = 0.0f;
-                    //     float mind_prob = 0.0f;
-                    //     if (llmk_mind_runtime_should_halt((float)n_out, &mind_logit, &mind_prob)) {
-                    //         break;
-                    //     }
-                    // }
+                    if (r.halted) {
+                        Print(L"\r\n[OOSI-v3] halted (halt_prob=%.2f)\r\n",
+                              (double)r.halt_prob);
+                        break;
+                    }
+                    {
+                        float mind_logit = 0.0f;
+                        float mind_prob = 0.0f;
+                        if (llmk_mind_runtime_should_halt((float)n_out, &mind_logit, &mind_prob)) {
+                            Print(L"\r\n[MindHaltRuntime] halted at loop_pos=%d.%03d halt_prob=%d.%03d threshold=%d.%03d\r\n",
+                                  n_out,
+                                  0,
+                                  (int)mind_prob,
+                                  (int)((mind_prob >= 0.0f ? mind_prob - (int)mind_prob : ((int)mind_prob - mind_prob)) * 1000.0f),
+                                  (int)g_mind_runtime_halt_threshold,
+                                  (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+                            break;
+                        }
+                    }
                     if (r.token == 0) {
                         Print(L"\r\n[OOSI-v3] EOS token\r\n");
                         break;
                     }
                 }
-                Print(L"\r\n[OOSI-v3] Done: %d tokens generated\r\n\r\n", n_out);
+                {
+                    UINT64 gen_elapsed = __rdtsc() - gen_start_tsc;
+                    UINT64 ms = 0;
+                    if (tsc_per_sec > 0 && gen_elapsed > 0)
+                        ms = (gen_elapsed * 1000) / tsc_per_sec;
+                    if (ms > 0 && n_out > 0) {
+                        UINT64 tok_per_sec_x10 = ((UINT64)n_out * 10000) / ms;
+                        Print(L"\r\n[OOSI-v3] %d tokens in %lu ms (%lu.%lu tok/s)\r\n\r\n",
+                              n_out, (unsigned long)ms,
+                              (unsigned long)(tok_per_sec_x10 / 10),
+                              (unsigned long)(tok_per_sec_x10 % 10));
+                    } else {
+                        Print(L"\r\n[OOSI-v3] Done: %d tokens generated\r\n\r\n", n_out);
+                    }
+                }
                 continue;
             }
 

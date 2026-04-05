@@ -258,9 +258,10 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
         for (int i = 0; i < Di; i++) {
             ssm_f32 dt_i = dt_full[i];
             ssm_f32 y_i  = 0.0f;
+            const ssm_f32 *A_row = &lw->A_log[i * S];
             for (int j = 0; j < S; j++) {
-                ssm_f32 a_log = lw->A_log[i * S + j];
-                ssm_f32 dA = _v3_expf(dt_i * (-_v3_expf(a_log)));
+                ssm_f32 neg_A = -_v3_expf(A_row[j]);  // exp(A_log) cached
+                ssm_f32 dA = _v3_expf(dt_i * neg_A);
                 ssm_f32 dB = dt_i * B_vec[j];
                 ssm_f32 *hij = &hs[i * S + j];
                 *hij = dA * (*hij) + dB * x_conv[i];
