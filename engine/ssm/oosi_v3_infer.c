@@ -33,11 +33,11 @@ static void   _v3_conv1d_step(const ssm_f32 *wt, const ssm_f32 *bias,
 // ── Scratch buffer helper — caller provides one large flat buffer ──────────
 // Layout (all f32 unless noted):
 //   [0 ..D-1]           x_norm        (RMSNorm output)
-//   [D ..D+2Di-1]       x_and_z       (in_proj output: z then x_expand)
+//   [D ..D+2Di-1]       x_and_z       (in_proj output: x_expand then z_gate)
 //   [D+2Di ..D+3Di-1]   x_conv        (after conv1d + SiLU)
 //   [D+3Di ..D+3Di+Dt+2S-1]  xBCdt   (x_proj output)
 //   [D+3Di+Dt+2S ..]    dt_full       (dt_proj output)
-//   Residual add done directly into x_out.
+//   y_ssm reuses x_and_z[0..Di-1] (x_expand consumed after conv1d)
 // Total: D + 3*Di + Dt + 2*S + Di = D + 4*Di + Dt + 2*S
 //   = 2560 + 4*5120 + 160 + 32 = 2560 + 20480 + 192 = 23232 floats = ~91 KB
 
@@ -223,11 +223,11 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
         _v3_rmsnorm(x_cur, lw->norm_weight, x_norm, D, 1e-5f);
 
         // b. in_proj (int8): [2*Di × D] → x_and_z [2*Di]
-        //    Layout: z_gate = x_and_z[0..Di-1], x_expand = x_and_z[Di..2Di-1]
+        //    PyTorch layout: first Di = x (→conv→SSM), second Di = z (gate)
         _v3_matvec_q8(lw->in_proj_q8, lw->in_proj_scale,
                       x_norm, x_and_z, 2*Di, D);
-        const ssm_f32 *z_gate   = x_and_z;
-        const ssm_f32 *x_expand = x_and_z + Di;
+        const ssm_f32 *x_expand = x_and_z;           // first Di = x
+        const ssm_f32 *z_gate   = x_and_z + Di;      // second Di = z (gate)
 
         // c. Depthwise conv1d step
         _v3_conv1d_step(lw->conv_weight, lw->conv_bias,
@@ -252,8 +252,9 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
         }
 
         // g. Selective SSM step (ZOH discretisation)
-        //    y_ssm temporarily stored in x_and_z + Di (reusing z_gate space)
-        ssm_f32 *y_ssm = x_and_z + Di;  // reuse x_expand slot
+        //    y_ssm reuses x_expand slot (first half, no longer needed after conv)
+        //    z_gate (second half) stays intact for gating step (h).
+        ssm_f32 *y_ssm = x_and_z;  // safe: x_expand already consumed by conv1d
         for (int i = 0; i < Di; i++) {
             ssm_f32 dt_i = dt_full[i];
             ssm_f32 y_i  = 0.0f;
@@ -544,11 +545,14 @@ static void _v3_conv1d_step(const ssm_f32 *wt, const ssm_f32 *bias,
     for (int i = 0; i < d_inner; i++) {
         // Write x_in[i] into ring buffer position
         conv_buf[i * d_conv + pos] = x_in[i];
-        // Convolve
+        // Convolve — PyTorch F.conv1d (cross-correlation):
+        //   wt[0] * oldest, wt[d_conv-1] * newest
+        //   idx iterates from newest (pos) to oldest (pos-d_conv+1)
+        //   so flip weight index: wt[d_conv-1-k]
         ssm_f32 acc = bias ? bias[i] : 0.0f;
         for (int k = 0; k < d_conv; k++) {
             int idx = (pos - k + d_conv) % d_conv;
-            acc += wt[i * d_conv + k] * conv_buf[i * d_conv + idx];
+            acc += wt[i * d_conv + (d_conv - 1 - k)] * conv_buf[i * d_conv + idx];
         }
         y[i] = acc;
     }
