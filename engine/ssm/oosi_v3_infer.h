@@ -50,6 +50,11 @@ typedef struct {
     // Generation state
     int max_tokens;
     int tokens_generated;
+
+    // Debug: raw logits before masking/softmax (first 5 + min/max)
+    ssm_f32 dbg_raw_logits[5];
+    ssm_f32 dbg_raw_min;
+    ssm_f32 dbg_raw_max;
 } OosiV3GenCtx;
 
 // ============================================================

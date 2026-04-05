@@ -284,6 +284,20 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
     _v3_matvec_q8(w->lm_head_q8, w->lm_head_scale,
                   x_out, ctx->logits, w->vocab_size, D);
 
+    // Debug: save raw logits before masking/softmax
+    {
+        int V = w->vocab_size;
+        for (int qi = 0; qi < 5 && qi < V; qi++)
+            ctx->dbg_raw_logits[qi] = ctx->logits[qi];
+        ssm_f32 rmin = ctx->logits[2], rmax = ctx->logits[2]; // skip 0,1 (will be masked)
+        for (int qi = 3; qi < V; qi++) {
+            if (ctx->logits[qi] < rmin) rmin = ctx->logits[qi];
+            if (ctx->logits[qi] > rmax) rmax = ctx->logits[qi];
+        }
+        ctx->dbg_raw_min = rmin;
+        ctx->dbg_raw_max = rmax;
+    }
+
     // 5. Mask EOS/BOS (token 0 and 1) to prevent degenerate output
     ctx->logits[0] = -1.0e9f;
     ctx->logits[1] = -1.0e9f;
@@ -355,30 +369,17 @@ static void _v3_rmsnorm(const ssm_f32 *x, const ssm_f32 *w,
                         ssm_f32 *out, int d, ssm_f32 eps) {
     ssm_f32 ss = 0.0f;
     for (int i = 0; i < d; i++) ss += x[i] * x[i];
-    ss = 1.0f / (ss / d + eps);
-    // fast inverse sqrt approximation
-    ss = ss * ss;  // wrong: we need sqrt. Use simple loop.
-    // Recompute properly
-    ss = 0.0f;
-    for (int i = 0; i < d; i++) ss += x[i] * x[i];
-    ssm_f32 rms_inv = 1.0f;
-    {
-        ssm_f32 v = ss / d + eps;
-        // Newton-Raphson: 1/sqrt(v) ≈ fast + correction
-        // Use 3 iterations of Newton method for 1/sqrt
-        ssm_f32 y = 1.0f;
-        if (v > 0.0f) {
-            // crude but correct: y = 1 / sqrtf approximation
-            // Since no libm, use 3-step Newton: y_{n+1} = y_n*(3-v*y_n^2)/2
-            y = 1.0f / v;  // initial: 1/v (overestimate)
-            y = y * (3.0f - v * y * y) * 0.5f;
-            y = y * (3.0f - v * y * y) * 0.5f;
-            y = y * (3.0f - v * y * y) * 0.5f;
-            y = y * (3.0f - v * y * y) * 0.5f;
-        }
-        rms_inv = y;
-    }
-    for (int i = 0; i < d; i++) out[i] = x[i] * rms_inv * w[i];
+    ssm_f32 v = ss / (ssm_f32)d + eps;
+    // Fast inverse sqrt: Quake III magic number + Newton-Raphson refinement
+    uint32_t bits;
+    __builtin_memcpy(&bits, &v, 4);
+    bits = 0x5f3759dfU - (bits >> 1);
+    ssm_f32 y;
+    __builtin_memcpy(&y, &bits, 4);
+    y = y * (1.5f - 0.5f * v * y * y);
+    y = y * (1.5f - 0.5f * v * y * y);
+    y = y * (1.5f - 0.5f * v * y * y);
+    for (int i = 0; i < d; i++) out[i] = x[i] * y * w[i];
 }
 
 static void _v3_matvec_q8(const ssm_q8 *q8, const ssm_f32 *scale,
@@ -471,24 +472,36 @@ static int _v3_argmax(const ssm_f32 *x, int n) {
 
 static int _v3_sample_topp(const ssm_f32 *probs, int n, ssm_f32 top_p,
                            uint32_t *rng) {
-    // Simple top-p: find threshold
-    // For speed in bare-metal, use a lightweight approach:
-    // Draw a uniform [0,1), scan sorted until cumulative >= r*top_p
+    // Find argmax first
+    int best = _v3_argmax(probs, n);
+    if (top_p <= 0.0f) return best;
+
+    // Quick check: if best token has enough mass, return it with high prob
     *rng ^= *rng << 13;
     *rng ^= *rng >> 17;
     *rng ^= *rng << 5;
-    ssm_f32 r = (*rng >> 8) * (1.0f / (1u << 24));  // uniform [0,1)
-    ssm_f32 target = r * top_p;
-    // Scan from argmax downward (greedy approximation — avoids full sort)
+    ssm_f32 r = (*rng >> 8) * (1.0f / (1u << 24));
+
+    // Sort-free top-p: gather top tokens by probability
+    // First pass: find tokens with prob > threshold (prob[best] * 0.01)
+    ssm_f32 thresh = probs[best] * 0.01f;
     ssm_f32 cumul = 0.0f;
-    int best = _v3_argmax(probs, n);
-    // Simple multinomial on top-n (n=256 for speed)
-    // Re-normalise top 256 by prob
-    int top_n = (n < 512) ? n : 512;
-    // Just scan linearly for simplicity (vocabulary is ordered somewhat)
+    ssm_f32 target = r * top_p;
+
+    // Scan in two passes:
+    // Pass 1: high-probability tokens (> thresh)
     for (int i = 0; i < n; i++) {
-        cumul += probs[i];
-        if (cumul >= target) return i;
+        if (probs[i] >= thresh) {
+            cumul += probs[i];
+            if (cumul >= target) return i;
+        }
+    }
+    // Pass 2: remaining tokens (< thresh)
+    for (int i = 0; i < n; i++) {
+        if (probs[i] < thresh) {
+            cumul += probs[i];
+            if (cumul >= target) return i;
+        }
     }
     return best;
 }

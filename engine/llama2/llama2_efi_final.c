@@ -89,6 +89,18 @@ static int g_loaded_model_gguf_valid = 0;
 #define LLMK_MIND_RUNTIME_HALT_THRESHOLD 0.50f
 static int g_mind_runtime_halt_enabled = 1;
 static float g_mind_runtime_halt_threshold = LLMK_MIND_RUNTIME_HALT_THRESHOLD;
+typedef enum {
+    LLMK_MIND_HALT_APPLY_NEVER = 0,
+    LLMK_MIND_HALT_APPLY_SAVED = 1,
+    LLMK_MIND_HALT_APPLY_SAVED_IF_NEEDED = 2,
+    LLMK_MIND_HALT_APPLY_SYNC = 3,
+    LLMK_MIND_HALT_APPLY_SYNC_FORCE = 4,
+} LlmkMindHaltApplyMode;
+
+static int g_mind_runtime_halt_apply_seen = 0;
+static int g_mind_runtime_halt_apply_changed_enabled = 0;
+static int g_mind_runtime_halt_apply_changed_threshold = 0;
+static LlmkMindHaltApplyMode g_mind_runtime_halt_apply_mode = LLMK_MIND_HALT_APPLY_NEVER;
 
 typedef struct {
     char core_path[192];
@@ -348,6 +360,635 @@ static EFI_STATUS llmk_mind_query_halt_policy_cfg_best_effort(
     int *out_enabled, float *out_threshold,
     int *out_found_enabled, int *out_found_threshold);
 static EFI_STATUS llmk_mind_load_halt_policy_best_effort(void);
+static EFI_STATUS llmk_mind_apply_saved_halt_policy_best_effort(int *out_changed_enabled, int *out_changed_threshold);
+static EFI_STATUS llmk_mind_apply_saved_halt_policy_if_needed_best_effort(int *out_was_needed, int *out_changed_enabled, int *out_changed_threshold);
+static EFI_STATUS llmk_read_entire_file_best_effort(const CHAR16 *name, void **out_buf, UINTN *out_len);
+static void llmk_mind_bind_core_backbone_v1(const char *path, int via_core_alias);
+static EFI_STATUS llmk_mind_register_sidecar_best_effort(const char *path, LlmkOoSidecarHeader *out_hdr, UINTN *out_raw_len);
+
+static void llmk_mind_record_halt_apply(LlmkMindHaltApplyMode mode, int changed_enabled, int changed_threshold) {
+    g_mind_runtime_halt_apply_seen = 1;
+    g_mind_runtime_halt_apply_mode = mode;
+    g_mind_runtime_halt_apply_changed_enabled = changed_enabled ? 1 : 0;
+    g_mind_runtime_halt_apply_changed_threshold = changed_threshold ? 1 : 0;
+}
+
+static EFI_STATUS llmk_mind_query_halt_policy_sync_state_best_effort(
+    int *out_enabled,
+    float *out_threshold,
+    int *out_found_enabled,
+    int *out_found_threshold,
+    int *out_found_any,
+    int *out_in_sync
+) {
+    int cfg_enabled = g_mind_runtime_halt_enabled;
+    float cfg_threshold = g_mind_runtime_halt_threshold;
+    int found_enabled = 0;
+    int found_threshold = 0;
+    EFI_STATUS st = llmk_mind_query_halt_policy_cfg_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold);
+
+    if (out_found_enabled) *out_found_enabled = found_enabled;
+    if (out_found_threshold) *out_found_threshold = found_threshold;
+
+    if (EFI_ERROR(st) || (!found_enabled && !found_threshold)) {
+        if (out_found_any) *out_found_any = 0;
+        if (out_in_sync) *out_in_sync = 0;
+        return st;
+    }
+
+    {
+        int eff_enabled = found_enabled ? cfg_enabled : g_mind_runtime_halt_enabled;
+        float eff_threshold = found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold;
+        float diff = eff_threshold - g_mind_runtime_halt_threshold;
+        if (diff < 0.0f) diff = -diff;
+        if (out_enabled) *out_enabled = eff_enabled;
+        if (out_threshold) *out_threshold = eff_threshold;
+        if (out_found_any) *out_found_any = 1;
+        if (out_in_sync) *out_in_sync = (eff_enabled == g_mind_runtime_halt_enabled && diff < 0.0005f) ? 1 : 0;
+    }
+    return EFI_SUCCESS;
+}
+
+static void llmk_mind_print_halt_apply_mode(LlmkMindHaltApplyMode mode) {
+    switch (mode) {
+        case LLMK_MIND_HALT_APPLY_SAVED: Print(L"apply_saved"); break;
+        case LLMK_MIND_HALT_APPLY_SAVED_IF_NEEDED: Print(L"apply_saved_if_needed"); break;
+        case LLMK_MIND_HALT_APPLY_SYNC: Print(L"sync"); break;
+        case LLMK_MIND_HALT_APPLY_SYNC_FORCE: Print(L"sync_force"); break;
+        default: Print(L"never"); break;
+    }
+}
+
+static void llmk_mind_print_halt_apply_effect(void) {
+    if (g_mind_runtime_halt_apply_changed_enabled || g_mind_runtime_halt_apply_changed_threshold) Print(L"runtime-updated");
+    else if (g_mind_runtime_halt_apply_mode == LLMK_MIND_HALT_APPLY_SYNC_FORCE) Print(L"forced-reload-no-delta");
+    else Print(L"no-op-already-in-sync");
+}
+
+static void llmk_mind_print_apply_command_result(LlmkMindHaltApplyMode mode, int was_needed, int changed_enabled, int changed_threshold) {
+    llmk_mind_record_halt_apply(mode, changed_enabled, changed_threshold);
+
+    if (mode == LLMK_MIND_HALT_APPLY_SAVED) {
+        Print(L"\r\n[MindHaltPolicy] saved policy applied enabled=%d threshold=%d.%03d changed.enabled=%d changed.threshold=%d sync=in-sync\r\n\r\n",
+              g_mind_runtime_halt_enabled,
+              (int)g_mind_runtime_halt_threshold,
+              (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f),
+              changed_enabled,
+              changed_threshold);
+        return;
+    }
+
+    if (mode == LLMK_MIND_HALT_APPLY_SAVED_IF_NEEDED) {
+        if (!was_needed) {
+            Print(L"\r\n[MindHaltPolicy] saved policy already matched runtime; no apply needed enabled=%d threshold=%d.%03d sync=in-sync\r\n\r\n",
+                  g_mind_runtime_halt_enabled,
+                  (int)g_mind_runtime_halt_threshold,
+                  (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+        } else {
+            Print(L"\r\n[MindHaltPolicy] saved policy conditionally applied enabled=%d threshold=%d.%03d changed.enabled=%d changed.threshold=%d sync=in-sync\r\n\r\n",
+                  g_mind_runtime_halt_enabled,
+                  (int)g_mind_runtime_halt_threshold,
+                  (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f),
+                  changed_enabled,
+                  changed_threshold);
+        }
+        return;
+    }
+
+    if (mode == LLMK_MIND_HALT_APPLY_SYNC) {
+        if (!was_needed) {
+            Print(L"\r\n[MindHaltPolicy] sync skipped; runtime already matched repl.cfg enabled=%d threshold=%d.%03d sync=in-sync\r\n\r\n",
+                  g_mind_runtime_halt_enabled,
+                  (int)g_mind_runtime_halt_threshold,
+                  (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+        } else {
+            Print(L"\r\n[MindHaltPolicy] sync applied from repl.cfg enabled=%d threshold=%d.%03d changed.enabled=%d changed.threshold=%d sync=in-sync\r\n\r\n",
+                  g_mind_runtime_halt_enabled,
+                  (int)g_mind_runtime_halt_threshold,
+                  (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f),
+                  changed_enabled,
+                  changed_threshold);
+        }
+        return;
+    }
+
+    if (mode == LLMK_MIND_HALT_APPLY_SYNC_FORCE) {
+        Print(L"\r\n[MindHaltPolicy] forced sync reloaded repl.cfg enabled=%d threshold=%d.%03d changed.enabled=%d changed.threshold=%d sync=in-sync\r\n\r\n",
+              g_mind_runtime_halt_enabled,
+              (int)g_mind_runtime_halt_threshold,
+              (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f),
+              changed_enabled,
+              changed_threshold);
+    }
+}
+
+static void llmk_mind_print_halt_policy_audit(void) {
+    int persisted_enabled = g_mind_runtime_halt_enabled;
+    float persisted_threshold = g_mind_runtime_halt_threshold;
+    int found_enabled = 0;
+    int found_threshold = 0;
+    int found_any = 0;
+    int in_sync = 0;
+    EFI_STATUS st = llmk_mind_query_halt_policy_sync_state_best_effort(
+        &persisted_enabled,
+        &persisted_threshold,
+        &found_enabled,
+        &found_threshold,
+        &found_any,
+        &in_sync);
+
+    Print(L"\r\n[MindHaltPolicyAudit]\r\n");
+    Print(L"  runtime.enabled=%d runtime.threshold=%d.%03d\r\n",
+          g_mind_runtime_halt_enabled,
+          (int)g_mind_runtime_halt_threshold,
+          (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
+
+    if (EFI_ERROR(st) || !found_any) {
+        Print(L"  persisted=(not found in repl.cfg)\r\n");
+        Print(L"  sync=unknown\r\n");
+        Print(L"  suggested_action=/mind_halt_policy_save\r\n");
+    } else {
+        Print(L"  persisted.enabled=%d persisted.threshold=%d.%03d\r\n",
+              persisted_enabled,
+              (int)persisted_threshold,
+              (int)((persisted_threshold >= 0.0f ? persisted_threshold - (int)persisted_threshold : ((int)persisted_threshold - persisted_threshold)) * 1000.0f));
+        Print(L"  sync=");
+        if (in_sync) Print(L"in-sync\r\n");
+        else Print(L"runtime!=repl.cfg\r\n");
+        Print(L"  suggested_action=");
+        if (in_sync) Print(L"already-synchronized\r\n");
+        else Print(L"/mind_halt_policy_sync\r\n");
+    }
+
+    Print(L"  last_apply=");
+    if (!g_mind_runtime_halt_apply_seen) {
+        Print(L"never\r\n\r\n");
+        return;
+    }
+    llmk_mind_print_halt_apply_mode(g_mind_runtime_halt_apply_mode);
+    Print(L" effect=");
+    llmk_mind_print_halt_apply_effect();
+    Print(L" changed.enabled=%d changed.threshold=%d\r\n\r\n",
+          g_mind_runtime_halt_apply_changed_enabled,
+          g_mind_runtime_halt_apply_changed_threshold);
+}
+
+static void llmk_mind_print_sidecar_audit(void) {
+    Print(L"\r\n[MindSidecarAudit]\r\n");
+    Print(L"  requested=%d active=%d\r\n",
+          g_mind_runtime_state.sidecar_requested,
+          g_mind_runtime_state.sidecar_active);
+
+    if (!g_mind_runtime_state.sidecar_requested) {
+        Print(L"  sidecar=none\r\n");
+        Print(L"  suggested_action=/oo_sidecar <file.ooss>\r\n\r\n");
+        return;
+    }
+
+    Print(L"  kind="); llmk_print_ascii(g_mind_runtime_state.sidecar_kind[0] ? g_mind_runtime_state.sidecar_kind : "ooss-sidecar"); Print(L"\r\n");
+    Print(L"  path="); llmk_print_ascii(g_mind_runtime_state.sidecar_path); Print(L"\r\n");
+    Print(L"  bytes=%lu\r\n", (UINT64)g_mind_sidecar_blob_len);
+    Print(L"  header_valid=%d\r\n", g_mind_runtime_state.sidecar_header_valid);
+    if (g_mind_runtime_state.sidecar_last_validation[0]) {
+        Print(L"  validation="); llmk_print_ascii(g_mind_runtime_state.sidecar_last_validation); Print(L"\r\n");
+    }
+    if (g_mind_runtime_state.sidecar_header_valid) {
+        Print(L"  header.version=%u\r\n", g_mind_runtime_state.sidecar_version);
+        Print(L"  header.d_model=%u header.n_layer=%u\r\n",
+              g_mind_runtime_state.sidecar_d_model,
+              g_mind_runtime_state.sidecar_n_layer);
+        Print(L"  header.d_state=%u header.d_conv=%u expand=%u\r\n",
+              g_mind_runtime_state.sidecar_d_state,
+              g_mind_runtime_state.sidecar_d_conv,
+              g_mind_runtime_state.sidecar_expand);
+        Print(L"  header.vocab=%u halt_in=%u\r\n",
+              g_mind_runtime_state.sidecar_vocab_size,
+              g_mind_runtime_state.sidecar_halting_d_input);
+    }
+    Print(L"  halting_hook=");
+    if (g_mind_halting_view.ready) {
+        Print(L"ready in=%u h0=%u h1=%u out=%u\r\n",
+              g_mind_halting_view.d_input,
+              g_mind_halting_view.hidden0,
+              g_mind_halting_view.hidden1,
+              g_mind_halting_view.d_output);
+    } else {
+        Print(L"not-ready\r\n");
+    }
+    Print(L"  core_link=");
+    if (g_mind_runtime_state.core_active) Print(L"core-active\r\n");
+    else if (g_mind_runtime_state.core_requested) Print(L"core-requested-not-active\r\n");
+    else Print(L"no-core-bound\r\n");
+    Print(L"  suggested_action=");
+    if (!g_mind_runtime_state.sidecar_header_valid) Print(L"replace-or-reload-sidecar\r\n");
+    else if (!g_mind_halting_view.ready) Print(L"inspect-sidecar-layout\r\n");
+    else if (!g_mind_runtime_state.core_active) Print(L"/core_load <file.mamb>\r\n");
+    else Print(L"sidecar-ready-for-v1-halting\r\n");
+    Print(L"\r\n");
+}
+
+static void llmk_mind_print_attach_audit(void) {
+    Print(L"\r\n[MindAttachAudit]\r\n");
+    Print(L"  requested=%d active=%d\r\n",
+          g_mind_runtime_state.attach_requested,
+          g_mind_runtime_state.attach_active);
+
+    if (!g_mind_runtime_state.attach_requested) {
+        Print(L"  attach=none\r\n");
+        Print(L"  suggested_action=/attach_load <file>\r\n");
+        Print(L"  rule=attach-optional-core-primary\r\n\r\n");
+        return;
+    }
+
+    Print(L"  kind="); llmk_print_ascii(g_mind_runtime_state.attach_kind[0] ? g_mind_runtime_state.attach_kind : "attach-model"); Print(L"\r\n");
+    Print(L"  path="); llmk_print_ascii(g_mind_runtime_state.attach_path); Print(L"\r\n");
+    Print(L"  backend=");
+    if (g_mind_runtime_state.attach_active) Print(L"active-attach-backend\r\n");
+    else Print(L"registered-only-backend-not-wired\r\n");
+    Print(L"  core_link=");
+    if (g_mind_runtime_state.core_active) Print(L"core-active-attach-secondary\r\n");
+    else if (g_mind_runtime_state.core_requested) Print(L"core-requested-not-active\r\n");
+    else Print(L"no-core-bound-attach-alone\r\n");
+    Print(L"  suggested_action=");
+    if (!g_mind_runtime_state.core_active) Print(L"/core_load <file.mamb>\r\n");
+    else if (!g_mind_runtime_state.attach_active) Print(L"await-future-attach-backend\r\n");
+    else Print(L"attach-ready\r\n");
+    Print(L"  rule=attach-must-not-redefine-oo-core\r\n\r\n");
+}
+
+static void llmk_mind_print_global_audit(void) {
+    Print(L"\r\n[MindAudit]\r\n");
+    Print(L"  scope=topology+halt_policy+sidecar+attach\r\n");
+    Print(L"  identity=oo-somamind-core-primary\r\n");
+    Print(L"  audit_sections=4\r\n");
+    llmk_mind_print_halt_policy_audit();
+    llmk_mind_print_sidecar_audit();
+    llmk_mind_print_attach_audit();
+}
+
+static void llmk_mind_print_doctor(void) {
+    int cfg_enabled = g_mind_runtime_halt_enabled;
+    float cfg_threshold = g_mind_runtime_halt_threshold;
+    int found_enabled = 0;
+    int found_threshold = 0;
+    int found_any = 0;
+    int in_sync = 0;
+    EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
+
+    Print(L"\r\n[MindDoctor]\r\n");
+    Print(L"  goal=produce-next-safe-runtime-fixes\r\n");
+    Print(L"  identity=oo-core-first\r\n");
+    Print(L"  lanes=auto-fixable,manual-follow-up\r\n");
+
+    int auto_step = 1;
+    int manual_step = 1;
+    int auto_count = 0;
+    int manual_count = 0;
+    int bootstrap_can_help = 0;
+
+    if ((g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && g_mind_runtime_state.core_path[0]) ||
+        (EFI_ERROR(cfg_st) || !found_any || !in_sync) ||
+        (g_mind_runtime_state.sidecar_requested && !g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_path[0])) {
+        bootstrap_can_help = 1;
+    }
+
+    Print(L"  [auto-fixable]\r\n");
+    if (bootstrap_can_help) {
+        Print(L"    step%u=/mind_bootstrap_v1  ; apply the shortest safe batch of stored/runtime fixes\r\n", auto_step++);
+        auto_count++;
+    }
+    if (!g_mind_runtime_state.core_requested) {
+        Print(L"    step%u=/core_load <file.mamb>  ; bind the internal OO-SomaMind core backbone first\r\n", auto_step++);
+        auto_count++;
+    } else if (!g_mind_runtime_state.core_active && !g_mind_runtime_state.core_path[0]) {
+        Print(L"    step%u=/core_load <file.mamb>  ; requested core is not active and no reusable path is stored\r\n", auto_step++);
+        auto_count++;
+    }
+
+    if (!bootstrap_can_help) {
+        if (EFI_ERROR(cfg_st) || !found_any) {
+            Print(L"    step%u=/mind_halt_policy_save  ; persist runtime halt policy into repl.cfg\r\n", auto_step++);
+            auto_count++;
+        } else if (!in_sync) {
+            Print(L"    step%u=/mind_halt_policy_sync  ; align runtime halt policy with repl.cfg\r\n", auto_step++);
+            auto_count++;
+        }
+    }
+
+    if (!g_mind_runtime_state.sidecar_requested) {
+        Print(L"    optional=/oo_sidecar <file.ooss>  ; only if enriched semantics are desired\r\n");
+    } else if (!g_mind_runtime_state.sidecar_active && !g_mind_runtime_state.sidecar_path[0]) {
+        Print(L"    step%u=/oo_sidecar <file.ooss>  ; requested sidecar is inactive and no reusable path is stored\r\n", auto_step++);
+        auto_count++;
+    } else if (g_mind_runtime_state.sidecar_active && !g_mind_runtime_state.sidecar_header_valid) {
+        Print(L"    step%u=/oo_sidecar <file.ooss>  ; current sidecar header is invalid, reload a valid OOSS file\r\n", auto_step++);
+        auto_count++;
+    }
+
+    Print(L"  [manual-follow-up]\r\n");
+    if (g_mind_runtime_state.sidecar_requested && g_mind_runtime_state.sidecar_active &&
+        g_mind_runtime_state.sidecar_header_valid && !g_mind_halting_view.ready) {
+        Print(L"    step%u=inspect sidecar layout/export  ; HaltingHead view is not ready yet\r\n", manual_step++);
+        manual_count++;
+    }
+
+    if (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active) {
+        Print(L"    step%u=wait for future attach backend  ; attach is registered but backend is not wired yet\r\n", manual_step++);
+        manual_count++;
+    }
+
+    if (auto_count == 0 && manual_count == 0) {
+        Print(L"  status=healthy-v1-runtime\r\n");
+        Print(L"  suggestion=use /mind_audit for a full snapshot\r\n\r\n");
+        return;
+    }
+
+    Print(L"  summary=auto:%u manual:%u\r\n", (UINT32)auto_count, (UINT32)manual_count);
+    if (auto_count > 0 && manual_count == 0) Print(L"  next=/mind_bootstrap_v1\r\n\r\n");
+    else if (auto_count > 0) Print(L"  next=/mind_bootstrap_v1 then review manual-follow-up\r\n\r\n");
+    else Print(L"  next=manual-follow-up required\r\n\r\n");
+}
+
+static void llmk_mind_print_ready(void) {
+    int cfg_enabled = g_mind_runtime_halt_enabled;
+    float cfg_threshold = g_mind_runtime_halt_threshold;
+    int found_enabled = 0;
+    int found_threshold = 0;
+    int found_any = 0;
+    int in_sync = 0;
+    EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
+
+    int core_ready = g_mind_runtime_state.core_active ? 1 : 0;
+    int halt_ready = (!EFI_ERROR(cfg_st) && found_any && in_sync) ? 1 : 0;
+    int sidecar_ready = (!g_mind_runtime_state.sidecar_requested) ||
+                        (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && g_mind_halting_view.ready);
+    int ready = (core_ready && halt_ready && sidecar_ready) ? 1 : 0;
+
+    Print(L"\r\n[MindReady]\r\n");
+    Print(L"  ready=%d\r\n", ready);
+    Print(L"  core=%s\r\n", core_ready ? L"ready" : L"not-ready");
+    Print(L"  halt_policy=%s\r\n", halt_ready ? L"ready" : L"not-ready");
+    Print(L"  sidecar=%s\r\n", sidecar_ready ? L"ready" : L"not-ready");
+    Print(L"  attach=optional\r\n");
+    Print(L"  scenario=v1-runtime\r\n");
+    if (ready) {
+        Print(L"  next=runtime-ready\r\n\r\n");
+    } else {
+        Print(L"  next=/mind_doctor\r\n\r\n");
+    }
+}
+
+static void llmk_mind_bootstrap_v1(void) {
+    int actions = 0;
+    int blockers = 0;
+
+    int cfg_enabled = g_mind_runtime_halt_enabled;
+    float cfg_threshold = g_mind_runtime_halt_threshold;
+    int found_enabled = 0;
+    int found_threshold = 0;
+    int found_any = 0;
+    int in_sync = 0;
+    EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
+
+    Print(L"\r\n[MindBootstrapV1]\r\n");
+    Print(L"  mode=conservative-safe-autofix\r\n");
+    Print(L"  identity=oo-core-first\r\n");
+
+    if (!g_mind_runtime_state.core_requested) {
+        Print(L"  blocker=/core_load <file.mamb> required before V1 runtime can be ready\r\n");
+        blockers++;
+    } else if (!g_mind_runtime_state.core_active) {
+        if (g_mind_runtime_state.core_path[0]) {
+            llmk_mind_bind_core_backbone_v1(g_mind_runtime_state.core_path, 1);
+            if (g_mind_runtime_state.core_active) {
+                Print(L"  action=/core_load <stored.mamb> auto-applied from saved request\r\n");
+                actions++;
+            } else {
+                Print(L"  blocker=core requested but activation from stored path did not stick\r\n");
+                blockers++;
+            }
+        } else {
+            Print(L"  blocker=core requested but no stored path is available; re-run /core_load <file.mamb>\r\n");
+            blockers++;
+        }
+    }
+
+    if (EFI_ERROR(cfg_st) || !found_any) {
+        EFI_STATUS pst = llmk_mind_persist_halt_policy_best_effort();
+        if (EFI_ERROR(pst)) {
+            Print(L"  blocker=unable to persist runtime halt policy to repl.cfg (%r)\r\n", pst);
+            blockers++;
+        } else {
+            Print(L"  action=/mind_halt_policy_save auto-applied\r\n");
+            actions++;
+        }
+    } else if (!in_sync) {
+        int was_needed = 0;
+        int changed_enabled = 0;
+        int changed_threshold = 0;
+        EFI_STATUS sst = llmk_mind_apply_saved_halt_policy_if_needed_best_effort(&was_needed, &changed_enabled, &changed_threshold);
+        if (EFI_ERROR(sst)) {
+            Print(L"  blocker=unable to sync halt policy from repl.cfg (%r)\r\n", sst);
+            blockers++;
+        } else if (was_needed) {
+            llmk_mind_record_halt_apply(LLMK_MIND_HALT_APPLY_SYNC, changed_enabled, changed_threshold);
+            Print(L"  action=/mind_halt_policy_sync auto-applied\r\n");
+            actions++;
+        }
+    }
+
+    if (g_mind_runtime_state.sidecar_requested &&
+        (!g_mind_runtime_state.sidecar_active || !g_mind_runtime_state.sidecar_header_valid || !g_mind_halting_view.ready)) {
+        if (g_mind_runtime_state.sidecar_path[0]) {
+            EFI_STATUS sct = llmk_mind_register_sidecar_best_effort(g_mind_runtime_state.sidecar_path, NULL, NULL);
+            if (EFI_ERROR(sct)) {
+                Print(L"  blocker=unable to re-activate requested sidecar from stored path (%r)\r\n", sct);
+                blockers++;
+            } else {
+                Print(L"  action=/oo_sidecar <stored.ooss> auto-applied from saved request\r\n");
+                actions++;
+            }
+        } else {
+            Print(L"  blocker=sidecar requested but no stored path is available; re-run /oo_sidecar <file.ooss>\r\n");
+            blockers++;
+        }
+    }
+
+    if (g_mind_runtime_state.sidecar_requested) {
+        if (!g_mind_runtime_state.sidecar_active) {
+            Print(L"  blocker=sidecar requested but not active yet; reload with /oo_sidecar <file.ooss>\r\n");
+            blockers++;
+        } else if (!g_mind_runtime_state.sidecar_header_valid) {
+            Print(L"  blocker=sidecar registered but header invalid; reload with /oo_sidecar <file.ooss>\r\n");
+            blockers++;
+        } else if (!g_mind_halting_view.ready) {
+            Print(L"  blocker=sidecar present but HaltingHead layout not ready; inspect/export sidecar\r\n");
+            blockers++;
+        }
+    }
+
+    if (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active) {
+        Print(L"  note=attach remains optional; backend not wired yet\r\n");
+    }
+
+    cfg_enabled = g_mind_runtime_halt_enabled;
+    cfg_threshold = g_mind_runtime_halt_threshold;
+    found_enabled = 0;
+    found_threshold = 0;
+    found_any = 0;
+    in_sync = 0;
+    cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
+
+    {
+        int core_ready = g_mind_runtime_state.core_active ? 1 : 0;
+        int halt_ready = (!EFI_ERROR(cfg_st) && found_any && in_sync) ? 1 : 0;
+        int sidecar_ready = (!g_mind_runtime_state.sidecar_requested) ||
+                            (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && g_mind_halting_view.ready);
+        int ready = (core_ready && halt_ready && sidecar_ready) ? 1 : 0;
+        Print(L"  actions=%u blockers=%u ready=%d\r\n", (UINT32)actions, (UINT32)blockers, ready);
+        if (ready) Print(L"  next=runtime-ready\r\n\r\n");
+        else Print(L"  next=/mind_doctor\r\n\r\n");
+    }
+}
+
+static void llmk_mind_print_path_v1(void) {
+    int cfg_enabled = g_mind_runtime_halt_enabled;
+    float cfg_threshold = g_mind_runtime_halt_threshold;
+    int found_enabled = 0;
+    int found_threshold = 0;
+    int found_any = 0;
+    int in_sync = 0;
+    EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
+
+    int core_ready = g_mind_runtime_state.core_active ? 1 : 0;
+    int halt_ready = (!EFI_ERROR(cfg_st) && found_any && in_sync) ? 1 : 0;
+    int sidecar_ready = (!g_mind_runtime_state.sidecar_requested) ||
+                        (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && g_mind_halting_view.ready);
+    int ready = (core_ready && halt_ready && sidecar_ready) ? 1 : 0;
+    int bootstrap_can_help = 0;
+    int step = 1;
+
+    if ((g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && g_mind_runtime_state.core_path[0]) ||
+        (EFI_ERROR(cfg_st) || !found_any || !in_sync) ||
+        (g_mind_runtime_state.sidecar_requested && !g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_path[0])) {
+        bootstrap_can_help = 1;
+    }
+
+    Print(L"\r\n[MindPathV1]\r\n");
+    Print(L"  goal=shortest-next-v1-sequence\r\n");
+    Print(L"  ready=%d\r\n", ready);
+
+    if (ready) {
+        Print(L"  status=runtime-ready\r\n");
+        Print(L"  next=/mind_audit\r\n\r\n");
+        return;
+    }
+
+    if (bootstrap_can_help) {
+        Print(L"  step%u=/mind_bootstrap_v1  ; shortest safe shortcut from current state\r\n", step++);
+    }
+
+    if (!g_mind_runtime_state.core_requested) {
+        Print(L"  step%u=/core_load <file.mamb>  ; core backbone is still missing\r\n", step++);
+    } else if (!g_mind_runtime_state.core_active && !g_mind_runtime_state.core_path[0]) {
+        Print(L"  step%u=/core_load <file.mamb>  ; requested core has no reusable stored path\r\n", step++);
+    }
+
+    if (!bootstrap_can_help) {
+        if (EFI_ERROR(cfg_st) || !found_any) {
+            Print(L"  step%u=/mind_halt_policy_save  ; persist current runtime halt policy first\r\n", step++);
+        } else if (!in_sync) {
+            Print(L"  step%u=/mind_halt_policy_sync  ; align runtime halt policy with repl.cfg\r\n", step++);
+        }
+    }
+
+    if (g_mind_runtime_state.sidecar_requested) {
+        if (!g_mind_runtime_state.sidecar_active && !g_mind_runtime_state.sidecar_path[0]) {
+            Print(L"  step%u=/oo_sidecar <file.ooss>  ; requested sidecar has no reusable stored path\r\n", step++);
+        } else if (g_mind_runtime_state.sidecar_active && !g_mind_runtime_state.sidecar_header_valid) {
+            Print(L"  step%u=/oo_sidecar <file.ooss>  ; current sidecar header is invalid\r\n", step++);
+        } else if (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && !g_mind_halting_view.ready) {
+            Print(L"  step%u=inspect sidecar layout/export  ; HaltingHead view is still unavailable\r\n", step++);
+        }
+    } else {
+        Print(L"  optional=/oo_sidecar <file.ooss>  ; only if enriched V1 halting is desired\r\n");
+    }
+
+    Print(L"  step%u=/mind_ready  ; confirm the final V1 readiness verdict\r\n\r\n", step);
+}
+
+static void llmk_mind_print_next(void) {
+    int cfg_enabled = g_mind_runtime_halt_enabled;
+    float cfg_threshold = g_mind_runtime_halt_threshold;
+    int found_enabled = 0;
+    int found_threshold = 0;
+    int found_any = 0;
+    int in_sync = 0;
+    EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
+
+    int core_ready = g_mind_runtime_state.core_active ? 1 : 0;
+    int halt_ready = (!EFI_ERROR(cfg_st) && found_any && in_sync) ? 1 : 0;
+    int sidecar_ready = (!g_mind_runtime_state.sidecar_requested) ||
+                        (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && g_mind_halting_view.ready);
+    int ready = (core_ready && halt_ready && sidecar_ready) ? 1 : 0;
+    int bootstrap_can_help = 0;
+
+    if ((g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && g_mind_runtime_state.core_path[0]) ||
+        (EFI_ERROR(cfg_st) || !found_any || !in_sync) ||
+        (g_mind_runtime_state.sidecar_requested && !g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_path[0])) {
+        bootstrap_can_help = 1;
+    }
+
+    Print(L"\r\n[MindNext]\r\n");
+    Print(L"  goal=single-best-next-action\r\n");
+    Print(L"  ready=%d\r\n", ready);
+
+    if (ready) {
+        Print(L"  action=/mind_audit\r\n");
+        Print(L"  reason=runtime already ready; audit is the next useful snapshot\r\n\r\n");
+        return;
+    }
+
+    if (bootstrap_can_help) {
+        Print(L"  action=/mind_bootstrap_v1\r\n");
+        Print(L"  reason=stored/runtime-safe fixes are available right now\r\n\r\n");
+        return;
+    }
+
+    if (!g_mind_runtime_state.core_requested ||
+        (g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && !g_mind_runtime_state.core_path[0])) {
+        Print(L"  action=/core_load <file.mamb>\r\n");
+        Print(L"  reason=core backbone is missing or cannot be reactivated automatically\r\n\r\n");
+        return;
+    }
+
+    if (g_mind_runtime_state.sidecar_requested) {
+        if (!g_mind_runtime_state.sidecar_active && !g_mind_runtime_state.sidecar_path[0]) {
+            Print(L"  action=/oo_sidecar <file.ooss>\r\n");
+            Print(L"  reason=requested sidecar is inactive and no reusable path is stored\r\n\r\n");
+            return;
+        }
+        if (g_mind_runtime_state.sidecar_active && !g_mind_runtime_state.sidecar_header_valid) {
+            Print(L"  action=/oo_sidecar <file.ooss>\r\n");
+            Print(L"  reason=current sidecar header is invalid\r\n\r\n");
+            return;
+        }
+        if (g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_header_valid && !g_mind_halting_view.ready) {
+            Print(L"  action=inspect sidecar layout/export\r\n");
+            Print(L"  reason=HaltingHead view is not ready and requires manual follow-up\r\n\r\n");
+            return;
+        }
+    }
+
+    if (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active) {
+        Print(L"  action=wait for future attach backend\r\n");
+        Print(L"  reason=attach is optional and currently not wired\r\n\r\n");
+        return;
+    }
+
+    Print(L"  action=/mind_doctor\r\n");
+    Print(L"  reason=state is not fully ready and needs a broader corrective snapshot\r\n\r\n");
+}
 
 static void llmk_mind_print_status(void) {
     Print(L"\r\n[Mind] OO-SomaMind runtime topology\r\n");
@@ -368,24 +1009,32 @@ static void llmk_mind_print_status(void) {
         float cfg_threshold = g_mind_runtime_halt_threshold;
         int found_enabled = 0;
         int found_threshold = 0;
-        EFI_STATUS cfg_st = llmk_mind_query_halt_policy_cfg_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold);
+        int found_any = 0;
+        int in_sync = 0;
+        EFI_STATUS cfg_st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
         Print(L"  halt_policy_cfg: ");
-        if (!EFI_ERROR(cfg_st) && (found_enabled || found_threshold)) {
+        if (!EFI_ERROR(cfg_st) && found_any) {
             Print(L"enabled=%d threshold=%d.%03d sync=",
-                  found_enabled ? cfg_enabled : g_mind_runtime_halt_enabled,
-                  (int)(found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold),
-                  (int)((((found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold) >= 0.0f ?
-                          (found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold) - (int)(found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold) :
-                          ((int)(found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold) - (found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold))) * 1000.0f)));
-            int eff_enabled = found_enabled ? cfg_enabled : g_mind_runtime_halt_enabled;
-            float eff_threshold = found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold;
-            float diff = eff_threshold - g_mind_runtime_halt_threshold;
-            if (diff < 0.0f) diff = -diff;
-            if (eff_enabled == g_mind_runtime_halt_enabled && diff < 0.0005f) Print(L"in-sync\r\n");
+                  cfg_enabled,
+                  (int)cfg_threshold,
+                  (int)(((cfg_threshold >= 0.0f ? cfg_threshold - (int)cfg_threshold : ((int)cfg_threshold - cfg_threshold)) * 1000.0f)));
+            if (in_sync) Print(L"in-sync\r\n");
             else Print(L"runtime!=repl.cfg\r\n");
         } else {
             Print(L"not found\r\n");
         }
+    }
+    Print(L"  halt_policy_last_apply: ");
+    if (!g_mind_runtime_halt_apply_seen) {
+        Print(L"never\r\n");
+    } else {
+        Print(L"mode=");
+        llmk_mind_print_halt_apply_mode(g_mind_runtime_halt_apply_mode);
+        Print(L" changed.enabled=%d changed.threshold=%d result=",
+              g_mind_runtime_halt_apply_changed_enabled,
+              g_mind_runtime_halt_apply_changed_threshold);
+          llmk_mind_print_halt_apply_effect();
+          Print(L"\r\n");
     }
 
     Print(L"  core: ");
@@ -461,7 +1110,9 @@ static void llmk_mind_print_halt_policy_diff(void) {
     float cfg_threshold = g_mind_runtime_halt_threshold;
     int found_enabled = 0;
     int found_threshold = 0;
-    EFI_STATUS st = llmk_mind_query_halt_policy_cfg_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold);
+    int found_any = 0;
+    int in_sync = 0;
+    EFI_STATUS st = llmk_mind_query_halt_policy_sync_state_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold, &found_any, &in_sync);
 
     Print(L"\r\n[MindHaltPolicyDiff]\r\n");
     Print(L"  runtime.enabled=%d runtime.threshold=%d.%03d\r\n",
@@ -469,25 +1120,23 @@ static void llmk_mind_print_halt_policy_diff(void) {
           (int)g_mind_runtime_halt_threshold,
           (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f));
 
-    if (EFI_ERROR(st) || (!found_enabled && !found_threshold)) {
+    if (EFI_ERROR(st) || !found_any) {
         Print(L"  persisted=(not found in repl.cfg)\r\n\r\n");
         return;
     }
 
-    int eff_enabled = found_enabled ? cfg_enabled : g_mind_runtime_halt_enabled;
-    float eff_threshold = found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold;
-    float delta = g_mind_runtime_halt_threshold - eff_threshold;
+    float delta = g_mind_runtime_halt_threshold - cfg_threshold;
     float abs_delta = delta < 0.0f ? -delta : delta;
 
     Print(L"  persisted.enabled=%d persisted.threshold=%d.%03d\r\n",
-          eff_enabled,
-          (int)eff_threshold,
-          (int)((eff_threshold >= 0.0f ? eff_threshold - (int)eff_threshold : ((int)eff_threshold - eff_threshold)) * 1000.0f));
+          cfg_enabled,
+          (int)cfg_threshold,
+          (int)((cfg_threshold >= 0.0f ? cfg_threshold - (int)cfg_threshold : ((int)cfg_threshold - cfg_threshold)) * 1000.0f));
     Print(L"  delta.threshold=%d.%03d\r\n",
           (int)delta,
           (int)((delta >= 0.0f ? delta - (int)delta : ((int)delta - delta)) * 1000.0f));
     Print(L"  sync=");
-    if (eff_enabled == g_mind_runtime_halt_enabled && abs_delta < 0.0005f) Print(L"in-sync\r\n\r\n");
+    if (in_sync && abs_delta < 0.0005f) Print(L"in-sync\r\n\r\n");
     else Print(L"runtime!=repl.cfg\r\n\r\n");
 }
 
@@ -761,6 +1410,46 @@ static void llmk_mind_bind_core_backbone_v1(const char *path, int via_core_alias
         Print(L"  Sidecar note: OOSS sidecar registered but loader not wired yet.\r\n");
     }
     Print(L"  (SSM inference integration: see engine/ssm/ -- hook into Stage 3)\r\n\r\n");
+}
+
+static EFI_STATUS llmk_mind_register_sidecar_best_effort(const char *path, LlmkOoSidecarHeader *out_hdr, UINTN *out_raw_len) {
+    if (!path || !path[0]) return EFI_INVALID_PARAMETER;
+
+    CHAR16 path16[192];
+    ascii_to_char16(path16, path, (int)(sizeof(path16) / sizeof(path16[0])));
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    llmk_mind_set_sidecar_validation("checking header");
+    EFI_STATUS st = llmk_read_entire_file_best_effort(path16, &raw, &raw_len);
+    if (EFI_ERROR(st) || !raw || raw_len < 36) {
+        if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+        llmk_mind_set_sidecar_validation("open/read failed");
+        return EFI_ERROR(st) ? st : EFI_BAD_BUFFER_SIZE;
+    }
+
+    LlmkOoSidecarHeader hdr;
+    if (!llmk_ooss_parse_header(raw, raw_len, &hdr)) {
+        uefi_call_wrapper(BS->FreePool, 1, raw);
+        llmk_mind_set_sidecar_validation("invalid OOSS header");
+        return EFI_COMPROMISED_DATA;
+    }
+
+    llmk_mind_release_sidecar_blob();
+
+    llmk_mind_set_sidecar_request(path, "ooss-sidecar");
+    llmk_mind_store_sidecar_header(&hdr);
+    g_mind_sidecar_blob = raw;
+    llmk_mind_mark_sidecar_active(raw_len);
+    if (llmk_ooss_bind_halting_view(&hdr, g_mind_sidecar_blob, g_mind_sidecar_blob_len)) {
+        llmk_mind_set_sidecar_validation("valid OOSS header; halting hook ready");
+    } else {
+        llmk_mind_set_sidecar_validation("valid OOSS header; halting hook unavailable");
+    }
+
+    if (out_hdr) *out_hdr = hdr;
+    if (out_raw_len) *out_raw_len = raw_len;
+    return EFI_SUCCESS;
 }
 
 static void llmk_model_set_loaded_path(const CHAR16 *path) {
@@ -6065,6 +6754,17 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /mind_halt_policy_save  Persist current halt policy to repl.cfg\r\n");
     Print(L"  /mind_halt_policy_load  Reload halt policy from repl.cfg\r\n");
     Print(L"  /mind_halt_policy_apply_saved  Apply the saved halt policy to runtime\r\n");
+    Print(L"  /mind_halt_policy_apply_saved_if_needed  Apply saved policy only when runtime differs\r\n");
+    Print(L"  /mind_halt_policy_sync  Sync runtime halt policy from repl.cfg when needed\r\n");
+    Print(L"  /mind_halt_policy_sync_force  Force a runtime halt policy reload from repl.cfg\r\n");
+    Print(L"  /mind_halt_policy_audit  Audit runtime, persisted policy, and last apply state\r\n");
+    Print(L"  /mind_audit  Run a global OO-SomaMind runtime audit\r\n");
+    Print(L"  /mind_doctor  Propose the next safe corrective sequence for the runtime\r\n");
+    Print(L"  /mind_ready  Report whether the V1 runtime is ready\r\n");
+    Print(L"  /mind_bootstrap_v1  Auto-apply the obvious safe V1 bootstrap steps\r\n");
+    Print(L"  /mind_path_v1  Print the minimal recommended V1 startup path\r\n");
+    Print(L"  /oo_sidecar_audit  Audit the registered OOSS sidecar state and readiness\r\n");
+    Print(L"  /attach_audit  Audit the registered attached model state and role\r\n");
     Print(L"  /mind_halt_policy_reset  Restore the V1 runtime halt policy defaults\r\n");
     Print(L"  /mind_halt_policy_diff  Compare runtime halt policy vs repl.cfg\r\n");
     Print(L"  /oo_sidecar <file>    Register an OO sidecar extension (future OOSS path)\r\n");
@@ -6824,13 +7524,79 @@ static void llmk_repl_no_model_loop(void) {
             if (EFI_ERROR(ast)) {
                 Print(L"\r\n[MindHaltPolicy] warning: saved policy apply failed (%r)\r\n\r\n", ast);
             } else {
-                Print(L"\r\n[MindHaltPolicy] saved policy applied enabled=%d threshold=%d.%03d changed.enabled=%d changed.threshold=%d sync=in-sync\r\n\r\n",
-                      g_mind_runtime_halt_enabled,
-                      (int)g_mind_runtime_halt_threshold,
-                      (int)((g_mind_runtime_halt_threshold >= 0.0f ? g_mind_runtime_halt_threshold - (int)g_mind_runtime_halt_threshold : ((int)g_mind_runtime_halt_threshold - g_mind_runtime_halt_threshold)) * 1000.0f),
-                      changed_enabled,
-                      changed_threshold);
+                llmk_mind_print_apply_command_result(LLMK_MIND_HALT_APPLY_SAVED, 1, changed_enabled, changed_threshold);
             }
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_policy_apply_saved_if_needed", 39) == 0) {
+            int was_needed = 0;
+            int changed_enabled = 0;
+            int changed_threshold = 0;
+            EFI_STATUS ast = llmk_mind_apply_saved_halt_policy_if_needed_best_effort(&was_needed, &changed_enabled, &changed_threshold);
+            if (EFI_ERROR(ast)) {
+                Print(L"\r\n[MindHaltPolicy] warning: conditional saved policy apply failed (%r)\r\n\r\n", ast);
+            } else if (!was_needed) {
+                llmk_mind_print_apply_command_result(LLMK_MIND_HALT_APPLY_SAVED_IF_NEEDED, 0, changed_enabled, changed_threshold);
+            } else {
+                llmk_mind_print_apply_command_result(LLMK_MIND_HALT_APPLY_SAVED_IF_NEEDED, 1, changed_enabled, changed_threshold);
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_policy_sync", 22) == 0) {
+            int was_needed = 0;
+            int changed_enabled = 0;
+            int changed_threshold = 0;
+            EFI_STATUS ast = llmk_mind_apply_saved_halt_policy_if_needed_best_effort(&was_needed, &changed_enabled, &changed_threshold);
+            if (EFI_ERROR(ast)) {
+                Print(L"\r\n[MindHaltPolicy] warning: sync from repl.cfg failed (%r)\r\n\r\n", ast);
+            } else if (!was_needed) {
+                llmk_mind_print_apply_command_result(LLMK_MIND_HALT_APPLY_SYNC, 0, changed_enabled, changed_threshold);
+            } else {
+                llmk_mind_print_apply_command_result(LLMK_MIND_HALT_APPLY_SYNC, 1, changed_enabled, changed_threshold);
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_policy_sync_force", 28) == 0) {
+            int changed_enabled = 0;
+            int changed_threshold = 0;
+            EFI_STATUS ast = llmk_mind_apply_saved_halt_policy_best_effort(&changed_enabled, &changed_threshold);
+            if (EFI_ERROR(ast)) {
+                Print(L"\r\n[MindHaltPolicy] warning: forced sync from repl.cfg failed (%r)\r\n\r\n", ast);
+            } else {
+                llmk_mind_print_apply_command_result(LLMK_MIND_HALT_APPLY_SYNC_FORCE, 1, changed_enabled, changed_threshold);
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_halt_policy_audit", 23) == 0) {
+            llmk_mind_print_halt_policy_audit();
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_audit", 11) == 0) {
+            llmk_mind_print_global_audit();
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_doctor", 12) == 0) {
+            llmk_mind_print_doctor();
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_ready", 11) == 0) {
+            llmk_mind_print_ready();
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_bootstrap_v1", 18) == 0) {
+            llmk_mind_bootstrap_v1();
+            continue;
+        }
+        if (my_strncmp(prompt, "/mind_path_v1", 13) == 0) {
+            llmk_mind_print_path_v1();
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_sidecar_audit", 17) == 0) {
+            llmk_mind_print_sidecar_audit();
+            continue;
+        }
+        if (my_strncmp(prompt, "/attach_audit", 13) == 0) {
+            llmk_mind_print_attach_audit();
             continue;
         }
         if (my_strncmp(prompt, "/mind_halt_policy_reset", 23) == 0) {
@@ -6868,38 +7634,20 @@ static void llmk_repl_no_model_loop(void) {
             }
             CHAR16 path16[192];
             ascii_to_char16(path16, arg, (int)(sizeof(path16) / sizeof(path16[0])));
-            void *raw = NULL;
-            UINTN raw_len = 0;
-            llmk_mind_set_sidecar_validation("checking header");
-            EFI_STATUS st = llmk_read_entire_file_best_effort(path16, &raw, &raw_len);
-            if (EFI_ERROR(st) || !raw || raw_len < 36) {
-                if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
-                llmk_mind_set_sidecar_validation("open/read failed");
-                Print(L"\r\n[Mind] OO sidecar open failed: %s (%r)\r\n", path16, st);
-                Print(L"  Need a valid OOSS file with a readable header.\r\n\r\n");
-                continue;
-            }
-
             LlmkOoSidecarHeader hdr;
-            if (!llmk_ooss_parse_header(raw, raw_len, &hdr)) {
-                uefi_call_wrapper(BS->FreePool, 1, raw);
-                llmk_mind_set_sidecar_validation("invalid OOSS header");
-                Print(L"\r\n[Mind] OO sidecar invalid: %s\r\n", path16);
-                Print(L"  Expected magic=OOSS and a 36-byte minimum header.\r\n\r\n");
+            UINTN raw_len = 0;
+            EFI_STATUS st = llmk_mind_register_sidecar_best_effort(arg, &hdr, &raw_len);
+            if (EFI_ERROR(st)) {
+                if (st == EFI_COMPROMISED_DATA) {
+                    Print(L"\r\n[Mind] OO sidecar invalid: %s\r\n", path16);
+                    Print(L"  Expected magic=OOSS and a 36-byte minimum header.\r\n\r\n");
+                } else {
+                    Print(L"\r\n[Mind] OO sidecar open failed: %s (%r)\r\n", path16, st);
+                    Print(L"  Need a valid OOSS file with a readable header.\r\n\r\n");
+                }
                 continue;
             }
 
-            llmk_mind_release_sidecar_blob();
-
-            llmk_mind_set_sidecar_request(arg, "ooss-sidecar");
-            llmk_mind_store_sidecar_header(&hdr);
-            g_mind_sidecar_blob = raw;
-            llmk_mind_mark_sidecar_active(raw_len);
-            if (llmk_ooss_bind_halting_view(&hdr, g_mind_sidecar_blob, g_mind_sidecar_blob_len)) {
-                llmk_mind_set_sidecar_validation("valid OOSS header; halting hook ready");
-            } else {
-                llmk_mind_set_sidecar_validation("valid OOSS header; halting hook unavailable");
-            }
             Print(L"\r\n[Mind] OO sidecar registered: %s\r\n", path16);
             Print(L"  Role: future OO-SomaMind enriched extension\r\n");
             Print(L"  Header: version=%u d_model=%u n_layer=%u vocab=%u halt_in=%u\r\n",
@@ -6962,7 +7710,7 @@ static void llmk_repl_no_model_loop(void) {
         if (my_strncmp(prompt, "/ssm_info", 9) == 0) {
             Print(L"\r\n[SSM] Mamba bare-metal engine v0.1\r\n");
             Print(L"  Commands: /ssm_load <file>, /ssm_infer <text>, /ssm_reset\r\n");
-            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_reset, /mind_halt_policy_diff, /oo_sidecar <file>, /oo_sidecar_unload, /attach_load <file>, /attach_unload, /mind_status\r\n");
+            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_apply_saved_if_needed, /mind_halt_policy_sync, /mind_halt_policy_sync_force, /mind_halt_policy_audit, /mind_audit, /mind_doctor, /mind_ready, /mind_bootstrap_v1, /mind_path_v1, /oo_sidecar <file>, /oo_sidecar_audit, /oo_sidecar_unload, /attach_load <file>, /attach_audit, /attach_unload, /mind_halt_policy_reset, /mind_halt_policy_diff, /mind_status\r\n");
             Print(L"  Weight format: MAMB binary\r\n");
             Print(L"  Exporters: runtime export_mamba_baremetal.py | oo-model export_mamb_binary.py\r\n");
             Print(L"  Architecture: Mamba SSM, freestanding, O(1) memory per token\r\n");
@@ -7373,25 +8121,16 @@ static void llmk_repl_no_model_loop(void) {
 
                     // ── Diagnostic: show logits range on first 2 generated tokens ──
                     if (n_out < 2) {
-                        ssm_f32 *lg = g_oosi_v3_ctx.logits;
-                        int V = g_oosi_v3_ctx.w->vocab_size;
-                        ssm_f32 lmin = lg[0], lmax = lg[0];
-                        int nan_count = 0;
-                        for (int qi = 1; qi < V; qi++) {
-                            if (lg[qi] != lg[qi]) { nan_count++; continue; }
-                            if (lg[qi] < lmin) lmin = lg[qi];
-                            if (lg[qi] > lmax) lmax = lg[qi];
-                        }
-                        Print(L"\r\n[DBG] tok#%d: id=%d logits[0..4]=",
+                        // Show RAW logits (before masking/softmax)
+                        Print(L"\r\n[DBG] tok#%d: id=%d RAW_logits[0..4]=",
                               n_out, r.token);
                         for (int qi = 0; qi < 5; qi++) {
-                            int iv = (int)(lg[qi] * 100.0f);
+                            int iv = (int)(g_oosi_v3_ctx.dbg_raw_logits[qi] * 100.0f);
                             Print(L"%d ", iv);
                         }
-                        int imin = (int)(lmin * 100.0f);
-                        int imax = (int)(lmax * 100.0f);
-                        Print(L" min=%d max=%d nan=%d\r\n",
-                              imin, imax, nan_count);
+                        int imin = (int)(g_oosi_v3_ctx.dbg_raw_min * 100.0f);
+                        int imax = (int)(g_oosi_v3_ctx.dbg_raw_max * 100.0f);
+                        Print(L" min=%d max=%d\r\n", imin, imax);
                         // Show embed_scale for input token
                         Print(L"[DBG] embed_scale[%d]=", last);
                         {
@@ -11533,13 +12272,48 @@ static EFI_STATUS llmk_mind_apply_saved_halt_policy_best_effort(int *out_changed
     float prev_threshold = g_mind_runtime_halt_threshold;
     EFI_STATUS st = llmk_mind_load_halt_policy_best_effort();
     if (EFI_ERROR(st)) return st;
-    if (out_changed_enabled) *out_changed_enabled = (prev_enabled != g_mind_runtime_halt_enabled);
+    g_mind_runtime_halt_apply_seen = 1;
+    g_mind_runtime_halt_apply_changed_enabled = (prev_enabled != g_mind_runtime_halt_enabled);
     if (out_changed_threshold) {
         float diff = g_mind_runtime_halt_threshold - prev_threshold;
         if (diff < 0.0f) diff = -diff;
-        *out_changed_threshold = (diff >= 0.0005f);
+        g_mind_runtime_halt_apply_changed_threshold = (diff >= 0.0005f);
+        *out_changed_threshold = g_mind_runtime_halt_apply_changed_threshold;
+    } else {
+        float diff = g_mind_runtime_halt_threshold - prev_threshold;
+        if (diff < 0.0f) diff = -diff;
+        g_mind_runtime_halt_apply_changed_threshold = (diff >= 0.0005f);
     }
+    if (out_changed_enabled) *out_changed_enabled = g_mind_runtime_halt_apply_changed_enabled;
     return EFI_SUCCESS;
+}
+
+static EFI_STATUS llmk_mind_apply_saved_halt_policy_if_needed_best_effort(int *out_was_needed, int *out_changed_enabled, int *out_changed_threshold) {
+    int cfg_enabled = g_mind_runtime_halt_enabled;
+    float cfg_threshold = g_mind_runtime_halt_threshold;
+    int found_enabled = 0;
+    int found_threshold = 0;
+    EFI_STATUS st = llmk_mind_query_halt_policy_cfg_best_effort(&cfg_enabled, &cfg_threshold, &found_enabled, &found_threshold);
+    if (EFI_ERROR(st)) return st;
+
+    {
+        int eff_enabled = found_enabled ? cfg_enabled : g_mind_runtime_halt_enabled;
+        float eff_threshold = found_threshold ? cfg_threshold : g_mind_runtime_halt_threshold;
+        float diff = eff_threshold - g_mind_runtime_halt_threshold;
+        if (diff < 0.0f) diff = -diff;
+        if (eff_enabled == g_mind_runtime_halt_enabled && diff < 0.0005f) {
+            g_mind_runtime_halt_apply_seen = 1;
+            g_mind_runtime_halt_apply_changed_enabled = 0;
+            g_mind_runtime_halt_apply_changed_threshold = 0;
+            if (out_was_needed) *out_was_needed = 0;
+            if (out_changed_enabled) *out_changed_enabled = 0;
+            if (out_changed_threshold) *out_changed_threshold = 0;
+            return EFI_SUCCESS;
+        }
+    }
+
+    if (out_was_needed) *out_was_needed = 1;
+    return llmk_mind_apply_saved_halt_policy_best_effort(out_changed_enabled, out_changed_threshold);
 }
 
 static EFI_STATUS llmk_oo_save_to_file_best_effort(const CHAR16 *name, int *out_bytes) {

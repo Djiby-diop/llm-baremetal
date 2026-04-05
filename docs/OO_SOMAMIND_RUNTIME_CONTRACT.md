@@ -41,9 +41,20 @@ Le squelette runtime OO expose aussi désormais :
 - `/mind_halt_policy_save`
 - `/mind_halt_policy_load`
 - `/mind_halt_policy_apply_saved`
+- `/mind_halt_policy_apply_saved_if_needed`
+- `/mind_halt_policy_sync`
+- `/mind_halt_policy_sync_force`
+- `/mind_halt_policy_audit`
+- `/mind_audit`
+- `/mind_doctor`
+- `/mind_ready`
+- `/mind_bootstrap_v1`
+- `/mind_path_v1`
 - `/mind_halt_policy_reset`
 - `/mind_halt_policy_diff`
+- `/oo_sidecar_audit`
 - `/attach_load <file>`
+- `/attach_audit`
 - `/attach_unload`
 - `/mind_status`
 
@@ -52,13 +63,25 @@ Le squelette runtime OO expose aussi désormais :
 - validation d'un header minimal ;
 - conservation du blob validé en mémoire ;
 - exposition d'un premier hook `HaltingHead` via vues mémoire sur le layout exporté ;
+- audit dédié via `/oo_sidecar_audit` pour résumer la résidence mémoire, la validité du header, la disponibilité du hook et l'action suivante ;
+- audit dédié via `/attach_audit` pour résumer l'enregistrement de l'attach, l'état backend, le lien au core et l'action suivante ;
 - arrêt anticipé best-effort des boucles de décodage actives quand `halt_prob >= threshold_configuré` ;
 - politique runtime configurable (`on/off`, seuil) via `/mind_halt_policy` ;
 - persistance explicite dans `repl.cfg` via `/mind_halt_policy_save` et rechargement via `/mind_halt_policy_load` ;
 - ré-application explicite de la politique sauvegardée depuis `repl.cfg` via `/mind_halt_policy_apply_saved` ;
+- ré-application conditionnelle via `/mind_halt_policy_apply_saved_if_needed` uniquement si le runtime diverge déjà de `repl.cfg` ;
+- alias sémantique `/mind_halt_policy_sync` pour synchroniser le runtime depuis `repl.cfg` uniquement quand nécessaire ;
+- rechargement forcé via `/mind_halt_policy_sync_force` même si le runtime est déjà synchronisé avec `repl.cfg` ;
+- audit dédié via `/mind_halt_policy_audit` pour résumer le runtime, le persistant, l'état de synchronisation et le dernier effet d'application ;
+- audit global via `/mind_audit` pour agréger les audits `halt policy`, `sidecar` et `attach` dans un seul rapport runtime ;
+- guidance corrective via `/mind_doctor` pour séparer les actions sûres auto-corrigeables des suivis manuels à partir de l'état runtime courant ;
+- verdict binaire via `/mind_ready` pour dire si le chemin runtime V1 est prêt ou non ;
+- amorçage prudent via `/mind_bootstrap_v1` pour appliquer automatiquement les étapes V1 évidentes et sûres, y compris la réutilisation des chemins core/sidecar déjà mémorisés quand ils existent, puis signaler les bloqueurs restants ;
+- chemin minimal via `/mind_path_v1` pour imprimer la séquence V1 recommandée la plus courte depuis l'état runtime courant, avec recours à `/mind_bootstrap_v1` quand c'est le meilleur raccourci ;
 - stockage `repl.cfg` via `mind_halt_enabled` et `mind_halt_threshold` ;
 - restauration explicite des valeurs runtime V1 via `/mind_halt_policy_reset` ;
 - visualisation de la divergence éventuelle runtime vs `repl.cfg` via `/mind_status` ;
+- visualisation dans `/mind_status` du mode et de l'effet de la dernière ré-application/synchronisation ;
 - affichage explicite de l'écart runtime vs persistant via `/mind_halt_policy_diff` ;
 - pas encore de chargeur sémantique complet des poids/tables OO.
 
