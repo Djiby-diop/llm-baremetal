@@ -7025,6 +7025,19 @@ static void llmk_repl_no_model_loop(void) {
             llmk_print_no_model_help();
             continue;
         }
+        if (my_strncmp(prompt, "/verbose", 8) == 0) {
+            int i = 8;
+            while (prompt[i] == ' ') i++;
+            if (prompt[i] >= '0' && prompt[i] <= '2') {
+                g_boot_verbose = prompt[i] - '0';
+            } else {
+                g_boot_verbose = (g_boot_verbose + 1) % 3;
+            }
+            Print(L"\r\nverbose=%d (%s)\r\n\r\n", g_boot_verbose,
+                  g_boot_verbose == 0 ? L"quiet" :
+                  g_boot_verbose == 1 ? L"normal" : L"debug");
+            continue;
+        }
         if (my_strncmp(prompt, "/diag", 5) == 0) {
             llmk_print_diag();
             continue;
@@ -8012,6 +8025,17 @@ static void llmk_repl_no_model_loop(void) {
                 g_oosi_v3_valid = 1;
                 Print(L"[OOSI-v3] OK: full SSM inference ready. Use /ssm_infer <text>\r\n");
 
+                // Precompute -exp(A_log) for all layers (eliminates ~5M expf/token)
+                {
+                    UINT64 neg_exp_b = (UINT64)V3N * V3Di * V3S * sizeof(ssm_f32);
+                    ssm_f32 *neg_exp_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_KV_CACHE, neg_exp_b, 64);
+                    if (neg_exp_buf) {
+                        oosi_v3_precompute_neg_exp_A(&g_oosi_v3_ctx, neg_exp_buf);
+                        Print(L"[OOSI-v3] Precomputed exp(A_log): %d MB\r\n",
+                              (int)(neg_exp_b / (1024*1024)));
+                    }
+                }
+
                 // ── Best-effort: load tokenizer from EFI volume ──
                 // Try gpt_neox_tokenizer.bin first (50282 vocab), fall back to tokenizer.bin (32K vocab)
                 {
@@ -8243,17 +8267,12 @@ static void llmk_repl_no_model_loop(void) {
                         Print(L"[OOSI-v3] ");
                     }
                     out_ids[n_out++] = r.token;
-                    // Print decoded token (best-effort)
+                    // Print decoded token via proper UTF-8 handler
                     char tok_str[32]; int tok_len_out = 0;
                     tok_len_out = llmk_oo_infer_decode_token(r.token,
                                       tok_str, sizeof(tok_str));
                     if (tok_len_out > 0) {
-                        for (int ci = 0; ci < tok_len_out; ci++) {
-                            CHAR16 ch16[2];
-                            ch16[0] = (CHAR16)(unsigned char)tok_str[ci];
-                            ch16[1] = 0;
-                            Print(ch16);
-                        }
+                        uefi_print_utf8_bytes(tok_str, tok_len_out);
                     } else {
                         // Debug: show raw token ID when decode fails
                         Print(L"<tok%d>", r.token);
@@ -22611,6 +22630,18 @@ snap_autoload_done:
                 continue;
             } else if (my_strncmp(prompt, "/diag", 5) == 0) {
                 llmk_print_diag();
+                continue;
+            } else if (my_strncmp(prompt, "/verbose", 8) == 0) {
+                int vi = 8;
+                while (prompt[vi] == ' ') vi++;
+                if (prompt[vi] >= '0' && prompt[vi] <= '2') {
+                    g_boot_verbose = prompt[vi] - '0';
+                } else {
+                    g_boot_verbose = (g_boot_verbose + 1) % 3;
+                }
+                Print(L"\r\nverbose=%d (%s)\r\n\r\n", g_boot_verbose,
+                      g_boot_verbose == 0 ? L"quiet" :
+                      g_boot_verbose == 1 ? L"normal" : L"debug");
                 continue;
             } else if (my_strncmp(prompt, "/djibmarks", 10) == 0) {
                 DJIBMARK_REPL();

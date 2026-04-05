@@ -60,6 +60,9 @@ typedef struct {
     ssm_f32 dbg_raw_logits[5];
     ssm_f32 dbg_raw_min;
     ssm_f32 dbg_raw_max;
+
+    // Precomputed -exp(A_log) for all layers (optional, NULL = compute on-the-fly)
+    ssm_f32 *neg_exp_A;    // [n_layer * d_inner * d_state]
 } OosiV3GenCtx;
 
 // ============================================================
@@ -97,6 +100,10 @@ SsmStatus oosi_v3_gen_ctx_init(
 );
 
 void oosi_v3_gen_ctx_reset(OosiV3GenCtx *ctx);
+
+// Precompute -exp(A_log) for all layers into caller-provided buffer.
+// buf must be n_layer * d_inner * d_state floats. Call after init.
+void oosi_v3_precompute_neg_exp_A(OosiV3GenCtx *ctx, ssm_f32 *buf);
 
 SsmStatus oosi_v3_halt_parse(OosiV3HaltHead *head, const OosiV3Weights *w);
 

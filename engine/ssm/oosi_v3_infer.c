@@ -86,7 +86,25 @@ SsmStatus oosi_v3_gen_ctx_init(
     if (s != SSM_OK) return s;
 
     oosi_v3_gen_ctx_reset(ctx);
+    ctx->neg_exp_A = NULL;  // optional, call oosi_v3_precompute_neg_exp_A after init
     return SSM_OK;
+}
+
+// ============================================================
+// oosi_v3_precompute_neg_exp_A
+// ============================================================
+void oosi_v3_precompute_neg_exp_A(OosiV3GenCtx *ctx, ssm_f32 *buf) {
+    if (!ctx || !ctx->w || !buf) return;
+    int N  = ctx->w->n_layer;
+    int Di = ctx->w->d_inner;
+    int S  = ctx->w->d_state;
+    for (int l = 0; l < N; l++) {
+        const ssm_f32 *A_log = ctx->w->layers[l].A_log;
+        ssm_f32 *dst = buf + (int64_t)l * Di * S;
+        for (int k = 0; k < Di * S; k++)
+            dst[k] = -_v3_expf(A_log[k]);
+    }
+    ctx->neg_exp_A = buf;
 }
 
 // ============================================================
@@ -255,12 +273,15 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
         //    y_ssm reuses x_expand slot (first half, no longer needed after conv)
         //    z_gate (second half) stays intact for gating step (h).
         ssm_f32 *y_ssm = x_and_z;  // safe: x_expand already consumed by conv1d
+        const ssm_f32 *precomp_nA = ctx->neg_exp_A
+            ? ctx->neg_exp_A + (int64_t)l * Di * S : NULL;
         for (int i = 0; i < Di; i++) {
             ssm_f32 dt_i = dt_full[i];
             ssm_f32 y_i  = 0.0f;
-            const ssm_f32 *A_row = &lw->A_log[i * S];
             for (int j = 0; j < S; j++) {
-                ssm_f32 neg_A = -_v3_expf(A_row[j]);  // exp(A_log) cached
+                ssm_f32 neg_A = precomp_nA
+                    ? precomp_nA[i * S + j]
+                    : -_v3_expf(lw->A_log[i * S + j]);
                 ssm_f32 dA = _v3_expf(dt_i * neg_A);
                 ssm_f32 dB = dt_i * B_vec[j];
                 ssm_f32 *hij = &hs[i * S + j];
