@@ -7,6 +7,29 @@ Part of the [Operating Organism](https://github.com/Djiby-diop/oo-system) ecosys
 
 By Djiby Diop
 
+## 🔥 First real inference on bare metal — April 2026
+
+Mamba-2.8B (64 layers, 2560 d_model, int8 quantized) running directly on UEFI hardware:
+
+```
+> /ssm_infer The future of AI is
+
+[OOSI-v3] Prompt tokens: 6 — generating (SSM recurrent)...
+top5: [bright] [uncertain] [exciting] [not] [unclear]
+
+The future of AI is bright. The future of AI depends on how well
+we use it and responsibly, not just for ourselves but also society
+at large. It's that governments lead by example in ensuring when
+using this technology to improve lives while protecting privacy
+rights as much possible... We need a global
+```
+
+- No OS. No libc. No runtime. Just UEFI + raw hardware.
+- Full Mamba SSM recurrent inference (not transformer attention).
+- Int8 quantized weights (~2.8 GB), loaded directly into memory zones.
+- Custom BPE tokenizer, freestanding C11.
+- Tested on real Lenovo hardware (i5, 8GB RAM).
+
 ## Architectural role
 
 `llm-baremetal` is the **sovereign runtime** of the larger Operating Organism vision.
