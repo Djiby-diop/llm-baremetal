@@ -74,6 +74,8 @@
 #include "../ssm/soma_dna.h"
 #include "../ssm/soma_dual.h"
 #include "../ssm/soma_smb.h"
+#include "../ssm/soma_dream.h"
+#include "../ssm/soma_meta.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -2927,6 +2929,10 @@ static ssm_f32       *g_soma_dual_buf = NULL;  // [vocab_size] — lazy alloc
 static int            g_soma_dual_enabled = 0; // /soma_dual [0|1] to toggle
 // Synaptic Memory Bus: ring buffer of past interaction records
 static SomaSmbCtx     g_soma_smb;
+// Dreaming Engine: offline consolidation of SMB memories
+static SomaDreamCtx   g_soma_dream;
+// Meta-Evolution: fitness scoring + auto-mutation
+static SomaMetaCtx    g_soma_meta;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -6896,6 +6902,9 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_dual_stats      Show Dual Core sampling statistics\r\n");
     Print(L"  /soma_smb_stats       Show Synaptic Memory Bus counters\r\n");
     Print(L"  /soma_smb_dump        Dump memory bus slots (active interactions)\r\n");
+    Print(L"  /soma_dream [apply]   Run dream cycle (add 'apply' to update DNA)\r\n");
+    Print(L"  /soma_meta            Show meta-evolution fitness history\r\n");
+    Print(L"  /soma_evolve          Force fitness score + DNA mutation step\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7034,12 +7043,14 @@ static void llmk_repl_no_model_loop(void) {
 
     Print(L"OK: REPL ready (no model). Type /help\r\n");
 
-    // Initialize SomaMind (Router + Digital DNA + Synaptic Memory Bus)
+    // Initialize SomaMind (Router + Digital DNA + SMB + Dream + Meta)
     soma_router_init(&g_soma_router);
     soma_dna_init_default(&g_soma_dna);
     soma_smb_init(&g_soma_smb);
+    soma_dream_init(&g_soma_dream);
+    soma_meta_init(&g_soma_meta);
     g_soma_initialized = 1;
-    Print(L"SomaMind: router+DNA+SMB initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: router+DNA+SMB+Dream+Meta initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7400,6 +7411,73 @@ static void llmk_repl_no_model_loop(void) {
             }
             if (shown == 0) Print(L"  (empty)\r\n");
             Print(L"\r\n");
+            continue;
+        }
+        // ── SomaMind Dream + Meta commands ──────────────────────────────────
+        if (my_strncmp(prompt, "/soma_dream", 11) == 0) {
+            if (g_soma_smb.count < 2) {
+                Print(L"\r\n[SomaMind] Not enough SMB data yet (need >=2 interactions)\r\n\r\n");
+            } else {
+                SomaDreamSummary ds = soma_dream_run(&g_soma_dream, &g_soma_smb);
+                Print(L"\r\n[SomaMind Dream Summary]\r\n");
+                Print(L"  total_slots    : %d\r\n", ds.total_slots);
+                Print(L"  dream_quality  : %d%%\r\n", ds.dream_quality);
+                Print(L"  dominant_domain: %d\r\n", (int)ds.dominant_domain);
+                Print(L"  solar_count    : %d\r\n", ds.solar_count);
+                Print(L"  lunar_count    : %d\r\n", ds.lunar_count);
+                { int cp = (int)(ds.avg_confidence * 100.0f);
+                  Print(L"  avg_confidence : %d%%\r\n", cp); }
+                { int bd = (int)(ds.recommended_bias_delta * 1000.0f);
+                  Print(L"  bias_delta     : %d/1000\r\n", bd); }
+                Print(L"  top_gist: ");
+                for (int gi = 0; gi < 3 && ds.top_gist_counts[gi] > 0; gi++)
+                    Print(L"%d(x%d) ", (int)ds.top_gist_tokens[gi], ds.top_gist_counts[gi]);
+                Print(L"\r\n");
+                // Apply dream to DNA
+                const char *arg = prompt + 11;
+                while (*arg == ' ') arg++;
+                if (*arg == 'a' || *arg == 'A') {
+                    soma_dream_apply(&g_soma_dream, &g_soma_dna, &ds, 1);
+                    Print(L"  [APPLIED to DNA — gen=%d]\r\n", (int)g_soma_dna.generation);
+                } else {
+                    Print(L"  (use /soma_dream apply to apply to DNA)\r\n");
+                }
+                Print(L"\r\n");
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_meta", 10) == 0) {
+            Print(L"\r\n[SomaMind Meta-Evolution]\r\n");
+            Print(L"  total_evals    : %d\r\n", g_soma_meta.total_evaluations);
+            Print(L"  mutations      : %d\r\n", g_soma_meta.mutations_applied);
+            Print(L"  stagnation     : %d\r\n", g_soma_meta.stagnation_count);
+            { int bp = (int)(g_soma_meta.best_score * 100.0f);
+              Print(L"  best_score     : %d%%\r\n", bp); }
+            Print(L"  history (last %d):\r\n", g_soma_meta.history_count);
+            int n = g_soma_meta.history_count;
+            int start = (g_soma_meta.history_head - n + SOMA_META_HISTORY) & (SOMA_META_HISTORY - 1);
+            for (int hi = 0; hi < n; hi++) {
+                int idx = (start + hi) & (SOMA_META_HISTORY - 1);
+                SomaMetaFitness *mf = &g_soma_meta.history[idx];
+                int sp = (int)(mf->score * 100.0f);
+                int cp = (int)(mf->confidence_contrib * 100.0f);
+                int rp = (int)(mf->reflex_contrib * 100.0f);
+                Print(L"    gen=%d score=%d%% conf=%d%% ref=%d%%\r\n",
+                      mf->generation, sp, cp, rp);
+            }
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_evolve", 12) == 0) {
+            int mutated = soma_meta_cycle(&g_soma_meta, &g_soma_dna,
+                                          &g_soma_router, &g_soma_dual,
+                                          &g_soma_smb, 0 /*force*/);
+            if (mutated)
+                Print(L"\r\n[SomaMind] DNA mutated (gen=%d hash=0x%08X)\r\n\r\n",
+                      (int)g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
+            else
+                Print(L"\r\n[SomaMind] DNA scored (no mutation needed, score=%d%%)\r\n\r\n",
+                      (int)(g_soma_meta.best_score * 100.0f));
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
@@ -8808,6 +8886,26 @@ static void llmk_repl_no_model_loop(void) {
                                    soma_first_conf,
                                    gist_ids, glen);
                     soma_smb_tick(&g_soma_smb);
+                    // Meta-cycle: score fitness + auto-mutate DNA if stagnating
+                    {
+                        int mutated = soma_meta_cycle(&g_soma_meta, &g_soma_dna,
+                                                       &g_soma_router, &g_soma_dual,
+                                                       &g_soma_smb, 8);
+                        if (mutated && g_boot_verbose)
+                            Print(L"[SomaMind:Meta] DNA auto-mutated (stagnation=%d)\r\n",
+                                  g_soma_meta.mutations_applied);
+                    }
+                    // Auto-dream every 8 turns if enough data
+                    if (soma_dream_should_run(&g_soma_dream, &g_soma_smb, 8)) {
+                        SomaDreamSummary ds = soma_dream_run(&g_soma_dream, &g_soma_smb);
+                        if (ds.total_slots >= 2) {
+                            soma_dream_apply(&g_soma_dream, &g_soma_dna, &ds, 1 /*safe*/);
+                            if (g_boot_verbose)
+                                Print(L"[SomaMind:Dream] auto-applied (quality=%d%% bias_d=%d/1000)\r\n",
+                                      ds.dream_quality,
+                                      (int)(ds.recommended_bias_delta * 1000));
+                        }
+                    }
                 }
                 continue;
             }
