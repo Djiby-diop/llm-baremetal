@@ -73,6 +73,7 @@
 #include "../ssm/soma_router.h"
 #include "../ssm/soma_dna.h"
 #include "../ssm/soma_dual.h"
+#include "../ssm/soma_smb.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -2924,6 +2925,8 @@ static int            g_soma_initialized = 0;
 static SomaDualCtx    g_soma_dual;
 static ssm_f32       *g_soma_dual_buf = NULL;  // [vocab_size] — lazy alloc
 static int            g_soma_dual_enabled = 0; // /soma_dual [0|1] to toggle
+// Synaptic Memory Bus: ring buffer of past interaction records
+static SomaSmbCtx     g_soma_smb;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -6889,8 +6892,10 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_dna             Show Digital DNA parameters\r\n");
     Print(L"  /soma_mutate [mag]    Mutate DNA (meta-evolution step)\r\n");
     Print(L"  /soma_route <text>    Test routing decision without inference\r\n");
-    Print(L"  /soma_dual [0|1]      Enable/disable Dual Core (☀Solar+🌙Lunar) sampling\r\n");
+    Print(L"  /soma_dual [0|1]      Enable/disable Dual Core (Solar+Lunar) sampling\r\n");
     Print(L"  /soma_dual_stats      Show Dual Core sampling statistics\r\n");
+    Print(L"  /soma_smb_stats       Show Synaptic Memory Bus counters\r\n");
+    Print(L"  /soma_smb_dump        Dump memory bus slots (active interactions)\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7029,11 +7034,12 @@ static void llmk_repl_no_model_loop(void) {
 
     Print(L"OK: REPL ready (no model). Type /help\r\n");
 
-    // Initialize SomaMind (Router + Digital DNA)
+    // Initialize SomaMind (Router + Digital DNA + Synaptic Memory Bus)
     soma_router_init(&g_soma_router);
     soma_dna_init_default(&g_soma_dna);
+    soma_smb_init(&g_soma_smb);
     g_soma_initialized = 1;
-    Print(L"SomaMind: router+DNA initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: router+DNA+SMB initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7362,6 +7368,38 @@ static void llmk_repl_no_model_loop(void) {
                   Print(L"  avg_confidence: %d%%\r\n", conf_pct); }
                 Print(L"\r\n");
             }
+            continue;
+        }
+        // ── SomaMind SMB commands ────────────────────────────────────────────
+        if (my_strncmp(prompt, "/soma_smb_stats", 15) == 0) {
+            Print(L"\r\n[SomaMind SMB — Synaptic Memory Bus]\r\n");
+            Print(L"  slots_used   : %d / %d\r\n", g_soma_smb.count, SOMA_SMB_CAPACITY);
+            Print(L"  turn         : %d\r\n", (int)g_soma_smb.turn);
+            Print(L"  total_writes : %d\r\n", g_soma_smb.total_writes);
+            Print(L"  total_hits   : %d\r\n", g_soma_smb.total_hits);
+            Print(L"  total_misses : %d\r\n", g_soma_smb.total_misses);
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_smb_dump", 14) == 0) {
+            Print(L"\r\n[SomaMind SMB — Memory Dump]\r\n");
+            int shown = 0;
+            for (int si = 0; si < g_soma_smb.count; si++) {
+                SomaSmbSlot *s = &g_soma_smb.slots[si];
+                if (s->relevance < 0.01f) continue;
+                int rel_pct  = (int)(s->relevance * 100.0f);
+                int conf_pct = (int)(s->confidence * 100.0f);
+                Print(L"  [%d] turn=%d dom=%d rel=%d%% conf=%d%% hash=0x%08X gist:",
+                      si, (int)s->turn,
+                      (int)s->domain, rel_pct, conf_pct,
+                      (unsigned)s->input_hash);
+                for (int gi = 0; gi < s->gist_len; gi++)
+                    Print(L"%d ", (int)s->gist[gi]);
+                Print(L"\r\n");
+                shown++;
+            }
+            if (shown == 0) Print(L"  (empty)\r\n");
+            Print(L"\r\n");
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
@@ -8535,11 +8573,20 @@ static void llmk_repl_no_model_loop(void) {
             }
 
             // ── SomaMind Router: consult before inference ────────────────
+            // Store route data for post-inference SMB write
+            uint32_t soma_input_hash = 0;
+            SomaDomain soma_domain_used = SOMA_DOMAIN_CHAT;
+            SomaRoute soma_route_used = SOMA_ROUTE_EXTERNAL;
+            SomaCoreUsed soma_core_used = SOMA_CORE_SOLAR;
+            float soma_first_conf = 0.0f;
             if (g_soma_initialized) {
                 g_soma_router.external_model_ready = g_oosi_v3_valid ? 1 : 0;
                 int tlen = 0;
                 { const char *p = text; while (*p) { tlen++; p++; } }
+                soma_input_hash = soma_smb_hash(text, tlen);
                 SomaRouteResult rr = soma_route(&g_soma_router, text, tlen);
+                soma_domain_used = rr.domain;
+                soma_route_used  = rr.route;
 
                 // REFLEX: instant response, no inference needed
                 if (rr.route == SOMA_ROUTE_REFLEX && rr.reflex_response) {
@@ -8655,6 +8702,11 @@ static void llmk_repl_no_model_loop(void) {
                             &g_soma_dna,
                             &g_oosi_v3_ctx.rng_state);
                         r.token = dr.selected_token;
+                        // Capture for SMB (first token only)
+                        if (n_out == 0) {
+                            soma_first_conf = dr.confidence;
+                            soma_core_used  = dr.core_used;
+                        }
                         if (g_boot_verbose && n_out == 0) {
                             const CHAR16 *core = (dr.core_used == SOMA_CORE_SOLAR) ? L"Solar"
                                                : (dr.core_used == SOMA_CORE_LUNAR) ? L"Lunar"
@@ -8662,6 +8714,11 @@ static void llmk_repl_no_model_loop(void) {
                             int conf_pct = (int)(dr.confidence * 100.0f);
                             Print(L"[Dual:%s conf=%d%%]\r\n[OOSI-v3] ", core, conf_pct);
                         }
+                    } else if (n_out == 0) {
+                        // Standard path: capture confidence from logits
+                        soma_first_conf = soma_dual_confidence(g_oosi_v3_ctx.logits,
+                                                               g_soma_dual.vocab_size > 0
+                                                               ? g_soma_dual.vocab_size : 50282);
                     }
 
                     // Verbose diagnostic (boot_verbose=2)
@@ -8736,6 +8793,21 @@ static void llmk_repl_no_model_loop(void) {
                     } else {
                         Print(L"\r\n[OOSI-v3] Done: %d tokens generated\r\n\r\n", n_out);
                     }
+                }
+                // SomaMind SMB: record this interaction into memory bus
+                if (g_soma_initialized && n_out > 0) {
+                    uint16_t gist_ids[SOMA_SMB_GIST_LEN];
+                    int glen = n_out < SOMA_SMB_GIST_LEN ? n_out : SOMA_SMB_GIST_LEN;
+                    for (int gi = 0; gi < glen; gi++)
+                        gist_ids[gi] = (uint16_t)(out_ids[gi] & 0xFFFF);
+                    soma_smb_write(&g_soma_smb,
+                                   soma_input_hash,
+                                   soma_domain_used,
+                                   soma_route_used,
+                                   soma_core_used,
+                                   soma_first_conf,
+                                   gist_ids, glen);
+                    soma_smb_tick(&g_soma_smb);
                 }
                 continue;
             }
