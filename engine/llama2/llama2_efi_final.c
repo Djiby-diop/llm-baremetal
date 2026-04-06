@@ -8479,6 +8479,75 @@ static void llmk_repl_no_model_loop(void) {
                 continue;
             }
 
+            // ── SomaMind Router: consult before inference ────────────────
+            if (g_soma_initialized) {
+                g_soma_router.external_model_ready = g_oosi_v3_valid ? 1 : 0;
+                int tlen = 0;
+                { const char *p = text; while (*p) { tlen++; p++; } }
+                SomaRouteResult rr = soma_route(&g_soma_router, text, tlen);
+
+                // REFLEX: instant response, no inference needed
+                if (rr.route == SOMA_ROUTE_REFLEX && rr.reflex_response) {
+                    Print(L"\r\n[SomaMind:REFLEX] ");
+                    for (int ri = 0; ri < rr.reflex_response_len; ri++)
+                        Print(L"%c", (CHAR16)rr.reflex_response[ri]);
+                    Print(L"\r\n\r\n");
+                    g_soma_dna.total_interactions++;
+                    g_soma_dna.successful_reflexes++;
+                    continue;
+                }
+
+                // Apply DNA-driven sampling for v3 inference
+                if (g_oosi_v3_valid) {
+                    float bias = g_soma_dna.cognition_bias;
+                    switch (rr.domain) {
+                        case SOMA_DOMAIN_SYSTEM:
+                        case SOMA_DOMAIN_POLICY:
+                        case SOMA_DOMAIN_CODE:
+                        case SOMA_DOMAIN_MATH:
+                            // Logic-heavy → Solar-biased
+                            g_oosi_v3_ctx.temperature = g_soma_dna.temperature_solar
+                                + bias * 0.15f * (g_soma_dna.temperature_lunar - g_soma_dna.temperature_solar);
+                            g_oosi_v3_ctx.top_p = g_soma_dna.top_p_solar
+                                + bias * 0.15f * (g_soma_dna.top_p_lunar - g_soma_dna.top_p_solar);
+                            break;
+                        case SOMA_DOMAIN_CREATIVE:
+                            // Creative → Lunar-biased
+                            g_oosi_v3_ctx.temperature = g_soma_dna.temperature_lunar
+                                - (1.0f - bias) * 0.15f * (g_soma_dna.temperature_lunar - g_soma_dna.temperature_solar);
+                            g_oosi_v3_ctx.top_p = g_soma_dna.top_p_lunar
+                                - (1.0f - bias) * 0.15f * (g_soma_dna.top_p_lunar - g_soma_dna.top_p_solar);
+                            break;
+                        default:
+                            // CHAT/UNKNOWN: balanced blend
+                            g_oosi_v3_ctx.temperature = g_soma_dna.temperature_solar
+                                + bias * (g_soma_dna.temperature_lunar - g_soma_dna.temperature_solar);
+                            g_oosi_v3_ctx.top_p = g_soma_dna.top_p_solar
+                                + bias * (g_soma_dna.top_p_lunar - g_soma_dna.top_p_solar);
+                            break;
+                    }
+
+                    if (g_boot_verbose) {
+                        const CHAR16 *dname = L"?";
+                        switch (rr.domain) {
+                            case SOMA_DOMAIN_SYSTEM:   dname = L"SYS"; break;
+                            case SOMA_DOMAIN_POLICY:   dname = L"POL"; break;
+                            case SOMA_DOMAIN_CHAT:     dname = L"CHT"; break;
+                            case SOMA_DOMAIN_CODE:     dname = L"COD"; break;
+                            case SOMA_DOMAIN_MATH:     dname = L"MTH"; break;
+                            case SOMA_DOMAIN_CREATIVE: dname = L"CRE"; break;
+                            default: break;
+                        }
+                        Print(L"[SomaMind] domain=%s temp=%d/1000 top_p=%d/1000\r\n",
+                              dname,
+                              (int)(g_oosi_v3_ctx.temperature * 1000),
+                              (int)(g_oosi_v3_ctx.top_p * 1000));
+                    }
+                }
+                g_soma_dna.total_interactions++;
+            }
+            // ── end SomaMind Router ──────────────────────────────────────
+
             Print(L"\r\n[OOSI] Input: ");
             llmk_print_ascii(text);
             Print(L"\r\n[OOSI] Thinking...\r\n");
