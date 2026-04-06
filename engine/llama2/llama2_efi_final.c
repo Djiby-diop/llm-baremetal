@@ -6868,6 +6868,8 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /top_p <0.0-1.0>      Set nucleus sampling threshold (default 0.9)\r\n");
     Print(L"  /rep_penalty <1-3>    Set repetition penalty (default 1.3)\r\n");
     Print(L"  /max_tokens <1-512>   Set max tokens per generation (default 128)\r\n");
+    Print(L"  /seed <N>             Set RNG seed for reproducible output\r\n");
+    Print(L"  /ssm_selftest         Verify tokenizer + model pipeline\r\n");
     Print(L"  /verbose [0|1|2]      Toggle debug verbosity level\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
@@ -7102,10 +7104,66 @@ static void llmk_repl_no_model_loop(void) {
                 Print(L"  top_p          = %d.%02d\r\n", (int)g_oosi_v3_ctx.top_p, (int)((g_oosi_v3_ctx.top_p - (int)g_oosi_v3_ctx.top_p) * 100.0f));
                 Print(L"  rep_penalty    = %d.%02d\r\n", (int)g_oosi_v3_ctx.repetition_penalty, (int)((g_oosi_v3_ctx.repetition_penalty - (int)g_oosi_v3_ctx.repetition_penalty) * 100.0f));
                 Print(L"  max_tokens     = %d\r\n", g_oosi_v3_ctx.max_tokens);
-                Print(L"  halt_threshold = %d.%02d\r\n\r\n", (int)g_oosi_v3_ctx.halt_threshold, (int)((g_oosi_v3_ctx.halt_threshold - (int)g_oosi_v3_ctx.halt_threshold) * 100.0f));
+                Print(L"  halt_threshold = %d.%02d\r\n", (int)g_oosi_v3_ctx.halt_threshold, (int)((g_oosi_v3_ctx.halt_threshold - (int)g_oosi_v3_ctx.halt_threshold) * 100.0f));
+                Print(L"  rng_state      = 0x%08X\r\n\r\n", g_oosi_v3_ctx.rng_state);
             } else {
                 Print(L"\r\nNo SSM model loaded. Use /ssm_load first.\r\n\r\n");
             }
+            continue;
+        }
+        if (my_strncmp(prompt, "/seed ", 6) == 0) {
+            unsigned int val = 0;
+            int i = 6;
+            while (prompt[i] >= '0' && prompt[i] <= '9') {
+                val = val * 10u + (unsigned int)(prompt[i] - '0');
+                i++;
+            }
+            if (val == 0) val = 1;
+            if (g_oosi_v3_valid) g_oosi_v3_ctx.rng_state = val ^ 0xDEADBEEFu;
+            Print(L"\r\nSSM seed=%u (rng_state=0x%08X)\r\n\r\n",
+                  val, g_oosi_v3_valid ? g_oosi_v3_ctx.rng_state : 0);
+            continue;
+        }
+        if (my_strncmp(prompt, "/ssm_selftest", 13) == 0) {
+            Print(L"\r\n[selftest] BPE tokenizer: ");
+            {
+                int ids[16];
+                int n = llmk_oo_infer_tokenize("The future", ids, 16);
+                if (n > 0) {
+                    Print(L"OK (%d tokens:", n);
+                    for (int si = 0; si < n && si < 8; si++) Print(L" %d", ids[si]);
+                    Print(L")\r\n");
+                    // Round-trip decode
+                    Print(L"[selftest] Decode: ");
+                    for (int si = 0; si < n; si++) {
+                        char dbuf[32]; int dlen;
+                        dlen = llmk_oo_infer_decode_token(ids[si], dbuf, sizeof(dbuf));
+                        if (dlen > 0) {
+                            for (int ci = 0; ci < dlen; ci++) {
+                                CHAR16 c16[2]; c16[0] = (CHAR16)(unsigned char)dbuf[ci]; c16[1] = 0;
+                                Print(c16);
+                            }
+                        } else {
+                            Print(L"<tok%d>", ids[si]);
+                        }
+                    }
+                    Print(L"\r\n");
+                } else {
+                    Print(L"FAIL (returned %d — using byte fallback)\r\n", n);
+                }
+            }
+            Print(L"[selftest] SSM model: %s\r\n",
+                  g_oosi_v3_valid ? L"loaded" : L"NOT loaded");
+            if (g_oosi_v3_valid) {
+                Print(L"[selftest] dims: d=%d n=%d Di=%d S=%d V=%d\r\n",
+                      g_oosi_v3_weights.d_model, g_oosi_v3_weights.n_layer,
+                      g_oosi_v3_weights.d_inner, g_oosi_v3_weights.d_state,
+                      g_oosi_v3_weights.vocab_size);
+                Print(L"[selftest] precomputed exp(A): %s\r\n",
+                      g_oosi_v3_ctx.neg_exp_A ? L"YES" : L"no (on-the-fly)");
+                Print(L"[selftest] rng_state=0x%08X\r\n", g_oosi_v3_ctx.rng_state);
+            }
+            Print(L"\r\n");
             continue;
         }
         if (my_strncmp(prompt, "/models", 7) == 0) {
