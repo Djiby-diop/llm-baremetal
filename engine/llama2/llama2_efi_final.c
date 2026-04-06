@@ -72,6 +72,7 @@
 #include "../ssm/oosi_v3_infer.h"
 #include "../ssm/soma_router.h"
 #include "../ssm/soma_dna.h"
+#include "../ssm/soma_dual.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -2919,6 +2920,10 @@ static ssm_f32 *g_v3_halt_buf  = NULL;   // [halt_d_input + 1]
 static SomaRouterCtx  g_soma_router;
 static SomaDNA        g_soma_dna;
 static int            g_soma_initialized = 0;
+// Dual Core: work buffer allocated from scratch arena on first /ssm_load
+static SomaDualCtx    g_soma_dual;
+static ssm_f32       *g_soma_dual_buf = NULL;  // [vocab_size] — lazy alloc
+static int            g_soma_dual_enabled = 0; // /soma_dual [0|1] to toggle
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -6884,6 +6889,8 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_dna             Show Digital DNA parameters\r\n");
     Print(L"  /soma_mutate [mag]    Mutate DNA (meta-evolution step)\r\n");
     Print(L"  /soma_route <text>    Test routing decision without inference\r\n");
+    Print(L"  /soma_dual [0|1]      Enable/disable Dual Core (☀Solar+🌙Lunar) sampling\r\n");
+    Print(L"  /soma_dual_stats      Show Dual Core sampling statistics\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7314,6 +7321,47 @@ static void llmk_repl_no_model_loop(void) {
                 Print(L"\r\n");
             }
             Print(L"\r\n");
+            continue;
+        }
+        // ── SomaMind Dual Core commands ──────────────────────────────────────
+        if (my_strncmp(prompt, "/soma_dual", 10) == 0) {
+            const char *arg = prompt + 10;
+            while (*arg == ' ') arg++;
+            if (*arg == '0') {
+                g_soma_dual_enabled = 0;
+                Print(L"\r\n[SomaMind] Dual Core DISABLED — standard sampling\r\n\r\n");
+            } else if (*arg == '1') {
+                if (!g_soma_dual_buf) {
+                    Print(L"\r\n[SomaMind] Dual Core not available (no model loaded yet)\r\n\r\n");
+                } else {
+                    g_soma_dual_enabled = 1;
+                    Print(L"\r\n[SomaMind] Dual Core ENABLED ☀Solar+🌙Lunar fusion active\r\n\r\n");
+                }
+            } else {
+                // No arg: show status
+                Print(L"\r\n[SomaMind] Dual Core: %s\r\n",
+                      g_soma_dual_enabled ? L"ENABLED" : L"DISABLED");
+                Print(L"  buf_ready=%s\r\n", g_soma_dual_buf ? L"yes" : L"no (load model first)");
+                Print(L"  Usage: /soma_dual 1   enable\r\n");
+                Print(L"         /soma_dual 0   disable\r\n\r\n");
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_dual_stats", 16) == 0) {
+            if (!g_soma_dual_buf) {
+                Print(L"\r\n[SomaMind] Dual Core not initialized (load model first)\r\n\r\n");
+            } else {
+                SomaDualStats *st = &g_soma_dual.stats;
+                Print(L"\r\n[SomaMind Dual Core Stats]\r\n");
+                Print(L"  total_tokens  : %d\r\n", st->total_tokens);
+                Print(L"  solar_chosen  : %d\r\n", st->solar_chosen);
+                Print(L"  lunar_chosen  : %d\r\n", st->lunar_chosen);
+                Print(L"  agreements    : %d\r\n", st->agreements);
+                Print(L"  disagreements : %d\r\n", st->disagreements);
+                { int conf_pct = (int)(st->avg_confidence * 100.0f);
+                  Print(L"  avg_confidence: %d%%\r\n", conf_pct); }
+                Print(L"\r\n");
+            }
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
@@ -8273,6 +8321,13 @@ static void llmk_repl_no_model_loop(void) {
                 g_v3_halt_h2  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, 64*sizeof(ssm_f32), 16);
                 g_v3_halt_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH,
                                                   (UINT64)(V3Hd + 1) * sizeof(ssm_f32), 16);
+                // SomaMind Dual Core work buffer (one extra logit copy = vocab_size floats)
+                g_soma_dual_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH,
+                                                    (UINT64)V3V * sizeof(ssm_f32), 16);
+                if (g_soma_dual_buf) {
+                    soma_dual_init(&g_soma_dual, g_soma_dual_buf, V3V);
+                    Print(L"[SomaMind] Dual Core initialized (vocab=%d)\r\n", V3V);
+                }
 
                 if (!g_v3_scratch || !g_v3_logits || !g_v3_h_state ||
                     !g_v3_conv_buf || !g_v3_conv_pos || !g_v3_halt_h1 ||
@@ -8590,6 +8645,24 @@ static void llmk_repl_no_model_loop(void) {
                 Print(L"[OOSI-v3] ");
                 while (n_out < g_oosi_v3_ctx.max_tokens && n_out < 256) {
                     OosiV3HaltResult r = oosi_v3_forward_one(&g_oosi_v3_ctx, last);
+
+                    // SomaMind Dual Core: override token if enabled + buffer ready
+                    if (g_soma_dual_enabled && g_soma_dual_buf && g_soma_initialized) {
+                        SomaDualResult dr = soma_dual_sample(
+                            &g_soma_dual,
+                            g_oosi_v3_ctx.logits,
+                            g_soma_dual.vocab_size,
+                            &g_soma_dna,
+                            &g_oosi_v3_ctx.rng_state);
+                        r.token = dr.selected_token;
+                        if (g_boot_verbose && n_out == 0) {
+                            const CHAR16 *core = (dr.core_used == SOMA_CORE_SOLAR) ? L"Solar"
+                                               : (dr.core_used == SOMA_CORE_LUNAR) ? L"Lunar"
+                                               : L"Fused";
+                            int conf_pct = (int)(dr.confidence * 100.0f);
+                            Print(L"[Dual:%s conf=%d%%]\r\n[OOSI-v3] ", core, conf_pct);
+                        }
+                    }
 
                     // Verbose diagnostic (boot_verbose=2)
                     if (g_boot_verbose >= 2 && n_out < 2) {
