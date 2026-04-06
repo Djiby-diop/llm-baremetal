@@ -78,6 +78,7 @@
 #include "../ssm/soma_meta.h"
 #include "../ssm/soma_swarm.h"
 #include "../ssm/soma_reflex.h"
+#include "../ssm/soma_logic.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -2939,6 +2940,7 @@ static SomaMetaCtx    g_soma_meta;
 static SomaSwarmCtx    g_soma_swarm;
 static SomaSwarmResult g_soma_swarm_last; // Last vote result (for fitness update)
 static SomaReflexCtx   g_soma_reflex;
+static SomaLogicCtx    g_soma_logic;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -6916,6 +6918,8 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_swarm_mode [majority|weighted|confident]  Set consensus mode\r\n");
     Print(L"  /soma_reflex [0|1]    Enable/disable symbolic math pre-solver\r\n");
     Print(L"  /soma_reflex_test <expr>  Test reflex scanner on an expression\r\n");
+    Print(L"  /soma_logic [0|1]     Enable/disable syllogism/logic pre-solver\r\n");
+    Print(L"  /soma_logic_test <sentence>  Test logic scanner\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7064,8 +7068,9 @@ static void llmk_repl_no_model_loop(void) {
     g_soma_swarm.enabled = 0;
     g_soma_swarm.ready   = 0;
     soma_reflex_init(&g_soma_reflex);
+    soma_logic_init(&g_soma_logic);
     g_soma_initialized = 1;
-    Print(L"SomaMind: router+DNA+SMB+Dream+Meta+Swarm+Reflex initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-G initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7587,6 +7592,45 @@ static void llmk_repl_no_model_loop(void) {
                       g_soma_reflex.total_scans,
                       g_soma_reflex.total_triggers,
                       g_soma_reflex.total_resolved);
+            }
+            continue;
+        }
+        // ── Logic Reflex commands ─────────────────────────────────────────
+        if (my_strncmp(prompt, "/soma_logic_test", 16) == 0) {
+            const char *arg = prompt + 16;
+            while (*arg == ' ') arg++;
+            if (*arg) {
+                SomaLogicResult lg = soma_logic_scan(&g_soma_logic, arg);
+                if (lg.triggered) {
+                    Print(L"\r\n[Logic] injection: ");
+                    for (int li = 0; lg.injection[li]; li++)
+                        Print(L"%c", (CHAR16)(unsigned char)lg.injection[li]);
+                    Print(L"  derived=%d barbara=%d contradict=%d\r\n\r\n",
+                          lg.derived_count, lg.barbara_count, lg.contradiction);
+                } else {
+                    Print(L"\r\n[Logic] no logical pattern detected\r\n\r\n");
+                }
+            } else {
+                Print(L"\r\n[Logic] usage: /soma_logic_test <sentence>\r\n\r\n");
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_logic", 11) == 0) {
+            const char *arg = prompt + 11;
+            while (*arg == ' ') arg++;
+            if (*arg == '0') {
+                g_soma_logic.enabled = 0;
+                Print(L"\r\n[Logic] disabled\r\n\r\n");
+            } else if (*arg == '1') {
+                g_soma_logic.enabled = 1;
+                Print(L"\r\n[Logic] enabled\r\n\r\n");
+            } else {
+                Print(L"\r\n[Logic] status: %s  scans=%d triggers=%d derived=%d contradictions=%d\r\n\r\n",
+                      g_soma_logic.enabled ? L"ON" : L"OFF",
+                      g_soma_logic.total_scans,
+                      g_soma_logic.total_triggers,
+                      g_soma_logic.total_derived,
+                      g_soma_logic.total_contradictions);
             }
             continue;
         }
@@ -8844,28 +8888,45 @@ static void llmk_repl_no_model_loop(void) {
             }
             // ── end SomaMind Router ──────────────────────────────────────
 
-            // ── SomaMind Reflex: symbolic math pre-solve ──────────────────
-            // Build augmented prompt: [MATH: A=100 B=25 C=35]\n<original>
-            char reflex_prompt[512 + SOMA_REFLEX_INJECT_MAX];
+            // ── SomaMind Reflex: symbolic math + logic pre-solve ─────────────
+            // Builds augmented prompt: [MATH:...]\n[LOGIC:...]\n<original>
+            char reflex_prompt[512 + SOMA_REFLEX_INJECT_MAX + SOMA_LOGIC_INJECT_MAX];
             const char *infer_text = text;
-            if (g_soma_initialized && g_soma_reflex.enabled) {
-                SomaReflexResult rf = soma_reflex_scan(&g_soma_reflex, text);
-                if (rf.triggered) {
-                    // Prepend injection to prompt
-                    int ip = 0;
-                    for (int ri = 0; ri < rf.injection_len && ip < (int)sizeof(reflex_prompt) - 2; ri++)
-                        reflex_prompt[ip++] = rf.injection[ri];
+            if (g_soma_initialized && (g_soma_reflex.enabled || g_soma_logic.enabled)) {
+                int ip = 0;
+                // Math reflex
+                if (g_soma_reflex.enabled) {
+                    SomaReflexResult rf = soma_reflex_scan(&g_soma_reflex, text);
+                    if (rf.triggered) {
+                        for (int ri = 0; ri < rf.injection_len && ip < (int)sizeof(reflex_prompt) - 2; ri++)
+                            reflex_prompt[ip++] = rf.injection[ri];
+                        if (g_boot_verbose) {
+                            Print(L"[Reflex/Math] ");
+                            for (int ri = 0; rf.injection[ri] && ri < 60; ri++)
+                                Print(L"%c", (CHAR16)(unsigned char)rf.injection[ri]);
+                            Print(L"\r\n");
+                        }
+                    }
+                }
+                // Logic reflex
+                if (g_soma_logic.enabled) {
+                    SomaLogicResult lg = soma_logic_scan(&g_soma_logic, text);
+                    if (lg.triggered) {
+                        for (int li = 0; li < lg.injection_len && ip < (int)sizeof(reflex_prompt) - 2; li++)
+                            reflex_prompt[ip++] = lg.injection[li];
+                        if (g_boot_verbose) {
+                            Print(L"[Reflex/Logic] ");
+                            for (int li = 0; lg.injection[li] && li < 70; li++)
+                                Print(L"%c", (CHAR16)(unsigned char)lg.injection[li]);
+                            Print(L"\r\n");
+                        }
+                    }
+                }
+                if (ip > 0) {
                     for (int ti = 0; text[ti] && ip < (int)sizeof(reflex_prompt) - 1; ti++)
                         reflex_prompt[ip++] = text[ti];
                     reflex_prompt[ip] = 0;
                     infer_text = reflex_prompt;
-                    if (g_boot_verbose) {
-                        Print(L"[Reflex] injected: ");
-                        // Print injection (ASCII, first 60 chars)
-                        for (int ri = 0; rf.injection[ri] && ri < 60; ri++)
-                            Print(L"%c", (CHAR16)(unsigned char)rf.injection[ri]);
-                        Print(L"\r\n");
-                    }
                 }
             }
 
