@@ -1,0 +1,12 @@
+# OO SSM Inference Smoke Test — autorun script
+# Place on boot image alongside oo_v3.bin + gpt_neox_tokenizer.bin
+# Enable with repl.cfg: autorun_autostart=1 autorun_file=ssm-autorun.txt
+#
+/ssm_selftest
+/ssm_load oo_v3.bin
+/ssm_params
+/seed 42
+/ssm_infer The future of AI is
+/seed 42
+/ssm_infer Once upon a time
+/ssm_params

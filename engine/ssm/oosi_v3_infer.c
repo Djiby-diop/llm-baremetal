@@ -529,31 +529,43 @@ static int _v3_argmax(const ssm_f32 *x, int n) {
 
 static int _v3_sample_topp(const ssm_f32 *probs, int n, ssm_f32 top_p,
                            uint32_t *rng) {
-    // Find argmax first
+    // Argmax fallback
     int best = _v3_argmax(probs, n);
-    if (top_p <= 0.0f) return best;
+    if (top_p <= 0.0f || top_p >= 1.0f) {
+        // top_p=0 → greedy; top_p>=1.0 → full distribution
+        if (top_p <= 0.0f) return best;
+        // Fall through to sample from full distribution
+    }
 
-    // Quick check: if best token has enough mass, return it with high prob
+    // RNG: xorshift32
     *rng ^= *rng << 13;
     *rng ^= *rng >> 17;
     *rng ^= *rng << 5;
     ssm_f32 r = (*rng >> 8) * (1.0f / (1u << 24));
 
-    // Sort-free top-p: gather top tokens by probability
-    // First pass: find tokens with prob > threshold (prob[best] * 0.01)
-    ssm_f32 thresh = probs[best] * 0.01f;
-    ssm_f32 cumul = 0.0f;
-    ssm_f32 target = r * top_p;
+    // Sort-free top-p nucleus sampling:
+    // 1. Find nucleus mass threshold (skip tiny probs)
+    ssm_f32 thresh = probs[best] * 0.005f;
 
-    // Scan in two passes:
-    // Pass 1: high-probability tokens (> thresh)
+    // 2. First pass: sum mass of tokens above threshold
+    ssm_f32 nucleus_mass = 0.0f;
+    for (int i = 0; i < n; i++) {
+        if (probs[i] >= thresh) nucleus_mass += probs[i];
+    }
+
+    // 3. Clamp nucleus to top_p fraction of total mass
+    ssm_f32 cutoff = (nucleus_mass < top_p) ? nucleus_mass : top_p;
+
+    // 4. Sample: accumulate mass until target reached
+    ssm_f32 target = r * cutoff;
+    ssm_f32 cumul = 0.0f;
     for (int i = 0; i < n; i++) {
         if (probs[i] >= thresh) {
             cumul += probs[i];
             if (cumul >= target) return i;
         }
     }
-    // Pass 2: remaining tokens (< thresh)
+    // Fallback for low-mass tokens
     for (int i = 0; i < n; i++) {
         if (probs[i] < thresh) {
             cumul += probs[i];
