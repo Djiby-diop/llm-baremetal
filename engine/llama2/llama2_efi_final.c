@@ -6859,6 +6859,17 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /attach_load <file>   Register an optional attached external model\r\n");
     Print(L"  /attach_unload        Detach the optional external model\r\n");
     Print(L"  /mind_status          Show core vs attach runtime topology\r\n");
+    Print(L"\r\n  SSM Inference:\r\n");
+    Print(L"  /ssm_load <file>      Load SSM model (.bin v3)\r\n");
+    Print(L"  /ssm_infer <text>     Generate text with loaded SSM model\r\n");
+    Print(L"  /ssm_reset            Reset SSM hidden state\r\n");
+    Print(L"  /ssm_params           Show current SSM sampling parameters\r\n");
+    Print(L"  /temp <0.1-5.0>       Set sampling temperature (default 0.7)\r\n");
+    Print(L"  /top_p <0.0-1.0>      Set nucleus sampling threshold (default 0.9)\r\n");
+    Print(L"  /rep_penalty <1-3>    Set repetition penalty (default 1.3)\r\n");
+    Print(L"  /max_tokens <1-512>   Set max tokens per generation (default 128)\r\n");
+    Print(L"  /verbose [0|1|2]      Toggle debug verbosity level\r\n");
+    Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
     Print(L"  exit                  Return to UEFI shell\r\n\r\n");
@@ -7040,6 +7051,61 @@ static void llmk_repl_no_model_loop(void) {
         }
         if (my_strncmp(prompt, "/diag", 5) == 0) {
             llmk_print_diag();
+            continue;
+        }
+        if (my_strncmp(prompt, "/temp ", 6) == 0 || my_strncmp(prompt, "/temperature ", 12) == 0) {
+            int i = (prompt[1] == 'e' && prompt[5] == ' ') ? 6 : 12;
+            float val = 0.0f;
+            while (prompt[i] >= '0' && prompt[i] <= '9') { val = val * 10.0f + (prompt[i] - '0'); i++; }
+            if (prompt[i] == '.') { i++; float frac = 0.1f; while (prompt[i] >= '0' && prompt[i] <= '9') { val += (prompt[i] - '0') * frac; frac /= 10.0f; i++; } }
+            if (val < 0.01f) val = 0.01f;
+            if (val > 5.0f) val = 5.0f;
+            if (g_oosi_v3_valid) g_oosi_v3_ctx.temperature = val;
+            Print(L"\r\ntemperature=%d.%02d\r\n\r\n", (int)val, (int)((val - (int)val) * 100.0f));
+            continue;
+        }
+        if (my_strncmp(prompt, "/top_p ", 7) == 0) {
+            int i = 7;
+            float val = 0.0f;
+            while (prompt[i] >= '0' && prompt[i] <= '9') { val = val * 10.0f + (prompt[i] - '0'); i++; }
+            if (prompt[i] == '.') { i++; float frac = 0.1f; while (prompt[i] >= '0' && prompt[i] <= '9') { val += (prompt[i] - '0') * frac; frac /= 10.0f; i++; } }
+            if (val < 0.0f) val = 0.0f;
+            if (val > 1.0f) val = 1.0f;
+            if (g_oosi_v3_valid) g_oosi_v3_ctx.top_p = val;
+            Print(L"\r\ntop_p=%d.%02d\r\n\r\n", (int)val, (int)((val - (int)val) * 100.0f));
+            continue;
+        }
+        if (my_strncmp(prompt, "/rep_penalty ", 13) == 0) {
+            int i = 13;
+            float val = 0.0f;
+            while (prompt[i] >= '0' && prompt[i] <= '9') { val = val * 10.0f + (prompt[i] - '0'); i++; }
+            if (prompt[i] == '.') { i++; float frac = 0.1f; while (prompt[i] >= '0' && prompt[i] <= '9') { val += (prompt[i] - '0') * frac; frac /= 10.0f; i++; } }
+            if (val < 1.0f) val = 1.0f;
+            if (val > 3.0f) val = 3.0f;
+            if (g_oosi_v3_valid) g_oosi_v3_ctx.repetition_penalty = val;
+            Print(L"\r\nrep_penalty=%d.%02d\r\n\r\n", (int)val, (int)((val - (int)val) * 100.0f));
+            continue;
+        }
+        if (my_strncmp(prompt, "/max_tokens ", 12) == 0) {
+            int i = 12, val = 0;
+            while (prompt[i] >= '0' && prompt[i] <= '9') { val = val * 10 + (prompt[i] - '0'); i++; }
+            if (val < 1) val = 1;
+            if (val > 512) val = 512;
+            if (g_oosi_v3_valid) g_oosi_v3_ctx.max_tokens = val;
+            Print(L"\r\nmax_tokens=%d\r\n\r\n", val);
+            continue;
+        }
+        if (my_strncmp(prompt, "/ssm_params", 11) == 0) {
+            if (g_oosi_v3_valid) {
+                Print(L"\r\nSSM sampling params:\r\n");
+                Print(L"  temperature    = %d.%02d\r\n", (int)g_oosi_v3_ctx.temperature, (int)((g_oosi_v3_ctx.temperature - (int)g_oosi_v3_ctx.temperature) * 100.0f));
+                Print(L"  top_p          = %d.%02d\r\n", (int)g_oosi_v3_ctx.top_p, (int)((g_oosi_v3_ctx.top_p - (int)g_oosi_v3_ctx.top_p) * 100.0f));
+                Print(L"  rep_penalty    = %d.%02d\r\n", (int)g_oosi_v3_ctx.repetition_penalty, (int)((g_oosi_v3_ctx.repetition_penalty - (int)g_oosi_v3_ctx.repetition_penalty) * 100.0f));
+                Print(L"  max_tokens     = %d\r\n", g_oosi_v3_ctx.max_tokens);
+                Print(L"  halt_threshold = %d.%02d\r\n\r\n", (int)g_oosi_v3_ctx.halt_threshold, (int)((g_oosi_v3_ctx.halt_threshold - (int)g_oosi_v3_ctx.halt_threshold) * 100.0f));
+            } else {
+                Print(L"\r\nNo SSM model loaded. Use /ssm_load first.\r\n\r\n");
+            }
             continue;
         }
         if (my_strncmp(prompt, "/models", 7) == 0) {

@@ -48,6 +48,7 @@ Le squelette runtime OO expose aussi désormais :
 - `/mind_audit`
 - `/mind_doctor`
 - `/mind_next`
+- `/mind_snapshot`
 - `/mind_ready`
 - `/mind_bootstrap_v1`
 - `/mind_path_v1`
@@ -74,16 +75,18 @@ Le squelette runtime OO expose aussi désormais :
 - alias sémantique `/mind_halt_policy_sync` pour synchroniser le runtime depuis `repl.cfg` uniquement quand nécessaire ;
 - rechargement forcé via `/mind_halt_policy_sync_force` même si le runtime est déjà synchronisé avec `repl.cfg` ;
 - audit dédié via `/mind_halt_policy_audit` pour résumer le runtime, le persistant, l'état de synchronisation et le dernier effet d'application ;
-- audit global via `/mind_audit` pour agréger les audits `halt policy`, `sidecar` et `attach` dans un seul rapport runtime ;
-- guidance corrective via `/mind_doctor` pour séparer les actions sûres auto-corrigeables des suivis manuels à partir de l'état runtime courant ;
+- audit global via `/mind_audit` pour agréger les audits `halt policy`, `sidecar` et `attach` dans un seul rapport runtime, puis exposer la préparation normalisée et `next_action`/`next_reason` ;
+- guidance corrective via `/mind_doctor` pour séparer les actions sûres auto-corrigeables des suivis manuels à partir de l'état runtime courant, puis exposer `next_action` et `next_reason` de manière normalisée ;
 - guidage compact via `/mind_next` pour exposer une seule meilleure action suivante à partir de l'état runtime courant ;
-- verdict binaire via `/mind_ready` pour dire si le chemin runtime V1 est prêt ou non ;
-- amorçage prudent via `/mind_bootstrap_v1` pour appliquer automatiquement les étapes V1 évidentes et sûres, y compris la réutilisation des chemins core/sidecar déjà mémorisés quand ils existent, puis signaler les bloqueurs restants ;
-- chemin minimal via `/mind_path_v1` pour imprimer la séquence V1 recommandée la plus courte depuis l'état runtime courant, avec recours à `/mind_bootstrap_v1` quand c'est le meilleur raccourci ;
+- instantané compact via `/mind_snapshot` pour exposer un état runtime stable en clé=valeur (`format=kv-v1`, ordre fixe des champs), lisible par machine ;
+- verdict binaire via `/mind_ready` pour dire si le chemin runtime V1 est prêt ou non, avec la même action suivante recommandée que `/mind_next` ;
+- amorçage prudent via `/mind_bootstrap_v1` pour appliquer automatiquement les étapes V1 évidentes et sûres, y compris la réutilisation des chemins core/sidecar déjà mémorisés quand ils existent, puis exposer `next_action` et `next_reason` de manière normalisée ;
+- chemin minimal via `/mind_path_v1` pour imprimer la séquence V1 recommandée la plus courte depuis l'état runtime courant, avec recours à `/mind_bootstrap_v1` quand c'est le meilleur raccourci, puis exposer `next_action` et `next_reason` de manière normalisée ;
 - stockage `repl.cfg` via `mind_halt_enabled` et `mind_halt_threshold` ;
 - restauration explicite des valeurs runtime V1 via `/mind_halt_policy_reset` ;
 - visualisation de la divergence éventuelle runtime vs `repl.cfg` via `/mind_status` ;
 - visualisation dans `/mind_status` du mode et de l'effet de la dernière ré-application/synchronisation ;
+- visualisation dans `/mind_status` de la préparation normalisée (`ready`, sous-états) ainsi que de `next_action` et `next_reason` ;
 - affichage explicite de l'écart runtime vs persistant via `/mind_halt_policy_diff` ;
 - pas encore de chargeur sémantique complet des poids/tables OO.
 

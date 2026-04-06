@@ -7,29 +7,6 @@ Part of the [Operating Organism](https://github.com/Djiby-diop/oo-system) ecosys
 
 By Djiby Diop
 
-## 🔥 First real inference on bare metal — April 2026
-
-Mamba-2.8B (64 layers, 2560 d_model, int8 quantized) running directly on UEFI hardware:
-
-```
-> /ssm_infer The future of AI is
-
-[OOSI-v3] Prompt tokens: 6 — generating (SSM recurrent)...
-top5: [bright] [uncertain] [exciting] [not] [unclear]
-
-The future of AI is bright. The future of AI depends on how well
-we use it and responsibly, not just for ourselves but also society
-at large. It's that governments lead by example in ensuring when
-using this technology to improve lives while protecting privacy
-rights as much possible... We need a global
-```
-
-- No OS. No libc. No runtime. Just UEFI + raw hardware.
-- Full Mamba SSM recurrent inference (not transformer attention).
-- Int8 quantized weights (~2.8 GB), loaded directly into memory zones.
-- Custom BPE tokenizer, freestanding C11.
-- Tested on real Lenovo hardware (i5, 8GB RAM).
-
 ## Architectural role
 
 `llm-baremetal` is the **sovereign runtime** of the larger Operating Organism vision.
@@ -60,6 +37,7 @@ Current runtime skeleton commands:
 - `/mind_audit`
 - `/mind_doctor`
 - `/mind_next`
+- `/mind_snapshot`
 - `/mind_ready`
 - `/mind_bootstrap_v1`
 - `/mind_path_v1`
@@ -88,16 +66,18 @@ Current sidecar behavior:
 - exposes `/mind_halt_policy_sync` as a simpler semantic alias for syncing runtime from `repl.cfg` only when needed
 - exposes `/mind_halt_policy_sync_force` to reload runtime from `repl.cfg` even when it is already in sync
 - exposes `/mind_halt_policy_audit` to summarize runtime policy, persisted policy, sync state, and last apply/sync effect
-- exposes `/mind_audit` to aggregate halt-policy, sidecar, and attach audits into one global runtime report
-- exposes `/mind_doctor` to split the next safe corrective sequence into auto-fixable actions vs manual follow-up from current runtime state
+- exposes `/mind_audit` to aggregate halt-policy, sidecar, and attach audits into one global runtime report, then append normalized readiness and next-action fields
+- exposes `/mind_doctor` to split the next safe corrective sequence into auto-fixable actions vs manual follow-up from current runtime state, then emit normalized `next_action` and `next_reason`
 - exposes `/mind_next` to print exactly one best next action from current runtime state
-- exposes `/mind_ready` as a short binary readiness check for the V1 runtime path
-- exposes `/mind_bootstrap_v1` to auto-apply the obvious safe V1 bootstrap steps, including reusing stored core/sidecar requests when available, and then report remaining blockers
-- exposes `/mind_path_v1` to print the shortest recommended V1 startup sequence from the current runtime state, including `/mind_bootstrap_v1` when it is the best shortcut
+- exposes `/mind_snapshot` to print a compact stable key=value machine-readable runtime snapshot (`format=kv-v1`, fixed field order)
+- exposes `/mind_ready` as a short binary readiness check for the V1 runtime path, now with the same recommended next action used by `/mind_next`
+- exposes `/mind_bootstrap_v1` to auto-apply the obvious safe V1 bootstrap steps, including reusing stored core/sidecar requests when available, and then report normalized `next_action` and `next_reason`
+- exposes `/mind_path_v1` to print the shortest recommended V1 startup sequence from the current runtime state, including `/mind_bootstrap_v1` when it is the best shortcut, then emit normalized `next_action` and `next_reason`
 - stores persisted values in `repl.cfg` via `mind_halt_enabled` and `mind_halt_threshold`
 - can restore runtime V1 halt defaults via `/mind_halt_policy_reset`
 - shows whether runtime halt policy is in sync with `repl.cfg` in `/mind_status`
 - shows the mode and effect of the latest apply/sync action in `/mind_status`
+- shows normalized readiness fields plus `next_action` and `next_reason` in `/mind_status`
 - can print explicit runtime vs persisted halt deltas with `/mind_halt_policy_diff`
 - does not yet execute broader sidecar semantics (budgets, tool metadata, richer OO policies)
 
