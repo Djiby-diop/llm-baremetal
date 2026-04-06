@@ -76,6 +76,7 @@
 #include "../ssm/soma_smb.h"
 #include "../ssm/soma_dream.h"
 #include "../ssm/soma_meta.h"
+#include "../ssm/soma_swarm.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -2933,6 +2934,9 @@ static SomaSmbCtx     g_soma_smb;
 static SomaDreamCtx   g_soma_dream;
 // Meta-Evolution: fitness scoring + auto-mutation
 static SomaMetaCtx    g_soma_meta;
+// Swarm Intelligence: N agents voting on each token
+static SomaSwarmCtx    g_soma_swarm;
+static SomaSwarmResult g_soma_swarm_last; // Last vote result (for fitness update)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -6905,6 +6909,9 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_dream [apply]   Run dream cycle (add 'apply' to update DNA)\r\n");
     Print(L"  /soma_meta            Show meta-evolution fitness history\r\n");
     Print(L"  /soma_evolve          Force fitness score + DNA mutation step\r\n");
+    Print(L"  /soma_swarm [0|1]     Enable/disable swarm voting\r\n");
+    Print(L"  /soma_swarm_stats     Show per-agent fitness and vote counts\r\n");
+    Print(L"  /soma_swarm_mode [majority|weighted|confident]  Set consensus mode\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7043,14 +7050,17 @@ static void llmk_repl_no_model_loop(void) {
 
     Print(L"OK: REPL ready (no model). Type /help\r\n");
 
-    // Initialize SomaMind (Router + Digital DNA + SMB + Dream + Meta)
+    // Initialize SomaMind (Router + DNA + SMB + Dream + Meta + Swarm stub)
     soma_router_init(&g_soma_router);
     soma_dna_init_default(&g_soma_dna);
     soma_smb_init(&g_soma_smb);
     soma_dream_init(&g_soma_dream);
     soma_meta_init(&g_soma_meta);
+    // Swarm needs vocab_size — initialized fully on /ssm_load
+    g_soma_swarm.enabled = 0;
+    g_soma_swarm.ready   = 0;
     g_soma_initialized = 1;
-    Print(L"SomaMind: router+DNA+SMB+Dream+Meta initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: router+DNA+SMB+Dream+Meta+Swarm initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7478,6 +7488,63 @@ static void llmk_repl_no_model_loop(void) {
             else
                 Print(L"\r\n[SomaMind] DNA scored (no mutation needed, score=%d%%)\r\n\r\n",
                       (int)(g_soma_meta.best_score * 100.0f));
+            continue;
+        }
+        // ── Swarm commands ───────────────────────────────────────────────
+        if (my_strncmp(prompt, "/soma_swarm_mode", 16) == 0) {
+            const char *arg = prompt + 16;
+            while (*arg == ' ') arg++;
+            if (my_strncmp(arg, "majority", 8) == 0) {
+                g_soma_swarm.mode = SOMA_SWARM_MAJORITY;
+                Print(L"\r\n[Swarm] mode=MAJORITY\r\n\r\n");
+            } else if (my_strncmp(arg, "weighted", 8) == 0) {
+                g_soma_swarm.mode = SOMA_SWARM_WEIGHTED;
+                Print(L"\r\n[Swarm] mode=WEIGHTED\r\n\r\n");
+            } else if (my_strncmp(arg, "confident", 9) == 0) {
+                g_soma_swarm.mode = SOMA_SWARM_CONFIDENT;
+                Print(L"\r\n[Swarm] mode=CONFIDENT\r\n\r\n");
+            } else {
+                Print(L"\r\n[Swarm] current mode=%d  (majority=0 weighted=1 confident=2)\r\n\r\n",
+                      (int)g_soma_swarm.mode);
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_swarm_stats", 17) == 0) {
+            Print(L"\r\n[Swarm] agents=%d mode=%d enabled=%d ready=%d\r\n",
+                  SOMA_SWARM_AGENTS,
+                  (int)g_soma_swarm.mode,
+                  g_soma_swarm.enabled,
+                  g_soma_swarm.ready);
+            for (int ai = 0; ai < SOMA_SWARM_AGENTS; ai++) {
+                const SomaSwarmAgent *ag = &g_soma_swarm.agents[ai];
+                Print(L"  [%d] fitness=%d%% votes=%d temp=%d/100 bias=%d/100\r\n",
+                      ai,
+                      (int)(ag->fitness * 100.0f),
+                      (int)ag->votes_cast,
+                      (int)(ag->dna.temperature_solar * 100.0f),
+                      (int)(ag->dna.cognition_bias * 100.0f));
+            }
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_swarm", 11) == 0) {
+            const char *arg = prompt + 11;
+            while (*arg == ' ') arg++;
+            if (*arg == '0') {
+                g_soma_swarm.enabled = 0;
+                Print(L"\r\n[Swarm] disabled\r\n\r\n");
+            } else if (*arg == '1') {
+                if (!g_soma_swarm.ready) {
+                    Print(L"\r\n[Swarm] not ready — load model first (/ssm_load)\r\n\r\n");
+                } else {
+                    g_soma_swarm.enabled = 1;
+                    Print(L"\r\n[Swarm] enabled (agents=%d mode=%d)\r\n\r\n",
+                          SOMA_SWARM_AGENTS, (int)g_soma_swarm.mode);
+                }
+            } else {
+                Print(L"\r\n[Swarm] status: %s  /soma_swarm [0|1]\r\n\r\n",
+                      g_soma_swarm.enabled ? L"ON" : L"OFF");
+            }
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
@@ -8444,6 +8511,12 @@ static void llmk_repl_no_model_loop(void) {
                     soma_dual_init(&g_soma_dual, g_soma_dual_buf, V3V);
                     Print(L"[SomaMind] Dual Core initialized (vocab=%d)\r\n", V3V);
                 }
+                // SomaMind Swarm (reuses dual_buf — same vocab_size float slice)
+                if (g_soma_dual_buf) {
+                    soma_swarm_init(&g_soma_swarm, &g_soma_dna, g_soma_dual_buf, V3V);
+                    Print(L"[SomaMind] Swarm initialized (%d agents, vocab=%d)\r\n",
+                          SOMA_SWARM_AGENTS, V3V);
+                }
 
                 if (!g_v3_scratch || !g_v3_logits || !g_v3_h_state ||
                     !g_v3_conv_buf || !g_v3_conv_pos || !g_v3_halt_h1 ||
@@ -8792,6 +8865,29 @@ static void llmk_repl_no_model_loop(void) {
                             int conf_pct = (int)(dr.confidence * 100.0f);
                             Print(L"[Dual:%s conf=%d%%]\r\n[OOSI-v3] ", core, conf_pct);
                         }
+                        // Swarm override (if enabled, runs after dual core)
+                        if (g_soma_swarm.enabled && g_soma_swarm.ready) {
+                            SomaSwarmResult sr = soma_swarm_vote(
+                                &g_soma_swarm,
+                                g_oosi_v3_ctx.logits,
+                                g_soma_dual.vocab_size);
+                            g_soma_swarm_last = sr;
+                            r.token = sr.selected_token;
+                            if (n_out == 0) {
+                                // Average agent confidences
+                                float avg_conf = 0.0f;
+                                for (int _ai = 0; _ai < SOMA_SWARM_AGENTS; _ai++)
+                                    avg_conf += sr.agent_confidence[_ai];
+                                avg_conf /= (float)SOMA_SWARM_AGENTS;
+                                soma_first_conf = avg_conf;
+                            }
+                            if (g_boot_verbose && n_out == 0) {
+                                Print(L"[Swarm:mode=%d spread=%d conf=%d%%]\r\n[OOSI-v3] ",
+                                      (int)sr.mode_used,
+                                      sr.vote_spread,
+                                      (int)(sr.agent_confidence[sr.winning_agent] * 100.0f));
+                            }
+                        }
                     } else if (n_out == 0) {
                         // Standard path: capture confidence from logits
                         soma_first_conf = soma_dual_confidence(g_oosi_v3_ctx.logits,
@@ -8886,6 +8982,12 @@ static void llmk_repl_no_model_loop(void) {
                                    soma_first_conf,
                                    gist_ids, glen);
                     soma_smb_tick(&g_soma_smb);
+                    // Swarm: update agent fitness + periodic evolution
+                    if (g_soma_swarm.enabled && g_soma_swarm.ready) {
+                        soma_swarm_update_fitness(&g_soma_swarm, &g_soma_swarm_last, soma_first_conf);
+                        if ((g_soma_smb.turn & 0xF) == 0) // every 16 turns
+                            soma_swarm_evolve(&g_soma_swarm);
+                    }
                     // Meta-cycle: score fitness + auto-mutate DNA if stagnating
                     {
                         int mutated = soma_meta_cycle(&g_soma_meta, &g_soma_dna,
