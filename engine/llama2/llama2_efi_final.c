@@ -77,6 +77,7 @@
 #include "../ssm/soma_dream.h"
 #include "../ssm/soma_meta.h"
 #include "../ssm/soma_swarm.h"
+#include "../ssm/soma_reflex.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -2937,6 +2938,7 @@ static SomaMetaCtx    g_soma_meta;
 // Swarm Intelligence: N agents voting on each token
 static SomaSwarmCtx    g_soma_swarm;
 static SomaSwarmResult g_soma_swarm_last; // Last vote result (for fitness update)
+static SomaReflexCtx   g_soma_reflex;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -6912,6 +6914,8 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_swarm [0|1]     Enable/disable swarm voting\r\n");
     Print(L"  /soma_swarm_stats     Show per-agent fitness and vote counts\r\n");
     Print(L"  /soma_swarm_mode [majority|weighted|confident]  Set consensus mode\r\n");
+    Print(L"  /soma_reflex [0|1]    Enable/disable symbolic math pre-solver\r\n");
+    Print(L"  /soma_reflex_test <expr>  Test reflex scanner on an expression\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7059,8 +7063,9 @@ static void llmk_repl_no_model_loop(void) {
     // Swarm needs vocab_size — initialized fully on /ssm_load
     g_soma_swarm.enabled = 0;
     g_soma_swarm.ready   = 0;
+    soma_reflex_init(&g_soma_reflex);
     g_soma_initialized = 1;
-    Print(L"SomaMind: router+DNA+SMB+Dream+Meta+Swarm initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: router+DNA+SMB+Dream+Meta+Swarm+Reflex initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7544,6 +7549,44 @@ static void llmk_repl_no_model_loop(void) {
             } else {
                 Print(L"\r\n[Swarm] status: %s  /soma_swarm [0|1]\r\n\r\n",
                       g_soma_swarm.enabled ? L"ON" : L"OFF");
+            }
+            continue;
+        }
+        // ── Reflex commands ──────────────────────────────────────────────
+        if (my_strncmp(prompt, "/soma_reflex_test", 17) == 0) {
+            const char *arg = prompt + 17;
+            while (*arg == ' ') arg++;
+            if (*arg) {
+                SomaReflexResult rf = soma_reflex_scan(&g_soma_reflex, arg);
+                if (rf.triggered) {
+                    Print(L"\r\n[Reflex] injection: ");
+                    for (int ri = 0; rf.injection[ri]; ri++)
+                        Print(L"%c", (CHAR16)(unsigned char)rf.injection[ri]);
+                    Print(L"vars_resolved=%d vars_failed=%d\r\n\r\n",
+                          rf.vars_resolved, rf.vars_failed);
+                } else {
+                    Print(L"\r\n[Reflex] no math pattern detected\r\n\r\n");
+                }
+            } else {
+                Print(L"\r\n[Reflex] usage: /soma_reflex_test <expr>\r\n\r\n");
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_reflex", 12) == 0) {
+            const char *arg = prompt + 12;
+            while (*arg == ' ') arg++;
+            if (*arg == '0') {
+                g_soma_reflex.enabled = 0;
+                Print(L"\r\n[Reflex] disabled\r\n\r\n");
+            } else if (*arg == '1') {
+                g_soma_reflex.enabled = 1;
+                Print(L"\r\n[Reflex] enabled\r\n\r\n");
+            } else {
+                Print(L"\r\n[Reflex] status: %s  scans=%d triggers=%d resolved=%d\r\n\r\n",
+                      g_soma_reflex.enabled ? L"ON" : L"OFF",
+                      g_soma_reflex.total_scans,
+                      g_soma_reflex.total_triggers,
+                      g_soma_reflex.total_resolved);
             }
             continue;
         }
@@ -8801,15 +8844,40 @@ static void llmk_repl_no_model_loop(void) {
             }
             // ── end SomaMind Router ──────────────────────────────────────
 
+            // ── SomaMind Reflex: symbolic math pre-solve ──────────────────
+            // Build augmented prompt: [MATH: A=100 B=25 C=35]\n<original>
+            char reflex_prompt[512 + SOMA_REFLEX_INJECT_MAX];
+            const char *infer_text = text;
+            if (g_soma_initialized && g_soma_reflex.enabled) {
+                SomaReflexResult rf = soma_reflex_scan(&g_soma_reflex, text);
+                if (rf.triggered) {
+                    // Prepend injection to prompt
+                    int ip = 0;
+                    for (int ri = 0; ri < rf.injection_len && ip < (int)sizeof(reflex_prompt) - 2; ri++)
+                        reflex_prompt[ip++] = rf.injection[ri];
+                    for (int ti = 0; text[ti] && ip < (int)sizeof(reflex_prompt) - 1; ti++)
+                        reflex_prompt[ip++] = text[ti];
+                    reflex_prompt[ip] = 0;
+                    infer_text = reflex_prompt;
+                    if (g_boot_verbose) {
+                        Print(L"[Reflex] injected: ");
+                        // Print injection (ASCII, first 60 chars)
+                        for (int ri = 0; rf.injection[ri] && ri < 60; ri++)
+                            Print(L"%c", (CHAR16)(unsigned char)rf.injection[ri]);
+                        Print(L"\r\n");
+                    }
+                }
+            }
+
             Print(L"\r\n[OOSI] Input: ");
-            llmk_print_ascii(text);
+            llmk_print_ascii(infer_text);
             Print(L"\r\n[OOSI] Thinking...\r\n");
 
             // ── OOSI v3: full standalone Mamba SSM inference ─────────────
             if (g_oosi_v3_valid) {
                 // Tokenize using v2 tokenizer (shared BPE vocab)
                 int prompt_tokens[512];
-                int prompt_len = llmk_oo_infer_tokenize(text, prompt_tokens, 512);
+                int prompt_len = llmk_oo_infer_tokenize(infer_text, prompt_tokens, 512);
                 if (prompt_len <= 0) {
                     // Fallback: encode raw bytes as token IDs
                     prompt_len = 0;
@@ -9014,7 +9082,7 @@ static void llmk_repl_no_model_loop(void) {
 
             // Tokenize
             int prompt_tokens[256];
-            int prompt_len = llmk_oo_infer_tokenize(text, prompt_tokens, 256);
+            int prompt_len = llmk_oo_infer_tokenize(infer_text, prompt_tokens, 256);
             if (prompt_len <= 0) {
                 Print(L"[OOSI] ERROR: tokenization failed\r\n\r\n");
                 continue;
