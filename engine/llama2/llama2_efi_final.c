@@ -70,6 +70,8 @@
 // OOSI v3 — full standalone Mamba (all weights int8)
 #include "../ssm/oosi_v3_loader.h"
 #include "../ssm/oosi_v3_infer.h"
+#include "../ssm/soma_router.h"
+#include "../ssm/soma_dna.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -2911,6 +2913,12 @@ static int     *g_v3_conv_pos  = NULL;   // [n_layer]                     ≈ 25
 static ssm_f32 *g_v3_halt_h1  = NULL;   // [512]
 static ssm_f32 *g_v3_halt_h2  = NULL;   // [64]
 static ssm_f32 *g_v3_halt_buf  = NULL;   // [halt_d_input + 1]
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── SomaMind globals ─────────────────────────────────────────────────────────
+static SomaRouterCtx  g_soma_router;
+static SomaDNA        g_soma_dna;
+static int            g_soma_initialized = 0;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -6871,6 +6879,11 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /seed <N>             Set RNG seed for reproducible output\r\n");
     Print(L"  /ssm_selftest         Verify tokenizer + model pipeline\r\n");
     Print(L"  /verbose [0|1|2]      Toggle debug verbosity level\r\n");
+    Print(L"\r\n  SomaMind:\r\n");
+    Print(L"  /soma_status          Show router stats + model topology\r\n");
+    Print(L"  /soma_dna             Show Digital DNA parameters\r\n");
+    Print(L"  /soma_mutate [mag]    Mutate DNA (meta-evolution step)\r\n");
+    Print(L"  /soma_route <text>    Test routing decision without inference\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7007,7 +7020,14 @@ static void llmk_repl_no_model_loop(void) {
         if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
     }
 
-    Print(L"OK: REPL ready (no model). Type /help\r\n\r\n");
+    Print(L"OK: REPL ready (no model). Type /help\r\n");
+
+    // Initialize SomaMind (Router + Digital DNA)
+    soma_router_init(&g_soma_router);
+    soma_dna_init_default(&g_soma_dna);
+    g_soma_initialized = 1;
+    Print(L"SomaMind: router+DNA initialized (gen=%d hash=0x%08X)\r\n\r\n",
+          g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
     if (autorun_autostart) {
@@ -7170,6 +7190,134 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n");
             continue;
         }
+
+        // ── SomaMind commands ────────────────────────────────────────────
+        if (my_strncmp(prompt, "/soma_status", 12) == 0) {
+            if (!g_soma_initialized) {
+                soma_router_init(&g_soma_router);
+                soma_dna_init_default(&g_soma_dna);
+                g_soma_initialized = 1;
+            }
+            g_soma_router.external_model_ready = g_oosi_v3_valid ? 1 : 0;
+            Print(L"\r\n[SomaMind Router]\r\n");
+            Print(L"  model_topology:\r\n");
+            Print(L"    internal (SomaMind 16M): %s\r\n",
+                  g_soma_router.soma_model_ready ? L"LOADED" : L"not loaded");
+            Print(L"    external (Mamba 2.8B):   %s\r\n",
+                  g_soma_router.external_model_ready ? L"LOADED" : L"not loaded");
+            Print(L"  routing_stats:\r\n");
+            Print(L"    total=%d reflex=%d internal=%d external=%d\r\n",
+                  g_soma_router.total_routed, g_soma_router.reflex_count,
+                  g_soma_router.internal_count, g_soma_router.external_count);
+            Print(L"  confidence_threshold=");
+            { int th = (int)(g_soma_router.confidence_threshold * 100.0f);
+              Print(L"%d%%\r\n", th); }
+            Print(L"  dna_generation=%d  dna_hash=0x%08X\r\n",
+                  g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_dna", 9) == 0) {
+            if (!g_soma_initialized) {
+                soma_router_init(&g_soma_router);
+                soma_dna_init_default(&g_soma_dna);
+                g_soma_initialized = 1;
+            }
+            Print(L"\r\n[OO Digital DNA]\r\n");
+            Print(L"  magic=0x%08X version=%d generation=%d\r\n",
+                  g_soma_dna.magic, g_soma_dna.version, g_soma_dna.generation);
+            Print(L"  parent_hash=0x%08X\r\n", g_soma_dna.parent_hash);
+            { int cb = (int)(g_soma_dna.cognition_bias * 100.0f);
+              Print(L"  cognition_bias=%d%% (0=Solar/Logic, 100=Lunar/Creative)\r\n", cb); }
+            { int ts = (int)(g_soma_dna.temperature_solar * 100.0f);
+              int tl = (int)(g_soma_dna.temperature_lunar * 100.0f);
+              Print(L"  temp_solar=%d.%02d  temp_lunar=%d.%02d\r\n",
+                    ts/100, ts%100, tl/100, tl%100); }
+            { int ps = (int)(g_soma_dna.top_p_solar * 100.0f);
+              int pl = (int)(g_soma_dna.top_p_lunar * 100.0f);
+              Print(L"  top_p_solar=%d.%02d  top_p_lunar=%d.%02d\r\n",
+                    ps/100, ps%100, pl/100, pl%100); }
+            { int pr = (int)(g_soma_dna.pressure_sensitivity * 100.0f);
+              Print(L"  pressure_sensitivity=%d.%02d\r\n", pr/100, pr%100); }
+            { int lr = (int)(g_soma_dna.learning_rate * 1000.0f);
+              Print(L"  learning_rate=%d.%03d\r\n", lr/1000, lr%1000); }
+            Print(L"  domain_mask=0x%02X\r\n", g_soma_dna.domain_mask);
+            Print(L"  interactions=%d escalations=%d\r\n",
+                  g_soma_dna.total_interactions, g_soma_dna.escalations);
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_mutate", 12) == 0) {
+            if (!g_soma_initialized) {
+                soma_router_init(&g_soma_router);
+                soma_dna_init_default(&g_soma_dna);
+                g_soma_initialized = 1;
+            }
+            float mag = g_soma_dna.learning_rate;
+            int i = 12;
+            while (prompt[i] == ' ') i++;
+            if (prompt[i] >= '0' && prompt[i] <= '9') {
+                unsigned int v = 0;
+                while (prompt[i] >= '0' && prompt[i] <= '9') {
+                    v = v * 10u + (unsigned int)(prompt[i] - '0');
+                    i++;
+                }
+                mag = (float)v / 100.0f;
+            }
+            uint32_t rng = g_oosi_v3_valid ? g_oosi_v3_ctx.rng_state : 0x12345678u;
+            uint32_t old_hash = soma_dna_hash(&g_soma_dna);
+            soma_dna_mutate(&g_soma_dna, &rng, mag);
+            uint32_t new_hash = soma_dna_hash(&g_soma_dna);
+            if (g_oosi_v3_valid) g_oosi_v3_ctx.rng_state = rng;
+            Print(L"\r\n[SomaMind] DNA mutated: gen %d -> %d\r\n",
+                  g_soma_dna.generation - 1, g_soma_dna.generation);
+            { int m = (int)(mag * 100.0f);
+              Print(L"  magnitude=%d%%\r\n", m); }
+            Print(L"  hash 0x%08X -> 0x%08X\r\n\r\n", old_hash, new_hash);
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_route ", 12) == 0) {
+            if (!g_soma_initialized) {
+                soma_router_init(&g_soma_router);
+                soma_dna_init_default(&g_soma_dna);
+                g_soma_initialized = 1;
+            }
+            g_soma_router.external_model_ready = g_oosi_v3_valid ? 1 : 0;
+            const char *text = prompt + 12;
+            int tlen = 0;
+            while (text[tlen]) tlen++;
+            SomaRouteResult rr = soma_route(&g_soma_router, text, tlen);
+            const CHAR16 *rname = L"UNKNOWN";
+            switch (rr.route) {
+                case SOMA_ROUTE_REFLEX:   rname = L"REFLEX";   break;
+                case SOMA_ROUTE_INTERNAL: rname = L"INTERNAL"; break;
+                case SOMA_ROUTE_EXTERNAL: rname = L"EXTERNAL"; break;
+                case SOMA_ROUTE_DUAL:     rname = L"DUAL";     break;
+            }
+            const CHAR16 *dname = L"UNKNOWN";
+            switch (rr.domain) {
+                case SOMA_DOMAIN_SYSTEM:   dname = L"SYSTEM";   break;
+                case SOMA_DOMAIN_POLICY:   dname = L"POLICY";   break;
+                case SOMA_DOMAIN_CHAT:     dname = L"CHAT";     break;
+                case SOMA_DOMAIN_CODE:     dname = L"CODE";     break;
+                case SOMA_DOMAIN_MATH:     dname = L"MATH";     break;
+                case SOMA_DOMAIN_CREATIVE: dname = L"CREATIVE"; break;
+                default: break;
+            }
+            { int cf = (int)(rr.confidence * 100.0f);
+              Print(L"\r\n[SomaMind Route]\r\n  route=%s  domain=%s  confidence=%d%%\r\n",
+                    rname, dname, cf); }
+            if (rr.reflex_response) {
+                Print(L"  reflex_response: ");
+                for (int ri = 0; ri < rr.reflex_response_len; ri++)
+                    Print(L"%c", (CHAR16)rr.reflex_response[ri]);
+                Print(L"\r\n");
+            }
+            Print(L"\r\n");
+            continue;
+        }
+        // ── end SomaMind commands ────────────────────────────────────────
+
         if (my_strncmp(prompt, "/models", 7) == 0) {
             Print(L"\r\nModels (.bin/.gguf):\r\n");
             Print(L"Root:\r\n");
