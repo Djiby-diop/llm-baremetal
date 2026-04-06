@@ -144,13 +144,43 @@ SsmStatus oosi_v3_load(OosiV3Weights *out, const void *buf, uint64_t len) {
     out->lm_head_q8 = (const ssm_q8 *)p;
     p = _adv(p, end, SZ_Q8((uint64_t)V * D), &st);
 
-    // HaltingHead: rest of the buffer
+    // HaltingHead: until NEGA magic or end of buffer
     if (st == SSM_OK && p < end) {
-        out->halt_data  = (const ssm_f32 *)p;
-        out->halt_bytes = (uint32_t)(end - p);
+        // Check if we have a NEGA trailer for precomputed neg_exp_A
+        // The HaltingHead MLP size is known: 512*halt_d + 512 + 64*512 + 64 + 64 + 1
+        // = halt_d*512 + 512 + 32768 + 64 + 64 + 1 = halt_d*512 + 33409 floats
+        // But we parse adaptively: scan for NEGA magic (0x4E454741)
+        int halt_d = (int)out->header.halt_d_input;
+        uint64_t halt_floats = (uint64_t)halt_d * 512 + 512
+                             + (uint64_t)64 * 512 + 64
+                             + 64 + 1;
+        uint64_t halt_size = halt_floats * sizeof(ssm_f32);
+        if ((uint64_t)(end - p) >= halt_size) {
+            out->halt_data  = (const ssm_f32 *)p;
+            out->halt_bytes = (uint32_t)halt_size;
+            p += halt_size;
+        } else {
+            out->halt_data  = (const ssm_f32 *)p;
+            out->halt_bytes = (uint32_t)(end - p);
+            p = end;
+        }
     } else {
         out->halt_data  = NULL;
         out->halt_bytes = 0;
+    }
+
+    // NEGA trailer: precomputed -exp(A_log), magic 0x4E454741
+    out->neg_exp_A_data = NULL;
+    if (st == SSM_OK && p + 4 <= end) {
+        uint32_t nega_magic = _rd32(p);
+        if (nega_magic == 0x4E454741u) {  // "NEGA"
+            p += 4;
+            uint64_t nega_size = (uint64_t)N * Di * S * sizeof(ssm_f32);
+            if ((uint64_t)(end - p) >= nega_size) {
+                out->neg_exp_A_data = (const ssm_f32 *)p;
+                p += nega_size;
+            }
+        }
     }
 
     return st;

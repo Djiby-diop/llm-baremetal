@@ -86,7 +86,12 @@ SsmStatus oosi_v3_gen_ctx_init(
     if (s != SSM_OK) return s;
 
     oosi_v3_gen_ctx_reset(ctx);
-    ctx->neg_exp_A = NULL;  // optional, call oosi_v3_precompute_neg_exp_A after init
+    // Use baked neg_exp_A from binary if available (zero runtime cost)
+    if (w->neg_exp_A_data) {
+        ctx->neg_exp_A = (ssm_f32 *)w->neg_exp_A_data;
+    } else {
+        ctx->neg_exp_A = NULL;  // call oosi_v3_precompute_neg_exp_A after init
+    }
     return SSM_OK;
 }
 
@@ -337,11 +342,14 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
     }
 
     // 5b. Repetition penalty: penalize tokens already generated
+    //     Uses sliding window (last rep_count tokens, max REP_WINDOW).
+    //     Frequency-aware: tokens repeated N times get penalty^N.
     if (ctx->repetition_penalty > 1.0f && ctx->rep_count > 0) {
         ssm_f32 rp = ctx->repetition_penalty;
-        for (int ri = 0; ri < ctx->rep_count && ri < 128; ri++) {
+        // Count frequency of each token in window
+        for (int ri = 0; ri < ctx->rep_count; ri++) {
             int tid = ctx->rep_history[ri];
-            if (tid >= 0 && tid < w->vocab_size) {
+            if (tid >= 2 && tid < w->vocab_size) {
                 if (ctx->logits[tid] > 0.0f)
                     ctx->logits[tid] /= rp;
                 else
@@ -362,9 +370,14 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
                                      ctx->top_p, &ctx->rng_state);
     }
 
-    // Track generated token for repetition penalty
+    // Track generated token for repetition penalty (sliding window)
     if (ctx->rep_count < 128) {
         ctx->rep_history[ctx->rep_count++] = next_token;
+    } else {
+        // Shift window: drop oldest, append newest
+        for (int ri = 0; ri < 127; ri++)
+            ctx->rep_history[ri] = ctx->rep_history[ri + 1];
+        ctx->rep_history[127] = next_token;
     }
 
     // 7. HaltingHead
@@ -398,11 +411,13 @@ int oosi_v3_generate(
     oosi_v3_gen_ctx_reset(ctx);
 
     // Feed prompt (build SSM state, no output)
+    // Don't track prompt tokens in rep_history — only penalize generated tokens
     for (int i = 0; i < prompt_len; i++) {
         oosi_v3_forward_one(ctx, prompt_tokens[i]);
         ctx->tokens_generated--;
     }
     ctx->tokens_generated = 0;
+    ctx->rep_count = 0;  // Clear prompt tokens from rep_history
 
     int last_tok = (prompt_len > 0) ? prompt_tokens[prompt_len - 1] : 1;
 

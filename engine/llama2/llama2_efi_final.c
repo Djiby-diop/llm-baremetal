@@ -7160,7 +7160,11 @@ static void llmk_repl_no_model_loop(void) {
                       g_oosi_v3_weights.d_inner, g_oosi_v3_weights.d_state,
                       g_oosi_v3_weights.vocab_size);
                 Print(L"[selftest] precomputed exp(A): %s\r\n",
-                      g_oosi_v3_ctx.neg_exp_A ? L"YES" : L"no (on-the-fly)");
+                      g_oosi_v3_ctx.neg_exp_A
+                          ? (g_oosi_v3_weights.neg_exp_A_data
+                              ? L"YES (baked in binary)"
+                              : L"YES (runtime)")
+                          : L"no (on-the-fly)");
                 Print(L"[selftest] rng_state=0x%08X\r\n", g_oosi_v3_ctx.rng_state);
             }
             Print(L"\r\n");
@@ -8149,13 +8153,15 @@ static void llmk_repl_no_model_loop(void) {
                 g_oosi_v3_valid = 1;
                 Print(L"[OOSI-v3] OK: full SSM inference ready. Use /ssm_infer <text>\r\n");
 
-                // Precompute -exp(A_log) for all layers (eliminates ~5M expf/token)
-                {
+                // Precompute -exp(A_log) — skip if baked into binary (NEGA trailer)
+                if (g_oosi_v3_ctx.neg_exp_A) {
+                    Print(L"[OOSI-v3] Using baked neg_exp_A from binary (zero runtime cost)\r\n");
+                } else {
                     UINT64 neg_exp_b = (UINT64)V3N * V3Di * V3S * sizeof(ssm_f32);
                     ssm_f32 *neg_exp_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_KV_CACHE, neg_exp_b, 64);
                     if (neg_exp_buf) {
                         oosi_v3_precompute_neg_exp_A(&g_oosi_v3_ctx, neg_exp_buf);
-                        Print(L"[OOSI-v3] Precomputed exp(A_log): %d MB\r\n",
+                        Print(L"[OOSI-v3] Precomputed exp(A_log): %d MB (runtime)\r\n",
                               (int)(neg_exp_b / (1024*1024)));
                     }
                 }

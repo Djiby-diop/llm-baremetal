@@ -101,6 +101,9 @@ typedef struct {
     const ssm_f32 *halt_data;
     uint32_t       halt_bytes;
 
+    // Precomputed -exp(A_log) from NEGA trailer (optional, NULL if absent)
+    const ssm_f32 *neg_exp_A_data;  // [n_layer * d_inner * d_state]
+
     // Source buffer (must stay alive)
     const void    *raw_buf;
     uint64_t       raw_len;
