@@ -133,7 +133,7 @@ int soma_meta_evolve(SomaMetaCtx *ctx,
 
     // Mutation magnitude: small (0.02 - 0.08) to avoid destabilizing
     float mag = 0.02f + 0.06f * ((float)(seed & 0xFF) / 255.0f);
-    soma_dna_mutate(dna, mag);
+    soma_dna_mutate(dna, &seed, mag);
 
     ctx->stagnation_count = 0;  // Reset stagnation counter after mutation
     ctx->mutations_applied++;

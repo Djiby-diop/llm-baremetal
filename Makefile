@@ -75,10 +75,15 @@ METABION_PROFILE_DEFAULT = metabion_profile_default.h
 # Engines IN archives (OO_ENGINE_SRCS or OO_MODULES_SRCS) are excluded to avoid duplicates:
 #   IN OO_ENGINE_SRCS:  evolvion, ghost, dreamion, morphion
 #   IN OO_MODULES_SRCS: neuralfs, collectivion, cellion
+SOMA_OBJS = engine/ssm/soma_router.o engine/ssm/soma_dna.o engine/ssm/soma_dual.o \
+	engine/ssm/soma_smb.o engine/ssm/soma_dream.o engine/ssm/soma_meta.o \
+	engine/ssm/soma_swarm.o engine/ssm/soma_reflex.o engine/ssm/soma_logic.o
+
 REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
 	ssm_infer.o mamba_block.o mamba_weights.o bpe_tokenizer.o \
 	oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o \
+	$(SOMA_OBJS) \
 	oo-modules/djibion-engine/core/djibion.o \
 	oo-modules/diopion-engine/core/diopion.o \
 	oo-modules/diagnostion-engine/core/diagnostion.o \
@@ -254,6 +259,34 @@ oosi_v3_loader.o: engine/ssm/oosi_v3_loader.c engine/ssm/oosi_v3_loader.h engine
 
 oosi_v3_infer.o: engine/ssm/oosi_v3_infer.c engine/ssm/oosi_v3_infer.h engine/ssm/oosi_v3_loader.h
 	$(CC) $(CFLAGS) -c engine/ssm/oosi_v3_infer.c -o oosi_v3_infer.o
+
+# SomaMind modules (Phases A-G)
+engine/ssm/soma_router.o: engine/ssm/soma_router.c engine/ssm/soma_router.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_router.c -o engine/ssm/soma_router.o
+
+engine/ssm/soma_dna.o: engine/ssm/soma_dna.c engine/ssm/soma_dna.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_dna.c -o engine/ssm/soma_dna.o
+
+engine/ssm/soma_dual.o: engine/ssm/soma_dual.c engine/ssm/soma_dual.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_dual.c -o engine/ssm/soma_dual.o
+
+engine/ssm/soma_smb.o: engine/ssm/soma_smb.c engine/ssm/soma_smb.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_smb.c -o engine/ssm/soma_smb.o
+
+engine/ssm/soma_dream.o: engine/ssm/soma_dream.c engine/ssm/soma_dream.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_dream.c -o engine/ssm/soma_dream.o
+
+engine/ssm/soma_meta.o: engine/ssm/soma_meta.c engine/ssm/soma_meta.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_meta.c -o engine/ssm/soma_meta.o
+
+engine/ssm/soma_swarm.o: engine/ssm/soma_swarm.c engine/ssm/soma_swarm.h engine/ssm/soma_dna.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_swarm.c -o engine/ssm/soma_swarm.o
+
+engine/ssm/soma_reflex.o: engine/ssm/soma_reflex.c engine/ssm/soma_reflex.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_reflex.c -o engine/ssm/soma_reflex.o
+
+engine/ssm/soma_logic.o: engine/ssm/soma_logic.c engine/ssm/soma_logic.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_logic.c -o engine/ssm/soma_logic.o
 
 clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
