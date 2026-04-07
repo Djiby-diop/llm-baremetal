@@ -78,7 +78,7 @@ METABION_PROFILE_DEFAULT = metabion_profile_default.h
 SOMA_OBJS = engine/ssm/soma_router.o engine/ssm/soma_dna.o engine/ssm/soma_dual.o \
 	engine/ssm/soma_smb.o engine/ssm/soma_dream.o engine/ssm/soma_meta.o \
 	engine/ssm/soma_swarm.o engine/ssm/soma_reflex.o engine/ssm/soma_logic.o \
-	engine/ssm/soma_memory.o
+	engine/ssm/soma_memory.o engine/ssm/soma_journal.o
 
 REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
@@ -291,6 +291,9 @@ engine/ssm/soma_logic.o: engine/ssm/soma_logic.c engine/ssm/soma_logic.h
 
 engine/ssm/soma_memory.o: engine/ssm/soma_memory.c engine/ssm/soma_memory.h
 	$(CC) $(CFLAGS) -c engine/ssm/soma_memory.c -o engine/ssm/soma_memory.o
+
+engine/ssm/soma_journal.o: engine/ssm/soma_journal.c engine/ssm/soma_journal.h engine/ssm/soma_memory.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_journal.c -o engine/ssm/soma_journal.o
 
 clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)

@@ -80,6 +80,7 @@
 #include "../ssm/soma_reflex.h"
 #include "../ssm/soma_logic.h"
 #include "../ssm/soma_memory.h"
+#include "../ssm/soma_journal.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -3097,6 +3098,9 @@ static SomaSwarmResult g_soma_swarm_last; // Last vote result (for fitness updat
 static SomaReflexCtx   g_soma_reflex;
 static SomaLogicCtx    g_soma_logic;
 static SomaMemCtx      g_soma_memory;
+// Phase I: persistent journal (autosave counter)
+static unsigned int    g_soma_journal_total_turns = 0;  // cumulative across sessions
+static int             g_soma_journal_turns_since_save = 0;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -7079,6 +7083,10 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_memory [0|1]    Enable/disable session memory reflex\r\n");
     Print(L"  /soma_memory_stats    Show session memory ring buffer stats\r\n");
     Print(L"  /soma_memory_test <prompt>  Test memory scan on a prompt\r\n");
+    Print(L"  /soma_journal_save    Force-save session journal to soma_journal.bin\r\n");
+    Print(L"  /soma_journal_load    Reload journal from disk into memory buffer\r\n");
+    Print(L"  /soma_journal_clear   Erase soma_journal.bin (fresh start)\r\n");
+    Print(L"  /soma_journal_stats   Show journal file stats (turns, sessions, entries)\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7230,8 +7238,22 @@ static void llmk_repl_no_model_loop(void) {
     soma_reflex_init(&g_soma_reflex);
     soma_logic_init(&g_soma_logic);
     soma_memory_init(&g_soma_memory);
+    // Phase I: load persistent journal → pre-populate ring buffer
+    if (g_root) {
+        unsigned int prev_turns = 0;
+        int jloaded = soma_journal_load(&g_soma_memory, g_root, &prev_turns);
+        if (jloaded > 0) {
+            g_soma_journal_total_turns = prev_turns;
+            Print(L"[SomaJournal] Loaded %d entries from disk (total_turns=%d, sessions=%d)\r\n",
+                  jloaded, (int)prev_turns, g_soma_memory.boot_count);
+        } else if (jloaded == -1) {
+            Print(L"[SomaJournal] No journal file found (first boot)\r\n");
+        } else {
+            Print(L"[SomaJournal] WARNING: journal corrupt or unreadable\r\n");
+        }
+    }
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-H initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-I initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7870,6 +7892,58 @@ static void llmk_repl_no_model_loop(void) {
                       g_soma_memory.count, SOMA_MEM_MAX_ENTRIES,
                       g_soma_memory.total_triggers);
             }
+            continue;
+        }
+        // ── Phase I: Journal commands ────────────────────────────────────
+        if (my_strncmp(prompt, "/soma_journal_save", 18) == 0) {
+            if (!g_root) { Print(L"\r\n[Journal] ERROR: no EFI root\r\n\r\n"); continue; }
+            int n = soma_journal_save(&g_soma_memory, g_root, g_soma_journal_total_turns);
+            if (n >= 0)
+                Print(L"\r\n[Journal] Saved %d entries to soma_journal.bin\r\n\r\n", n);
+            else
+                Print(L"\r\n[Journal] ERROR: save failed\r\n\r\n");
+            g_soma_journal_turns_since_save = 0;
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_journal_load", 18) == 0) {
+            if (!g_root) { Print(L"\r\n[Journal] ERROR: no EFI root\r\n\r\n"); continue; }
+            unsigned int prev = 0;
+            int n = soma_journal_load(&g_soma_memory, g_root, &prev);
+            if (n >= 0) {
+                g_soma_journal_total_turns = prev;
+                Print(L"\r\n[Journal] Loaded %d entries (total_turns=%d, sessions=%d)\r\n\r\n",
+                      n, (int)prev, g_soma_memory.boot_count);
+            } else if (n == -1) {
+                Print(L"\r\n[Journal] No file found\r\n\r\n");
+            } else {
+                Print(L"\r\n[Journal] ERROR: corrupt or unreadable\r\n\r\n");
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_journal_clear", 19) == 0) {
+            if (!g_root) { Print(L"\r\n[Journal] ERROR: no EFI root\r\n\r\n"); continue; }
+            int r = soma_journal_clear(g_root);
+            g_soma_journal_total_turns = 0;
+            g_soma_journal_turns_since_save = 0;
+            Print(r == 0 ? L"\r\n[Journal] Cleared\r\n\r\n"
+                         : L"\r\n[Journal] ERROR: clear failed\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_journal_stats", 19) == 0) {
+            Print(L"\r\n[Journal] Runtime: total_turns=%d  turns_since_save=%d  autosave_every=%d\r\n",
+                  (int)g_soma_journal_total_turns,
+                  g_soma_journal_turns_since_save,
+                  SOMA_JOURNAL_AUTOSAVE_EVERY);
+            if (g_root) {
+                SomaJournalStats js;
+                int r = soma_journal_read_stats(g_root, &js);
+                if (r == 0)
+                    Print(L"[Journal] Disk:    entries=%d  total_turns=%d  sessions=%d\r\n",
+                          js.loaded, js.total_turns, js.boot_count);
+                else
+                    Print(L"[Journal] Disk:    no file (or unreadable)\r\n");
+            }
+            Print(L"\r\n");
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
@@ -9430,6 +9504,17 @@ static void llmk_repl_no_model_loop(void) {
                         }
                         resp_summary[rs] = 0;
                         soma_memory_record(&g_soma_memory, text, resp_summary);
+                        // Phase I: autosave journal every N turns
+                        g_soma_journal_total_turns++;
+                        g_soma_journal_turns_since_save++;
+                        if (g_root && g_soma_journal_turns_since_save >= SOMA_JOURNAL_AUTOSAVE_EVERY) {
+                            int jsaved = soma_journal_save(&g_soma_memory, g_root,
+                                                           g_soma_journal_total_turns);
+                            g_soma_journal_turns_since_save = 0;
+                            if (g_boot_verbose)
+                                Print(L"[SomaJournal] Auto-saved %d entries (total=%d)\r\n",
+                                      jsaved, (int)g_soma_journal_total_turns);
+                        }
                     }
                 }
                 continue;
