@@ -87,6 +87,8 @@
 #include "../ssm/soma_session.h"
 #include "../ssm/soma_dna_persist.h"
 #include "../ssm/soma_dna_sampler.h"
+#include "../ssm/soma_spec.h"
+#include "../ssm/soma_swarm_net.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -1121,7 +1123,7 @@ static void llmk_mind_print_snapshot(int strict_mode) {
 
     if (!strict_mode) Print(L"\r\n[MindSnapshot]\r\n");
     Print(L"%sformat=kv-v1\r\n", prefix);
-    Print(L"%sschema=llmk-mind-snapshot-v3\r\n", prefix);
+    Print(L"%sschema=llmk-mind-snapshot-v4\r\n", prefix);
     Print(L"%sfield_order=fixed\r\n", prefix);
     Print(L"%sstrict=%d\r\n", prefix, strict_mode ? 1 : 0);
     Print(L"%sidentity=oo-somamind-core-primary\r\n", prefix);
@@ -1141,6 +1143,28 @@ static void llmk_mind_print_snapshot(int strict_mode) {
     Print(L"%sattach_kind=", prefix); llmk_print_ascii(g_mind_runtime_state.attach_kind[0] ? g_mind_runtime_state.attach_kind : "attach-model"); Print(L"\r\n");
     Print(L"%sattach_format=", prefix); llmk_print_ascii(g_mind_runtime_state.attach_format[0] ? g_mind_runtime_state.attach_format : "unknown"); Print(L"\r\n");
     Print(L"%sattach_validation=", prefix); llmk_print_ascii(g_mind_runtime_state.attach_last_validation[0] ? g_mind_runtime_state.attach_last_validation : "not-recorded"); Print(L"\r\n");
+        Print(L"%sattach_policy_external_cfg_temp=%d.%03d\r\n", prefix,
+            g_attach_policy_external_cfg.temperature_milli / 1000,
+            g_attach_policy_external_cfg.temperature_milli % 1000);
+        Print(L"%sattach_policy_external_cfg_top_p=%d.%03d\r\n", prefix,
+            g_attach_policy_external_cfg.top_p_milli / 1000,
+            g_attach_policy_external_cfg.top_p_milli % 1000);
+        Print(L"%sattach_policy_external_cfg_rep=%d.%03d\r\n", prefix,
+            g_attach_policy_external_cfg.repetition_penalty_milli / 1000,
+            g_attach_policy_external_cfg.repetition_penalty_milli % 1000);
+        Print(L"%sattach_policy_external_cfg_max_tokens=%d\r\n", prefix,
+            g_attach_policy_external_cfg.max_tokens);
+        Print(L"%sattach_policy_dual_cfg_temp=%d.%03d\r\n", prefix,
+            g_attach_policy_dual_cfg.temperature_milli / 1000,
+            g_attach_policy_dual_cfg.temperature_milli % 1000);
+        Print(L"%sattach_policy_dual_cfg_top_p=%d.%03d\r\n", prefix,
+            g_attach_policy_dual_cfg.top_p_milli / 1000,
+            g_attach_policy_dual_cfg.top_p_milli % 1000);
+        Print(L"%sattach_policy_dual_cfg_rep=%d.%03d\r\n", prefix,
+            g_attach_policy_dual_cfg.repetition_penalty_milli / 1000,
+            g_attach_policy_dual_cfg.repetition_penalty_milli % 1000);
+        Print(L"%sattach_policy_dual_cfg_max_tokens=%d\r\n", prefix,
+            g_attach_policy_dual_cfg.max_tokens);
         Print(L"%sattach_policy_external_active=%d\r\n", prefix, attach_external_policy.active);
         Print(L"%sattach_policy_external_applied=%d\r\n", prefix, attach_external_policy.applied);
         Print(L"%sattach_policy_external_temp=%d.%03d\r\n", prefix,
@@ -3150,6 +3174,11 @@ static SomaCortexCtx   g_soma_cortex;
 static SomaWardenCtx   g_soma_warden;
 // Phase N: session fitness tracker (scoring + DNA evolution)
 static SomaSessionCtx  g_soma_session;
+// Phase W: speculative decoding
+static SomaSpecCtx     g_soma_spec;
+static ssm_f32        *g_soma_spec_buf = 0;
+// Phase Y: distributed swarm net (multi-instance peer consensus)
+static SomaSwarmNetCtx g_soma_swarm_net;
 // ─────────────────────────────────────────────────────────────────────────────
 
 typedef struct {
@@ -3161,6 +3190,13 @@ typedef struct {
 } LlmkAttachRoutePolicyState;
 
 typedef struct {
+    int temperature_milli;
+    int top_p_milli;
+    int repetition_penalty_milli;
+    int max_tokens;
+} LlmkAttachRoutePolicyConfig;
+
+typedef struct {
     int active;
     int applied;
     int temperature_milli;
@@ -3168,6 +3204,9 @@ typedef struct {
     int repetition_penalty_milli;
     int max_tokens;
 } LlmkAttachRoutePolicyPreview;
+
+static LlmkAttachRoutePolicyConfig g_attach_policy_external_cfg = { 780, 890, 1120, 144 };
+static LlmkAttachRoutePolicyConfig g_attach_policy_dual_cfg = { 840, 920, 1080, 176 };
 
 static const CHAR16 *llmk_soma_route_name_wide(SomaRoute route) {
     switch (route) {
@@ -3177,6 +3216,131 @@ static const CHAR16 *llmk_soma_route_name_wide(SomaRoute route) {
         case SOMA_ROUTE_DUAL: return L"DUAL";
         default: return L"UNKNOWN";
     }
+}
+
+static int llmk_attach_route_policy_parse_route(const char *s, SomaRoute *out_route) {
+    if (!s || !out_route) return 0;
+    if (llmk_ascii_streq(s, "external")) {
+        *out_route = SOMA_ROUTE_EXTERNAL;
+        return 1;
+    }
+    if (llmk_ascii_streq(s, "dual")) {
+        *out_route = SOMA_ROUTE_DUAL;
+        return 1;
+    }
+    return 0;
+}
+
+static LlmkAttachRoutePolicyConfig *llmk_attach_route_policy_config_slot(SomaRoute route) {
+    if (route == SOMA_ROUTE_EXTERNAL) return &g_attach_policy_external_cfg;
+    if (route == SOMA_ROUTE_DUAL) return &g_attach_policy_dual_cfg;
+    return NULL;
+}
+
+static void llmk_attach_route_policy_get_default(SomaRoute route, LlmkAttachRoutePolicyConfig *out) {
+    LlmkAttachRoutePolicyConfig cfg;
+    SetMem(&cfg, sizeof(cfg), 0);
+    if (route == SOMA_ROUTE_EXTERNAL) {
+        cfg.temperature_milli = 780;
+        cfg.top_p_milli = 890;
+        cfg.repetition_penalty_milli = 1120;
+        cfg.max_tokens = 144;
+    } else if (route == SOMA_ROUTE_DUAL) {
+        cfg.temperature_milli = 840;
+        cfg.top_p_milli = 920;
+        cfg.repetition_penalty_milli = 1080;
+        cfg.max_tokens = 176;
+    }
+    if (out) *out = cfg;
+}
+
+static void llmk_attach_route_policy_reset(SomaRoute route) {
+    LlmkAttachRoutePolicyConfig cfg;
+    LlmkAttachRoutePolicyConfig *slot = llmk_attach_route_policy_config_slot(route);
+    if (!slot) return;
+    llmk_attach_route_policy_get_default(route, &cfg);
+    *slot = cfg;
+}
+
+static void llmk_attach_route_policy_print_profile(const CHAR16 *label, SomaRoute route) {
+    LlmkAttachRoutePolicyConfig *slot = llmk_attach_route_policy_config_slot(route);
+    LlmkAttachRoutePolicyPreview preview;
+    if (!slot) return;
+    llmk_attach_route_policy_preview(route, &preview);
+    Print(L"    %s cfg=temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d\r\n",
+          label,
+          slot->temperature_milli / 1000,
+          slot->temperature_milli % 1000,
+          slot->top_p_milli / 1000,
+          slot->top_p_milli % 1000,
+          slot->repetition_penalty_milli / 1000,
+          slot->repetition_penalty_milli % 1000,
+          slot->max_tokens);
+    Print(L"      preview active=%d applied=%d temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d\r\n",
+          preview.active,
+          preview.applied,
+          preview.temperature_milli / 1000,
+          preview.temperature_milli % 1000,
+          preview.top_p_milli / 1000,
+          preview.top_p_milli % 1000,
+          preview.repetition_penalty_milli / 1000,
+          preview.repetition_penalty_milli % 1000,
+          preview.max_tokens);
+}
+
+static void llmk_attach_route_policy_print_status(void) {
+    Print(L"\r\n[AttachPolicy]\r\n");
+    Print(L"  scope=runtime-route-policy\r\n");
+    Print(L"  attach_active=%d format=", g_mind_runtime_state.attach_active);
+    llmk_print_ascii(g_mind_runtime_state.attach_format[0] ? g_mind_runtime_state.attach_format : "unknown");
+    Print(L"\r\n");
+    llmk_attach_route_policy_print_profile(L"external", SOMA_ROUTE_EXTERNAL);
+    llmk_attach_route_policy_print_profile(L"dual", SOMA_ROUTE_DUAL);
+    Print(L"\r\n");
+}
+
+static void llmk_attach_route_policy_format_milli_ascii(char *out, int out_cap, int milli) {
+    if (!out || out_cap <= 0) return;
+    out[0] = 0;
+    if (milli < 0) milli = 0;
+    if (milli > 5000) milli = 5000;
+
+    int op = 0;
+    llmk_ascii_append_u64(out, out_cap, &op, (UINT64)(milli / 1000));
+    llmk_ascii_append_char(out, out_cap, &op, '.');
+    llmk_ascii_append_char(out, out_cap, &op, (char)('0' + ((milli / 100) % 10)));
+    llmk_ascii_append_char(out, out_cap, &op, (char)('0' + ((milli / 10) % 10)));
+    llmk_ascii_append_char(out, out_cap, &op, (char)('0' + (milli % 10)));
+}
+
+static EFI_STATUS llmk_attach_route_policy_persist_best_effort(void) {
+    char buf[32];
+    EFI_STATUS st;
+
+    llmk_attach_route_policy_format_milli_ascii(buf, (int)sizeof(buf), g_attach_policy_external_cfg.temperature_milli);
+    st = llmk_repl_cfg_set_kv_best_effort("attach_policy_external_temp", buf);
+    if (EFI_ERROR(st)) return st;
+    llmk_attach_route_policy_format_milli_ascii(buf, (int)sizeof(buf), g_attach_policy_external_cfg.top_p_milli);
+    st = llmk_repl_cfg_set_kv_best_effort("attach_policy_external_top_p", buf);
+    if (EFI_ERROR(st)) return st;
+    llmk_attach_route_policy_format_milli_ascii(buf, (int)sizeof(buf), g_attach_policy_external_cfg.repetition_penalty_milli);
+    st = llmk_repl_cfg_set_kv_best_effort("attach_policy_external_rep", buf);
+    if (EFI_ERROR(st)) return st;
+    llmk_ascii_from_i32(buf, (int)sizeof(buf), g_attach_policy_external_cfg.max_tokens);
+    st = llmk_repl_cfg_set_kv_best_effort("attach_policy_external_max_tokens", buf);
+    if (EFI_ERROR(st)) return st;
+
+    llmk_attach_route_policy_format_milli_ascii(buf, (int)sizeof(buf), g_attach_policy_dual_cfg.temperature_milli);
+    st = llmk_repl_cfg_set_kv_best_effort("attach_policy_dual_temp", buf);
+    if (EFI_ERROR(st)) return st;
+    llmk_attach_route_policy_format_milli_ascii(buf, (int)sizeof(buf), g_attach_policy_dual_cfg.top_p_milli);
+    st = llmk_repl_cfg_set_kv_best_effort("attach_policy_dual_top_p", buf);
+    if (EFI_ERROR(st)) return st;
+    llmk_attach_route_policy_format_milli_ascii(buf, (int)sizeof(buf), g_attach_policy_dual_cfg.repetition_penalty_milli);
+    st = llmk_repl_cfg_set_kv_best_effort("attach_policy_dual_rep", buf);
+    if (EFI_ERROR(st)) return st;
+    llmk_ascii_from_i32(buf, (int)sizeof(buf), g_attach_policy_dual_cfg.max_tokens);
+    return llmk_repl_cfg_set_kv_best_effort("attach_policy_dual_max_tokens", buf);
 }
 
 static void llmk_attach_route_policy_preview(SomaRoute route, LlmkAttachRoutePolicyPreview *out) {
@@ -3199,10 +3363,11 @@ static void llmk_attach_route_policy_preview(SomaRoute route, LlmkAttachRoutePol
     preview.max_tokens = g_oosi_v3_ctx.max_tokens;
 
     {
-        int target_temp = (route == SOMA_ROUTE_DUAL) ? 840 : 780;
-        int target_top_p = (route == SOMA_ROUTE_DUAL) ? 920 : 890;
-        int target_rep = (route == SOMA_ROUTE_DUAL) ? 1080 : 1120;
-        int target_max_tokens = (route == SOMA_ROUTE_DUAL) ? 176 : 144;
+        LlmkAttachRoutePolicyConfig *cfg = llmk_attach_route_policy_config_slot(route);
+        int target_temp = cfg ? cfg->temperature_milli : 0;
+        int target_top_p = cfg ? cfg->top_p_milli : 0;
+        int target_rep = cfg ? cfg->repetition_penalty_milli : 0;
+        int target_max_tokens = cfg ? cfg->max_tokens : 0;
         int orig_temp = preview.temperature_milli;
         int orig_top_p = preview.top_p_milli;
         int orig_rep = preview.repetition_penalty_milli;
@@ -7202,6 +7367,7 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /mind_path_v1  Print the minimal recommended V1 startup path\r\n");
     Print(L"  /oo_sidecar_audit  Audit the registered OOSS sidecar state and readiness\r\n");
     Print(L"  /attach_audit  Audit the registered attached model validation state and role\r\n");
+    Print(L"  /attach_policy [status|reset|<route> <temp> <top_p> <rep> <max_tokens>]  Configure attach route policy\r\n");
     Print(L"  /mind_halt_policy_reset  Restore the V1 runtime halt policy defaults\r\n");
     Print(L"  /mind_halt_policy_diff  Compare runtime halt policy vs repl.cfg\r\n");
     Print(L"  /oo_sidecar <file>    Register an OO sidecar extension (future OOSS path)\r\n");
@@ -7234,6 +7400,8 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_meta            Show meta-evolution fitness history\r\n");
     Print(L"  /soma_evolve          Force fitness score + DNA mutation step\r\n");
     Print(L"  /multireal [on|off|status]  3-way token selection (solar/lunar/argmax)\r\n");
+    Print(L"  /specdecode [on|off|status|threshold <x>]  Speculative decoding (Phase W)\r\n");
+    Print(L"  /swarm_net [on|off|status|peer <id>|addr <hex>]  Distributed peer consensus (Phase Y)\r\n");
     Print(L"  /soma_swarm [0|1]     Enable/disable swarm voting\r\n");
     Print(L"  /soma_swarm_stats     Show per-agent fitness and vote counts\r\n");
     Print(L"  /soma_swarm_mode [majority|weighted|confident]  Set consensus mode\r\n");
@@ -7390,6 +7558,62 @@ static void llmk_repl_no_model_loop(void) {
                             if (v > 1.0f) v = 1.0f;
                             g_mind_runtime_halt_threshold = v;
                         }
+                    } else if (my_strncmp(key, "attach_policy_external_temp", 27) == 0 && key[27] == 0) {
+                        float v = 0.0f;
+                        if (llmk_cfg_parse_f32(val, &v)) {
+                            if (v < 0.10f) v = 0.10f;
+                            if (v > 5.0f) v = 5.0f;
+                            g_attach_policy_external_cfg.temperature_milli = (int)(v * 1000.0f + 0.5f);
+                        }
+                    } else if (my_strncmp(key, "attach_policy_external_top_p", 28) == 0 && key[28] == 0) {
+                        float v = 0.0f;
+                        if (llmk_cfg_parse_f32(val, &v)) {
+                            if (v < 0.0f) v = 0.0f;
+                            if (v > 1.0f) v = 1.0f;
+                            g_attach_policy_external_cfg.top_p_milli = (int)(v * 1000.0f + 0.5f);
+                        }
+                    } else if (my_strncmp(key, "attach_policy_external_rep", 26) == 0 && key[26] == 0) {
+                        float v = 0.0f;
+                        if (llmk_cfg_parse_f32(val, &v)) {
+                            if (v < 1.0f) v = 1.0f;
+                            if (v > 3.0f) v = 3.0f;
+                            g_attach_policy_external_cfg.repetition_penalty_milli = (int)(v * 1000.0f + 0.5f);
+                        }
+                    } else if (my_strncmp(key, "attach_policy_external_max_tokens", 33) == 0 && key[33] == 0) {
+                        int v = 0;
+                        if (llmk_cfg_parse_i32(val, &v)) {
+                            if (v < 1) v = 1;
+                            if (v > 512) v = 512;
+                            g_attach_policy_external_cfg.max_tokens = v;
+                        }
+                    } else if (my_strncmp(key, "attach_policy_dual_temp", 23) == 0 && key[23] == 0) {
+                        float v = 0.0f;
+                        if (llmk_cfg_parse_f32(val, &v)) {
+                            if (v < 0.10f) v = 0.10f;
+                            if (v > 5.0f) v = 5.0f;
+                            g_attach_policy_dual_cfg.temperature_milli = (int)(v * 1000.0f + 0.5f);
+                        }
+                    } else if (my_strncmp(key, "attach_policy_dual_top_p", 24) == 0 && key[24] == 0) {
+                        float v = 0.0f;
+                        if (llmk_cfg_parse_f32(val, &v)) {
+                            if (v < 0.0f) v = 0.0f;
+                            if (v > 1.0f) v = 1.0f;
+                            g_attach_policy_dual_cfg.top_p_milli = (int)(v * 1000.0f + 0.5f);
+                        }
+                    } else if (my_strncmp(key, "attach_policy_dual_rep", 22) == 0 && key[22] == 0) {
+                        float v = 0.0f;
+                        if (llmk_cfg_parse_f32(val, &v)) {
+                            if (v < 1.0f) v = 1.0f;
+                            if (v > 3.0f) v = 3.0f;
+                            g_attach_policy_dual_cfg.repetition_penalty_milli = (int)(v * 1000.0f + 0.5f);
+                        }
+                    } else if (my_strncmp(key, "attach_policy_dual_max_tokens", 29) == 0 && key[29] == 0) {
+                        int v = 0;
+                        if (llmk_cfg_parse_i32(val, &v)) {
+                            if (v < 1) v = 1;
+                            if (v > 512) v = 512;
+                            g_attach_policy_dual_cfg.max_tokens = v;
+                        }
                     }
                 }
 
@@ -7451,6 +7675,11 @@ static void llmk_repl_no_model_loop(void) {
     soma_warden_init(&g_soma_warden);
     // Phase N: init session fitness tracker
     soma_session_init(&g_soma_session);
+    // Phase W: init speculative decoding (buf allocated on /ssm_load)
+    soma_spec_init(&g_soma_spec, 0, 0);
+    g_soma_spec_buf = 0;
+    // Phase Y: init distributed swarm net (peer_id=0, no fixed addr — single instance)
+    soma_swarm_net_init(&g_soma_swarm_net, 0, 0ULL, 0);
     // Phase P: enable immunion in record mode (logs threat patterns; no auto-react)
     immunion_set_mode(&g_immunion, IMMUNION_MODE_RECORD);
     // Phase R: enable symbion in watch mode (feeds performance samples)
@@ -7458,7 +7687,7 @@ static void llmk_repl_no_model_loop(void) {
     // Phase S: enable pheromion in trace mode (tracks hot domain/route paths)
     pheromion_set_mode(&g_pheromion, PHEROMION_MODE_TRACE);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-W initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-Z initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7558,10 +7787,126 @@ static void llmk_repl_no_model_loop(void) {
                 Print(L"  max_tokens     = %d\r\n", g_oosi_v3_ctx.max_tokens);
                 Print(L"  halt_threshold = %d.%02d\r\n", (int)g_oosi_v3_ctx.halt_threshold, (int)((g_oosi_v3_ctx.halt_threshold - (int)g_oosi_v3_ctx.halt_threshold) * 100.0f));
                 Print(L"  rng_state      = 0x%08X\r\n\r\n", g_oosi_v3_ctx.rng_state);
+                llmk_attach_route_policy_print_status();
             } else {
                 Print(L"\r\nNo SSM model loaded. Use /ssm_load first.\r\n\r\n");
             }
             continue;
+        }
+        if (my_strncmp(prompt, "/attach_policy", 14) == 0) {
+            const char *arg = prompt + 14;
+            EFI_STATUS persist_st = EFI_SUCCESS;
+            while (*arg == ' ' || *arg == '\t') arg++;
+            if (!arg[0] || my_strcmp(arg, "status") == 0) {
+                llmk_attach_route_policy_print_status();
+                continue;
+            }
+            if (my_strncmp(arg, "reset", 5) == 0 && (arg[5] == 0 || arg[5] == ' ' || arg[5] == '\t')) {
+                SomaRoute route = SOMA_ROUTE_EXTERNAL;
+                const char *route_arg = arg + 5;
+                while (*route_arg == ' ' || *route_arg == '\t') route_arg++;
+                if (!route_arg[0]) {
+                    llmk_attach_route_policy_reset(SOMA_ROUTE_EXTERNAL);
+                    llmk_attach_route_policy_reset(SOMA_ROUTE_DUAL);
+                    persist_st = llmk_attach_route_policy_persist_best_effort();
+                    Print(L"\r\n[AttachPolicy] reset routes=external,dual");
+                    if (EFI_ERROR(persist_st)) {
+                        Print(L" (persist=warn status=%r)", persist_st);
+                    }
+                    Print(L"\r\n\r\n");
+                    continue;
+                }
+                if (!llmk_attach_route_policy_parse_route(route_arg, &route)) {
+                    Print(L"\r\nUsage: /attach_policy reset [external|dual]\r\n\r\n");
+                    continue;
+                }
+                llmk_attach_route_policy_reset(route);
+                persist_st = llmk_attach_route_policy_persist_best_effort();
+                Print(L"\r\n[AttachPolicy] reset route=%s", llmk_soma_route_name_wide(route));
+                if (EFI_ERROR(persist_st)) {
+                    Print(L" (persist=warn status=%r)", persist_st);
+                }
+                Print(L"\r\n\r\n");
+                continue;
+            }
+            {
+                char route_buf[16];
+                int ri = 0;
+                SomaRoute route = SOMA_ROUTE_EXTERNAL;
+                LlmkAttachRoutePolicyConfig *slot = NULL;
+                float temp = 0.0f;
+                float top_p = 0.0f;
+                float rep = 0.0f;
+                int max_tokens = 0;
+                while (arg[ri] && arg[ri] != ' ' && arg[ri] != '\t' && ri + 1 < (int)sizeof(route_buf)) {
+                    route_buf[ri] = arg[ri];
+                    ri++;
+                }
+                route_buf[ri] = 0;
+                if (!llmk_attach_route_policy_parse_route(route_buf, &route)) {
+                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    continue;
+                }
+                arg += ri;
+                while (*arg == ' ' || *arg == '\t') arg++;
+                if (!llmk_cfg_parse_f32(arg, &temp)) {
+                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    continue;
+                }
+                while (*arg && *arg != ' ' && *arg != '\t') arg++;
+                while (*arg == ' ' || *arg == '\t') arg++;
+                if (!llmk_cfg_parse_f32(arg, &top_p)) {
+                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    continue;
+                }
+                while (*arg && *arg != ' ' && *arg != '\t') arg++;
+                while (*arg == ' ' || *arg == '\t') arg++;
+                if (!llmk_cfg_parse_f32(arg, &rep)) {
+                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    continue;
+                }
+                while (*arg && *arg != ' ' && *arg != '\t') arg++;
+                while (*arg == ' ' || *arg == '\t') arg++;
+                if (!llmk_cfg_parse_i32(arg, &max_tokens)) {
+                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    continue;
+                }
+
+                if (temp < 0.10f) temp = 0.10f;
+                if (temp > 5.0f) temp = 5.0f;
+                if (top_p < 0.0f) top_p = 0.0f;
+                if (top_p > 1.0f) top_p = 1.0f;
+                if (rep < 1.0f) rep = 1.0f;
+                if (rep > 3.0f) rep = 3.0f;
+                if (max_tokens < 1) max_tokens = 1;
+                if (max_tokens > 512) max_tokens = 512;
+
+                slot = llmk_attach_route_policy_config_slot(route);
+                if (!slot) {
+                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    continue;
+                }
+                slot->temperature_milli = (int)(temp * 1000.0f + 0.5f);
+                slot->top_p_milli = (int)(top_p * 1000.0f + 0.5f);
+                slot->repetition_penalty_milli = (int)(rep * 1000.0f + 0.5f);
+                slot->max_tokens = max_tokens;
+                persist_st = llmk_attach_route_policy_persist_best_effort();
+
+                Print(L"\r\n[AttachPolicy] route=%s temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d",
+                      llmk_soma_route_name_wide(route),
+                      slot->temperature_milli / 1000,
+                      slot->temperature_milli % 1000,
+                      slot->top_p_milli / 1000,
+                      slot->top_p_milli % 1000,
+                      slot->repetition_penalty_milli / 1000,
+                      slot->repetition_penalty_milli % 1000,
+                      slot->max_tokens);
+                if (EFI_ERROR(persist_st)) {
+                    Print(L" (persist=warn status=%r)", persist_st);
+                }
+                Print(L"\r\n\r\n");
+                continue;
+            }
         }
         if (my_strncmp(prompt, "/seed ", 6) == 0) {
             unsigned int val = 0;
@@ -8001,6 +8346,50 @@ static void llmk_repl_no_model_loop(void) {
                 if (thr < 0.0f) thr = 0.0f; if (thr > 1.0f) thr = 1.0f;
                 g_soma_spec.accept_threshold = thr;
                 Print(L"\r\n[SpecDecode] threshold=%d/100\r\n\r\n", (int)(thr * 100.0f));
+            }
+            continue;
+        }
+        // ── Phase Y: Swarm Net commands ──────────────────────────────────
+        if (my_strncmp(prompt, "/swarm_net", 10) == 0) {
+            const char *arg = prompt + 10;
+            while (*arg == ' ') arg++;
+            if (*arg == 0 || my_strncmp(arg, "status", 6) == 0) {
+                soma_swarm_net_print_status(&g_soma_swarm_net);
+            } else if (my_strncmp(arg, "on", 2) == 0) {
+                if (!g_oosi_v3_valid) {
+                    Print(L"\r\n[SwarmNet] ERROR: load model first (/ssm_load)\r\n\r\n");
+                } else {
+                    g_soma_swarm_net.enabled = 1;
+                    Print(L"\r\n[SwarmNet] enabled (peer_id=%d — publish+consensus active)\r\n\r\n",
+                          g_soma_swarm_net.my_peer_id);
+                }
+            } else if (my_strncmp(arg, "off", 3) == 0) {
+                g_soma_swarm_net.enabled = 0;
+                Print(L"\r\n[SwarmNet] disabled\r\n\r\n");
+            } else if (my_strncmp(arg, "peer", 4) == 0) {
+                const char *pv = arg + 4; while (*pv == ' ') pv++;
+                int pid = 0;
+                while (*pv >= '0' && *pv <= '9') { pid = pid * 10 + (*pv++ - '0'); }
+                if (pid >= 0 && pid < SWARM_NET_PEERS) {
+                    g_soma_swarm_net.my_peer_id = pid;
+                    Print(L"\r\n[SwarmNet] peer_id set to %d\r\n\r\n", pid);
+                } else {
+                    Print(L"\r\n[SwarmNet] ERROR: peer_id must be 0..%d\r\n\r\n", SWARM_NET_PEERS - 1);
+                }
+            } else if (my_strncmp(arg, "addr", 4) == 0) {
+                // /swarm_net addr <hex_phys_addr>  — set shared memory base address
+                const char *av = arg + 4; while (*av == ' ') av++;
+                unsigned long long addr = 0;
+                if (av[0] == '0' && (av[1] == 'x' || av[1] == 'X')) av += 2;
+                while ((*av >= '0' && *av <= '9') || (*av >= 'a' && *av <= 'f') || (*av >= 'A' && *av <= 'F')) {
+                    int nib = (*av >= 'a') ? (*av - 'a' + 10) : (*av >= 'A') ? (*av - 'A' + 10) : (*av - '0');
+                    addr = (addr << 4) | (unsigned long long)nib;
+                    av++;
+                }
+                g_soma_swarm_net.base_addr = addr;
+                g_soma_swarm_net.use_fixed_addr = (addr != 0) ? 1 : 0;
+                Print(L"\r\n[SwarmNet] base_addr=0x%llX use_fixed=%d\r\n\r\n",
+                      addr, g_soma_swarm_net.use_fixed_addr);
             }
             continue;
         }
@@ -9536,7 +9925,7 @@ static void llmk_repl_no_model_loop(void) {
         if (my_strncmp(prompt, "/ssm_info", 9) == 0) {
             Print(L"\r\n[SSM] Mamba bare-metal engine v0.1\r\n");
             Print(L"  Commands: /ssm_load <file>, /ssm_infer <text>, /ssm_reset\r\n");
-            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_apply_saved_if_needed, /mind_halt_policy_sync, /mind_halt_policy_sync_force, /mind_halt_policy_audit, /mind_audit, /mind_doctor, /mind_next, /mind_snapshot, /mind_ready, /mind_bootstrap_v1, /mind_path_v1, /oo_sidecar <file>, /oo_sidecar_audit, /oo_sidecar_unload, /attach_load <file>, /attach_audit, /attach_unload, /mind_halt_policy_reset, /mind_halt_policy_diff, /mind_status\r\n");
+            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_apply_saved_if_needed, /mind_halt_policy_sync, /mind_halt_policy_sync_force, /mind_halt_policy_audit, /mind_audit, /mind_doctor, /mind_next, /mind_snapshot, /mind_ready, /mind_bootstrap_v1, /mind_path_v1, /oo_sidecar <file>, /oo_sidecar_audit, /oo_sidecar_unload, /attach_load <file>, /attach_audit, /attach_policy, /attach_unload, /mind_halt_policy_reset, /mind_halt_policy_diff, /mind_status\r\n");
             Print(L"  Weight format: MAMB binary\r\n");
             Print(L"  Exporters: runtime export_mamba_baremetal.py | oo-model export_mamb_binary.py\r\n");
             Print(L"  Architecture: Mamba SSM, freestanding, O(1) memory per token\r\n");
@@ -9826,6 +10215,19 @@ static void llmk_repl_no_model_loop(void) {
                         Print(L"[OOSI-v3] WARN: no tokenizer found (tried gpt_neox_tokenizer.bin, tokenizer.bin)\r\n");
                     }
                 }
+                // Phase W: allocate spec decode buf (vocab_size floats for softmax)
+                {
+                    UINT64 spec_bytes = (UINT64)(V3V > 0 ? V3V : 50282) * sizeof(ssm_f32);
+                    g_soma_spec_buf = (ssm_f32 *)llmk_arena_alloc(
+                        &g_zones, LLMK_ARENA_SCRATCH, spec_bytes, 16);
+                    if (g_soma_spec_buf) {
+                        soma_spec_init(&g_soma_spec, V3V > 0 ? V3V : 50282,
+                                       g_soma_spec_buf);
+                        Print(L"[SpecDecode] Ready (vocab=%d threshold=80%%)\r\n", g_soma_spec.vocab_size);
+                    }
+                }
+                // Phase Y: record peer slot published on each inference turn
+                g_soma_swarm_net.my_peer_id = 0;
                 Print(L"\r\n");
                 continue;
             }
@@ -10270,6 +10672,39 @@ static void llmk_repl_no_model_loop(void) {
                         soma_first_conf = soma_dual_confidence(g_oosi_v3_ctx.logits,
                                                                g_soma_dual.vocab_size > 0
                                                                ? g_soma_dual.vocab_size : 50282);
+                    }
+                    // ── Phase W: Speculative Decoding verify step ────────────────
+                    if (g_soma_spec.enabled && g_soma_spec_buf && n_out == 0) {
+                        int draft_tok = 0; float draft_p = 0.0f;
+                        soma_spec_draft(&g_soma_spec, g_oosi_v3_ctx.logits,
+                                        1, &draft_tok, &draft_p);
+                        int corr = r.token;
+                        int ok = soma_spec_verify_one(&g_soma_spec,
+                                                      g_oosi_v3_ctx.logits,
+                                                      draft_tok, draft_p,
+                                                      &g_oosi_v3_ctx.rng_state, &corr);
+                        if (!ok) r.token = corr;
+                        (void)ok;
+                    }
+                    // ── Phase Y: Swarm Net — publish local vote + apply consensus ─
+                    if (g_soma_swarm_net.enabled && g_soma_swarm_net.initialized) {
+                        int local_tok = r.token;
+                        float local_prob = (g_oosi_v3_ctx.logits && local_tok < 50282)
+                            ? g_oosi_v3_ctx.logits[local_tok] : 0.5f;
+                        // Publish this turn's vote to our peer slot
+                        soma_swarm_net_publish(&g_soma_swarm_net,
+                                               &local_tok, &local_prob, 1,
+                                               soma_first_conf > 0.0f ? soma_first_conf : 0.5f,
+                                               &g_soma_dna,
+                                               (unsigned int)(g_soma_smb.tick_count & 0xFFFFFFFF));
+                        // Read peer consensus (single-machine: just echoes back own vote)
+                        SomaSwarmNetResult nr = soma_swarm_net_consensus(
+                            &g_soma_swarm_net, g_oosi_v3_ctx.logits,
+                            g_soma_dual.vocab_size > 0 ? g_soma_dual.vocab_size : 50282,
+                            (unsigned int)(g_soma_smb.tick_count & 0xFFFFFFFF));
+                        if (nr.n_peers_used > 1 && nr.consensus_token >= 0) {
+                            r.token = nr.consensus_token; // Apply net consensus
+                        }
                     }
 
                     // Verbose diagnostic (boot_verbose=2)
@@ -13087,6 +13522,70 @@ static void llmk_load_repl_cfg_best_effort(
                 if (v < 0.0f) v = 0.0f;
                 if (v > 1.0f) v = 1.0f;
                 g_mind_runtime_halt_threshold = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_external_temp")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.10f) v = 0.10f;
+                if (v > 5.0f) v = 5.0f;
+                g_attach_policy_external_cfg.temperature_milli = (int)(v * 1000.0f + 0.5f);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_external_top_p")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                g_attach_policy_external_cfg.top_p_milli = (int)(v * 1000.0f + 0.5f);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_external_rep")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 1.0f) v = 1.0f;
+                if (v > 3.0f) v = 3.0f;
+                g_attach_policy_external_cfg.repetition_penalty_milli = (int)(v * 1000.0f + 0.5f);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_external_max_tokens")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > MAX_TOKENS) v = MAX_TOKENS;
+                g_attach_policy_external_cfg.max_tokens = v;
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_dual_temp")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.10f) v = 0.10f;
+                if (v > 5.0f) v = 5.0f;
+                g_attach_policy_dual_cfg.temperature_milli = (int)(v * 1000.0f + 0.5f);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_dual_top_p")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                g_attach_policy_dual_cfg.top_p_milli = (int)(v * 1000.0f + 0.5f);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_dual_rep")) {
+            float v;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 1.0f) v = 1.0f;
+                if (v > 3.0f) v = 3.0f;
+                g_attach_policy_dual_cfg.repetition_penalty_milli = (int)(v * 1000.0f + 0.5f);
+                applied = 1;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_dual_max_tokens")) {
+            int v;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > MAX_TOKENS) v = MAX_TOKENS;
+                g_attach_policy_dual_cfg.max_tokens = v;
                 applied = 1;
             }
         } else if (llmk_cfg_streq_ci(key, "autotune") || llmk_cfg_streq_ci(key, "m18_autotune")) {
