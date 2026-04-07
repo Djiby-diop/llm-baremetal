@@ -7304,8 +7304,10 @@ static void llmk_repl_no_model_loop(void) {
     immunion_set_mode(&g_immunion, IMMUNION_MODE_RECORD);
     // Phase R: enable symbion in watch mode (feeds performance samples)
     symbion_set_mode(&g_symbion, SYMBION_MODE_WATCH);
+    // Phase S: enable pheromion in trace mode (tracks hot domain/route paths)
+    pheromion_set_mode(&g_pheromion, PHEROMION_MODE_TRACE);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-R initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-S initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -8310,7 +8312,51 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n");
             continue;
         }
-        // ─── Phase N: Session Fitness + DNA Evolution commands ────────────
+        // ─── Phase S: Pheromion Gradient commands ────────────────────────────
+        if (my_strncmp(prompt, "/pheromion_mode", 15) == 0) {
+            const char *arg = prompt + 15;
+            while (*arg == ' ') arg++;
+            PheromionMode pm = PHEROMION_MODE_TRACE;
+            if (arg[0] == 'o' && arg[1] == 'f')
+                pm = PHEROMION_MODE_OFF;
+            else if (arg[0] == 'b')
+                pm = PHEROMION_MODE_BOOST;
+            pheromion_set_mode(&g_pheromion, pm);
+            Print(L"\r\n[Pheromion] Mode set to: %s\r\n\r\n",
+                  pm == PHEROMION_MODE_OFF  ? L"off" :
+                  pm == PHEROMION_MODE_BOOST ? L"boost" : L"trace");
+            continue;
+        }
+        if (my_strncmp(prompt, "/pheromion_status", 17) == 0) {
+            uint32_t top = pheromion_top_path(&g_pheromion);
+            Print(L"\r\n[Pheromion] mode=%s  top_path=%u\r\n",
+                  g_pheromion.mode == PHEROMION_MODE_OFF   ? L"off" :
+                  g_pheromion.mode == PHEROMION_MODE_BOOST ? L"boost" : L"trace",
+                  (unsigned)top);
+            // Show SomaMind-specific paths (domain=100-106, route=200-203)
+            static const char *dnames[7] = {
+                "UNKNOWN","SYSTEM","POLICY","CHAT","CODE","MATH","CREATIVE"
+            };
+            static const char *rnames[4] = { "REFLEX","INTERNAL","EXTERNAL","DUAL" };
+            for (int pi = 0; pi < PHEROMION_SLOT_MAX; pi++) {
+                uint32_t pid = g_pheromion.slots[pi].path_id;
+                uint32_t hc  = g_pheromion.slots[pi].hit_count;
+                if (pid == 0xFFFFFFFFu || hc == 0) continue;
+                if (pid >= 100 && pid <= 106) {
+                    Print(L"  domain[%u] ", pid - 100);
+                    const char *dn = dnames[pid - 100];
+                    for (int ci = 0; dn[ci]; ci++) Print(L"%c", (CHAR16)(unsigned char)dn[ci]);
+                    Print(L" : %u hits\r\n", hc);
+                } else if (pid >= 200 && pid <= 203) {
+                    Print(L"  route[%u]  ", pid - 200);
+                    const char *rn = rnames[pid - 200];
+                    for (int ci = 0; rn[ci]; ci++) Print(L"%c", (CHAR16)(unsigned char)rn[ci]);
+                    Print(L" : %u hits\r\n", hc);
+                }
+            }
+            Print(L"\r\n");
+            continue;
+        }
         if (my_strncmp(prompt, "/session_reset", 14) == 0) {
             soma_session_init(&g_soma_session);
             Print(L"\r\n[Session] Fitness counters reset.\r\n\r\n");
@@ -9638,6 +9684,10 @@ static void llmk_repl_no_model_loop(void) {
                 SomaRouteResult rr = soma_route(&g_soma_router, text, tlen);
                 soma_domain_used = rr.domain;
                 soma_route_used  = rr.route;
+
+                // Phase S: pheromion trail — emit domain + route signals
+                pheromion_touch(&g_pheromion, 100u + (uint32_t)rr.domain);
+                pheromion_touch(&g_pheromion, 200u + (uint32_t)rr.route);
 
                 // REFLEX: instant response, no inference needed
                 if (rr.route == SOMA_ROUTE_REFLEX && rr.reflex_response) {
