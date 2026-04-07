@@ -1112,12 +1112,16 @@ static void llmk_mind_print_snapshot(int strict_mode) {
     const CHAR16 *next_reason = L"state is not fully ready and needs a broader corrective snapshot";
     const CHAR16 *prefix = strict_mode ? L"" : L"  ";
     LlmkMindRuntimeSnapshot snapshot;
+    LlmkAttachRoutePolicyPreview attach_external_policy;
+    LlmkAttachRoutePolicyPreview attach_dual_policy;
     llmk_mind_collect_runtime_snapshot(&snapshot);
     llmk_mind_select_next_action_from_snapshot(&snapshot, &next_action, &next_reason);
+    llmk_attach_route_policy_preview(SOMA_ROUTE_EXTERNAL, &attach_external_policy);
+    llmk_attach_route_policy_preview(SOMA_ROUTE_DUAL, &attach_dual_policy);
 
     if (!strict_mode) Print(L"\r\n[MindSnapshot]\r\n");
     Print(L"%sformat=kv-v1\r\n", prefix);
-    Print(L"%sschema=llmk-mind-snapshot-v2\r\n", prefix);
+    Print(L"%sschema=llmk-mind-snapshot-v3\r\n", prefix);
     Print(L"%sfield_order=fixed\r\n", prefix);
     Print(L"%sstrict=%d\r\n", prefix, strict_mode ? 1 : 0);
     Print(L"%sidentity=oo-somamind-core-primary\r\n", prefix);
@@ -1137,6 +1141,30 @@ static void llmk_mind_print_snapshot(int strict_mode) {
     Print(L"%sattach_kind=", prefix); llmk_print_ascii(g_mind_runtime_state.attach_kind[0] ? g_mind_runtime_state.attach_kind : "attach-model"); Print(L"\r\n");
     Print(L"%sattach_format=", prefix); llmk_print_ascii(g_mind_runtime_state.attach_format[0] ? g_mind_runtime_state.attach_format : "unknown"); Print(L"\r\n");
     Print(L"%sattach_validation=", prefix); llmk_print_ascii(g_mind_runtime_state.attach_last_validation[0] ? g_mind_runtime_state.attach_last_validation : "not-recorded"); Print(L"\r\n");
+        Print(L"%sattach_policy_external_active=%d\r\n", prefix, attach_external_policy.active);
+        Print(L"%sattach_policy_external_applied=%d\r\n", prefix, attach_external_policy.applied);
+        Print(L"%sattach_policy_external_temp=%d.%03d\r\n", prefix,
+            attach_external_policy.temperature_milli / 1000,
+            attach_external_policy.temperature_milli % 1000);
+        Print(L"%sattach_policy_external_top_p=%d.%03d\r\n", prefix,
+            attach_external_policy.top_p_milli / 1000,
+            attach_external_policy.top_p_milli % 1000);
+        Print(L"%sattach_policy_external_rep=%d.%03d\r\n", prefix,
+            attach_external_policy.repetition_penalty_milli / 1000,
+            attach_external_policy.repetition_penalty_milli % 1000);
+        Print(L"%sattach_policy_external_max_tokens=%d\r\n", prefix, attach_external_policy.max_tokens);
+        Print(L"%sattach_policy_dual_active=%d\r\n", prefix, attach_dual_policy.active);
+        Print(L"%sattach_policy_dual_applied=%d\r\n", prefix, attach_dual_policy.applied);
+        Print(L"%sattach_policy_dual_temp=%d.%03d\r\n", prefix,
+            attach_dual_policy.temperature_milli / 1000,
+            attach_dual_policy.temperature_milli % 1000);
+        Print(L"%sattach_policy_dual_top_p=%d.%03d\r\n", prefix,
+            attach_dual_policy.top_p_milli / 1000,
+            attach_dual_policy.top_p_milli % 1000);
+        Print(L"%sattach_policy_dual_rep=%d.%03d\r\n", prefix,
+            attach_dual_policy.repetition_penalty_milli / 1000,
+            attach_dual_policy.repetition_penalty_milli % 1000);
+        Print(L"%sattach_policy_dual_max_tokens=%d\r\n", prefix, attach_dual_policy.max_tokens);
     Print(L"%shalt_policy_enabled=%d\r\n", prefix, g_mind_runtime_halt_enabled);
     Print(L"%shalt_policy_threshold=%d.%03d\r\n", prefix,
           (int)g_mind_runtime_halt_threshold,
@@ -3132,6 +3160,15 @@ typedef struct {
     int applied;
 } LlmkAttachRoutePolicyState;
 
+typedef struct {
+    int active;
+    int applied;
+    int temperature_milli;
+    int top_p_milli;
+    int repetition_penalty_milli;
+    int max_tokens;
+} LlmkAttachRoutePolicyPreview;
+
 static const CHAR16 *llmk_soma_route_name_wide(SomaRoute route) {
     switch (route) {
         case SOMA_ROUTE_REFLEX: return L"REFLEX";
@@ -3140,6 +3177,59 @@ static const CHAR16 *llmk_soma_route_name_wide(SomaRoute route) {
         case SOMA_ROUTE_DUAL: return L"DUAL";
         default: return L"UNKNOWN";
     }
+}
+
+static void llmk_attach_route_policy_preview(SomaRoute route, LlmkAttachRoutePolicyPreview *out) {
+    LlmkAttachRoutePolicyPreview preview;
+    SetMem(&preview, sizeof(preview), 0);
+
+    if (!g_oosi_v3_valid || !g_mind_runtime_state.attach_active) {
+        if (out) *out = preview;
+        return;
+    }
+    if (!(route == SOMA_ROUTE_EXTERNAL || route == SOMA_ROUTE_DUAL)) {
+        if (out) *out = preview;
+        return;
+    }
+
+    preview.active = 1;
+    preview.temperature_milli = (int)(g_oosi_v3_ctx.temperature * 1000.0f + 0.5f);
+    preview.top_p_milli = (int)(g_oosi_v3_ctx.top_p * 1000.0f + 0.5f);
+    preview.repetition_penalty_milli = (int)(g_oosi_v3_ctx.repetition_penalty * 1000.0f + 0.5f);
+    preview.max_tokens = g_oosi_v3_ctx.max_tokens;
+
+    {
+        int target_temp = (route == SOMA_ROUTE_DUAL) ? 840 : 780;
+        int target_top_p = (route == SOMA_ROUTE_DUAL) ? 920 : 890;
+        int target_rep = (route == SOMA_ROUTE_DUAL) ? 1080 : 1120;
+        int target_max_tokens = (route == SOMA_ROUTE_DUAL) ? 176 : 144;
+        int orig_temp = preview.temperature_milli;
+        int orig_top_p = preview.top_p_milli;
+        int orig_rep = preview.repetition_penalty_milli;
+        int orig_max_tokens = preview.max_tokens;
+
+        if (llmk_ascii_streq(g_mind_runtime_state.attach_format, "bin")) {
+            target_temp -= 40;
+            target_top_p -= 20;
+            target_rep += 40;
+            target_max_tokens -= 16;
+        } else if (llmk_ascii_streq(g_mind_runtime_state.attach_format, "gguf")) {
+            target_temp += 20;
+            target_top_p += 10;
+        }
+
+        if (preview.temperature_milli > target_temp) preview.temperature_milli = target_temp;
+        if (preview.top_p_milli > target_top_p) preview.top_p_milli = target_top_p;
+        if (preview.repetition_penalty_milli < target_rep) preview.repetition_penalty_milli = target_rep;
+        if (preview.max_tokens > target_max_tokens) preview.max_tokens = target_max_tokens;
+
+        preview.applied = (preview.temperature_milli != orig_temp) ||
+                          (preview.top_p_milli != orig_top_p) ||
+                          (preview.repetition_penalty_milli != orig_rep) ||
+                          (preview.max_tokens != orig_max_tokens);
+    }
+
+    if (out) *out = preview;
 }
 
 static void llmk_attach_route_policy_begin(SomaRoute route, LlmkAttachRoutePolicyState *state) {
@@ -3154,39 +3244,14 @@ static void llmk_attach_route_policy_begin(SomaRoute route, LlmkAttachRoutePolic
     state->max_tokens = g_oosi_v3_ctx.max_tokens;
 
     {
-        int temp_milli = (int)(g_oosi_v3_ctx.temperature * 1000.0f + 0.5f);
-        int top_p_milli = (int)(g_oosi_v3_ctx.top_p * 1000.0f + 0.5f);
-        int rep_milli = (int)(g_oosi_v3_ctx.repetition_penalty * 1000.0f + 0.5f);
-        int max_tokens = g_oosi_v3_ctx.max_tokens;
-        int target_temp = (route == SOMA_ROUTE_DUAL) ? 840 : 780;
-        int target_top_p = (route == SOMA_ROUTE_DUAL) ? 920 : 890;
-        int target_rep = (route == SOMA_ROUTE_DUAL) ? 1080 : 1120;
-        int target_max_tokens = (route == SOMA_ROUTE_DUAL) ? 176 : 144;
-
-        if (llmk_ascii_streq(g_mind_runtime_state.attach_format, "bin")) {
-            target_temp -= 40;
-            target_top_p -= 20;
-            target_rep += 40;
-            target_max_tokens -= 16;
-        } else if (llmk_ascii_streq(g_mind_runtime_state.attach_format, "gguf")) {
-            target_temp += 20;
-            target_top_p += 10;
-        }
-
-        if (temp_milli > target_temp) temp_milli = target_temp;
-        if (top_p_milli > target_top_p) top_p_milli = target_top_p;
-        if (rep_milli < target_rep) rep_milli = target_rep;
-        if (max_tokens > target_max_tokens) max_tokens = target_max_tokens;
-
-        g_oosi_v3_ctx.temperature = (float)temp_milli / 1000.0f;
-        g_oosi_v3_ctx.top_p = (float)top_p_milli / 1000.0f;
-        g_oosi_v3_ctx.repetition_penalty = (float)rep_milli / 1000.0f;
-        g_oosi_v3_ctx.max_tokens = max_tokens;
-
-        state->applied = (temp_milli != (int)(state->temperature * 1000.0f + 0.5f)) ||
-                         (top_p_milli != (int)(state->top_p * 1000.0f + 0.5f)) ||
-                         (rep_milli != (int)(state->repetition_penalty * 1000.0f + 0.5f)) ||
-                         (max_tokens != state->max_tokens);
+        LlmkAttachRoutePolicyPreview preview;
+        llmk_attach_route_policy_preview(route, &preview);
+        if (!preview.active) return;
+        g_oosi_v3_ctx.temperature = (float)preview.temperature_milli / 1000.0f;
+        g_oosi_v3_ctx.top_p = (float)preview.top_p_milli / 1000.0f;
+        g_oosi_v3_ctx.repetition_penalty = (float)preview.repetition_penalty_milli / 1000.0f;
+        g_oosi_v3_ctx.max_tokens = preview.max_tokens;
+        state->applied = preview.applied;
     }
 }
 
@@ -7393,7 +7458,7 @@ static void llmk_repl_no_model_loop(void) {
     // Phase S: enable pheromion in trace mode (tracks hot domain/route paths)
     pheromion_set_mode(&g_pheromion, PHEROMION_MODE_TRACE);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-V initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-W initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7560,6 +7625,8 @@ static void llmk_repl_no_model_loop(void) {
 
         // ── SomaMind commands ────────────────────────────────────────────
         if (my_strncmp(prompt, "/soma_status", 12) == 0) {
+            LlmkAttachRoutePolicyPreview attach_external_policy;
+            LlmkAttachRoutePolicyPreview attach_dual_policy;
             if (!g_soma_initialized) {
                 soma_router_init(&g_soma_router);
                 soma_dna_init_default(&g_soma_dna);
@@ -7568,6 +7635,8 @@ static void llmk_repl_no_model_loop(void) {
             g_soma_router.soma_model_ready = (g_mind_runtime_state.core_active || g_oosi_v3_valid ||
                                     (g_oosi_weights_valid && llmk_oo_infer_is_ready())) ? 1 : 0;
             g_soma_router.external_model_ready = g_mind_runtime_state.attach_active ? 1 : 0;
+            llmk_attach_route_policy_preview(SOMA_ROUTE_EXTERNAL, &attach_external_policy);
+            llmk_attach_route_policy_preview(SOMA_ROUTE_DUAL, &attach_dual_policy);
             Print(L"\r\n[SomaMind Router]\r\n");
             Print(L"  model_topology:\r\n");
             Print(L"    internal (OO core backbone): %s\r\n",
@@ -7581,6 +7650,27 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"  confidence_threshold=");
             { int th = (int)(g_soma_router.confidence_threshold * 100.0f);
               Print(L"%d%%\r\n", th); }
+            Print(L"  attach_policy_preview:\r\n");
+            Print(L"    external active=%d applied=%d temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d\r\n",
+                attach_external_policy.active,
+                attach_external_policy.applied,
+                attach_external_policy.temperature_milli / 1000,
+                attach_external_policy.temperature_milli % 1000,
+                attach_external_policy.top_p_milli / 1000,
+                attach_external_policy.top_p_milli % 1000,
+                attach_external_policy.repetition_penalty_milli / 1000,
+                attach_external_policy.repetition_penalty_milli % 1000,
+                attach_external_policy.max_tokens);
+            Print(L"    dual     active=%d applied=%d temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d\r\n",
+                attach_dual_policy.active,
+                attach_dual_policy.applied,
+                attach_dual_policy.temperature_milli / 1000,
+                attach_dual_policy.temperature_milli % 1000,
+                attach_dual_policy.top_p_milli / 1000,
+                attach_dual_policy.top_p_milli % 1000,
+                attach_dual_policy.repetition_penalty_milli / 1000,
+                attach_dual_policy.repetition_penalty_milli % 1000,
+                attach_dual_policy.max_tokens);
             Print(L"  dna_generation=%d  dna_hash=0x%08X\r\n",
                   g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
             Print(L"\r\n");
@@ -7646,6 +7736,7 @@ static void llmk_repl_no_model_loop(void) {
             continue;
         }
         if (my_strncmp(prompt, "/soma_route ", 12) == 0) {
+            LlmkAttachRoutePolicyPreview attach_policy;
             if (!g_soma_initialized) {
                 soma_router_init(&g_soma_router);
                 soma_dna_init_default(&g_soma_dna);
@@ -7681,6 +7772,19 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"  external_attach=%s\r\n",
                 g_mind_runtime_state.attach_active ? L"validated" :
                 g_mind_runtime_state.attach_requested ? L"requested-not-active" : L"none");
+            llmk_attach_route_policy_preview(rr.route, &attach_policy);
+            if (attach_policy.active) {
+                Print(L"  attach_policy active=%d applied=%d temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d\r\n",
+                    attach_policy.active,
+                    attach_policy.applied,
+                    attach_policy.temperature_milli / 1000,
+                    attach_policy.temperature_milli % 1000,
+                    attach_policy.top_p_milli / 1000,
+                    attach_policy.top_p_milli % 1000,
+                    attach_policy.repetition_penalty_milli / 1000,
+                    attach_policy.repetition_penalty_milli % 1000,
+                    attach_policy.max_tokens);
+            }
             if (rr.reflex_response) {
                 Print(L"  reflex_response: ");
                 for (int ri = 0; ri < rr.reflex_response_len; ri++)
@@ -7851,6 +7955,52 @@ static void llmk_repl_no_model_loop(void) {
             } else if (my_strncmp(arg, "off", 3) == 0) {
                 g_multireal_enabled = 0;
                 Print(L"\r\n[MultiReal] disabled\r\n\r\n");
+            }
+            continue;
+        }
+        // ── Phase W: Speculative Decoding commands ───────────────────────
+        if (my_strncmp(prompt, "/specdecode", 11) == 0) {
+            const char *arg = prompt + 11;
+            while (*arg == ' ') arg++;
+            if (*arg == 0 || my_strncmp(arg, "status", 6) == 0) {
+                int tot = g_soma_spec.stats.total_drafted;
+                int acc = g_soma_spec.stats.total_accepted;
+                int sp  = tot > 0 ? (acc * 100 / tot) : 0;
+                Print(L"\r\n[SpecDecode] enabled=%d  buf=%s  vocab=%d\r\n"
+                      L"  cycles=%d  drafted=%d  accepted=%d(%d%%)  rejected=%d\r\n"
+                      L"  full_accepts=%d  avg_speedup=%d%%\r\n\r\n",
+                      g_soma_spec.enabled,
+                      g_soma_spec_buf ? L"ready" : L"no-model",
+                      g_soma_spec.vocab_size,
+                      g_soma_spec.stats.total_cycles, tot, acc, sp,
+                      g_soma_spec.stats.total_rejected,
+                      g_soma_spec.stats.full_accepts,
+                      (int)(g_soma_spec.stats.avg_speedup * 100.0f));
+            } else if (my_strncmp(arg, "on", 2) == 0) {
+                if (!g_soma_spec_buf) {
+                    Print(L"\r\n[SpecDecode] ERROR: load model first (/ssm_load)\r\n\r\n");
+                } else {
+                    g_soma_spec.enabled = 1;
+                    Print(L"\r\n[SpecDecode] enabled (draft+verify pipeline)\r\n\r\n");
+                }
+            } else if (my_strncmp(arg, "off", 3) == 0) {
+                g_soma_spec.enabled = 0;
+                Print(L"\r\n[SpecDecode] disabled\r\n\r\n");
+            } else if (my_strncmp(arg, "threshold", 9) == 0) {
+                // /specdecode threshold 0.7
+                const char *tv = arg + 9; while (*tv == ' ') tv++;
+                int t_int = 0; int t_frac = 0; int in_frac = 0; int frac_div = 1;
+                while (*tv) {
+                    if (*tv >= '0' && *tv <= '9') {
+                        if (!in_frac) t_int = t_int * 10 + (*tv - '0');
+                        else { t_frac = t_frac * 10 + (*tv - '0'); frac_div *= 10; }
+                    } else if (*tv == '.' || *tv == ',') in_frac = 1;
+                    tv++;
+                }
+                float thr = (float)t_int + (frac_div > 1 ? (float)t_frac / (float)frac_div : 0.0f);
+                if (thr < 0.0f) thr = 0.0f; if (thr > 1.0f) thr = 1.0f;
+                g_soma_spec.accept_threshold = thr;
+                Print(L"\r\n[SpecDecode] threshold=%d/100\r\n\r\n", (int)(thr * 100.0f));
             }
             continue;
         }
