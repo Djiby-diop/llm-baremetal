@@ -82,6 +82,7 @@
 #include "../ssm/soma_memory.h"
 #include "../ssm/soma_journal.h"
 #include "../ssm/soma_cortex.h"
+#include "../ssm/soma_export.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -7094,6 +7095,8 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /cortex_infer <text>  Run cortex only (domain+safety classification)\r\n");
     Print(L"  /cortex_stats         Show cortex load status and call stats\r\n");
     Print(L"  /cortex [0|1]         Enable/disable cortex pre-routing\r\n");
+    Print(L"  /soma_export          Export session to soma_train.jsonl (training data)\r\n");
+    Print(L"  /soma_export_stats    Show soma_train.jsonl record count\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7262,7 +7265,7 @@ static void llmk_repl_no_model_loop(void) {
     // Phase J: init cortex (loaded later via /cortex_load)
     soma_cortex_init(&g_soma_cortex);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-J initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-K initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -8105,6 +8108,51 @@ static void llmk_repl_no_model_loop(void) {
                       g_soma_cortex.loaded ? (g_soma_cortex.enabled ? L"ACTIVE" : L"LOADED/DISABLED") : L"NOT LOADED",
                       g_soma_cortex.total_calls, g_soma_cortex.total_flagged);
             }
+            continue;
+        }
+        // ─── Phase K: Export commands ─────────────────────────────────────
+        if (my_strncmp(prompt, "/soma_export_stats", 18) == 0) {
+            // Get EFI root
+            EFI_FILE_PROTOCOL *xroot = NULL;
+            EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = NULL;
+            EFI_STATUS xst = LibLocateProtocol(&FileSystemProtocol, (void **)&fs);
+            if (!EFI_ERROR(xst) && fs)
+                uefi_call_wrapper(fs->OpenVolume, 2, fs, &xroot);
+            int cnt = soma_export_count(xroot);
+            if (xroot) uefi_call_wrapper(xroot->Close, 1, xroot);
+            if (cnt >= 0)
+                Print(L"\r\n[Export] soma_train.jsonl: %d records\r\n\r\n", cnt);
+            else
+                Print(L"\r\n[Export] soma_train.jsonl: not found\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_export", 12) == 0) {
+            // Check append flag
+            const char *xarg = prompt + 12;
+            while (*xarg == ' ') xarg++;
+            int do_append = 1;
+            if (xarg[0] == '0') do_append = 0;  // /soma_export 0 = overwrite
+
+            EFI_FILE_PROTOCOL *xroot = NULL;
+            EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = NULL;
+            EFI_STATUS xst = LibLocateProtocol(&FileSystemProtocol, (void **)&fs);
+            if (!EFI_ERROR(xst) && fs)
+                uefi_call_wrapper(fs->OpenVolume, 2, fs, &xroot);
+
+            // Use last cortex result for domain/safety if available
+            int xdom = g_soma_cortex.loaded ? (int)g_soma_cortex.total_calls : 0;
+            (void)xdom;
+            SomaExportResult xr = soma_export_write(&g_soma_mem, xroot,
+                                                    do_append, 0, 100);
+            if (xroot) uefi_call_wrapper(xroot->Close, 1, xroot);
+
+            if (xr.error)
+                Print(L"\r\n[Export] ERROR writing soma_train.jsonl\r\n\r\n");
+            else
+                Print(L"\r\n[Export] OK: %d records written (%s), %d skipped\r\n\r\n",
+                      xr.lines_written,
+                      xr.appended ? L"appended" : L"created",
+                      xr.lines_skipped);
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
