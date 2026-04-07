@@ -193,6 +193,7 @@ void soma_memory_record(SomaMemCtx *ctx, const char *prompt,
     slot->valid       = 1;
     slot->turn        = ctx->total_turns;
     slot->prompt_hash = soma_mem_hash(prompt);
+    slot->domain      = 0;  // default: SOMA_DOMAIN_CHAT
     soma_mem_strncpy(slot->prompt,   prompt,           SOMA_MEM_PROMPT_LEN);
     soma_mem_strncpy(slot->response, response_summary ? response_summary : "",
                      SOMA_MEM_RESPONSE_LEN);
@@ -200,6 +201,37 @@ void soma_memory_record(SomaMemCtx *ctx, const char *prompt,
     ctx->head = (ctx->head + 1) % SOMA_MEM_MAX_ENTRIES;
     if (ctx->count < SOMA_MEM_MAX_ENTRIES) ctx->count++;
     ctx->total_turns++;
+}
+
+// Phase R: Record with explicit domain tag
+void soma_memory_record_tagged(SomaMemCtx *ctx, const char *prompt,
+                               const char *response_summary,
+                               unsigned char domain) {
+    if (!prompt || !prompt[0]) return;
+
+    SomaMemEntry *slot = &ctx->entries[ctx->head];
+    slot->valid       = 1;
+    slot->turn        = ctx->total_turns;
+    slot->prompt_hash = soma_mem_hash(prompt);
+    slot->domain      = domain;
+    soma_mem_strncpy(slot->prompt,   prompt,           SOMA_MEM_PROMPT_LEN);
+    soma_mem_strncpy(slot->response, response_summary ? response_summary : "",
+                     SOMA_MEM_RESPONSE_LEN);
+
+    ctx->head = (ctx->head + 1) % SOMA_MEM_MAX_ENTRIES;
+    if (ctx->count < SOMA_MEM_MAX_ENTRIES) ctx->count++;
+    ctx->total_turns++;
+}
+
+// Phase R: Count entries matching a domain
+int soma_memory_count_domain(const SomaMemCtx *ctx, unsigned char domain) {
+    if (!ctx) return 0;
+    int count = 0;
+    for (int i = 0; i < SOMA_MEM_MAX_ENTRIES; i++) {
+        if (ctx->entries[i].valid && ctx->entries[i].domain == domain)
+            count++;
+    }
+    return count;
 }
 
 void soma_memory_print_stats(const SomaMemCtx *ctx) {

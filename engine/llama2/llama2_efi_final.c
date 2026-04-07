@@ -7302,8 +7302,10 @@ static void llmk_repl_no_model_loop(void) {
     soma_session_init(&g_soma_session);
     // Phase P: enable immunion in record mode (logs threat patterns; no auto-react)
     immunion_set_mode(&g_immunion, IMMUNION_MODE_RECORD);
+    // Phase R: enable symbion in watch mode (feeds performance samples)
+    symbion_set_mode(&g_symbion, SYMBION_MODE_WATCH);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-Q initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-R initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -8240,6 +8242,72 @@ static void llmk_repl_no_model_loop(void) {
                   (int)g_immunion.reactions_triggered,
                   g_soma_warden.immunion_escalations,
                   g_soma_session.immunion_reactions);
+            continue;
+        }
+        // ─── Phase R: Symbion + Memory Semantic Tag commands ─────────────────
+        if (my_strncmp(prompt, "/sym_mode", 9) == 0) {
+            const char *arg = prompt + 9;
+            while (*arg == ' ') arg++;
+            SymbionMode smode = SYMBION_MODE_WATCH;
+            if (arg[0] == 'o' && arg[1] == 'f' && arg[2] == 'f')
+                smode = SYMBION_MODE_OFF;
+            else if (arg[0] == 'a' && arg[1] == 'd')
+                smode = SYMBION_MODE_ADAPT;
+            symbion_set_mode(&g_symbion, smode);
+            Print(L"\r\n[Symbion] Mode set to: %s\r\n\r\n",
+                  smode == SYMBION_MODE_OFF ? L"off" :
+                  smode == SYMBION_MODE_ADAPT ? L"adapt" : L"watch");
+            continue;
+        }
+        if (my_strncmp(prompt, "/sym_status", 11) == 0) {
+            Print(L"\r\n[Symbion] mode=%s  samples=%d  adaptations=%d\r\n",
+                  g_symbion.mode == SYMBION_MODE_OFF  ? L"off" :
+                  g_symbion.mode == SYMBION_MODE_ADAPT ? L"adapt" : L"watch",
+                  (int)g_symbion.samples_taken,
+                  (int)g_symbion.adaptations_applied);
+            // Memory domain distribution
+            static const char *dnames[7] = {
+                "GENERAL","MEMORY","SYSTEM","REASONING","PLANNING","MATH","LANGUAGE"
+            };
+            Print(L"  domain distribution in memory:\r\n");
+            for (int di = 0; di < 7; di++) {
+                int cnt = soma_memory_count_domain(&g_soma_memory, (unsigned char)di);
+                if (cnt > 0) {
+                    Print(L"    [%d] %-9s : %d entries\r\n",
+                          di, (const CHAR16 *)L"", cnt);
+                    // Print domain name as ASCII
+                    Print(L"    [%d] ", di);
+                    for (int ci = 0; dnames[di][ci]; ci++)
+                        Print(L"%c", (CHAR16)(unsigned char)dnames[di][ci]);
+                    Print(L" : %d entries\r\n", cnt);
+                }
+            }
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/sym_search", 11) == 0) {
+            const char *arg = prompt + 11;
+            while (*arg == ' ') arg++;
+            // Parse domain number or name
+            unsigned char tgt_domain = 255;
+            if (*arg >= '0' && *arg <= '6') tgt_domain = (unsigned char)(*arg - '0');
+            else if (arg[0] == 'm' && arg[1] == 'a') tgt_domain = 5; // math
+            else if (arg[0] == 's' && arg[1] == 'y') tgt_domain = 2; // system
+            else if (arg[0] == 'c') tgt_domain = 6;                   // chat/creative
+            Print(L"\r\n[Sym-Search] domain=%d\r\n", (int)tgt_domain);
+            int shown = 0;
+            for (int si = 0; si < SOMA_MEM_MAX_ENTRIES; si++) {
+                SomaMemEntry *me = &g_soma_memory.entries[si];
+                if (!me->valid) continue;
+                if (tgt_domain != 255 && me->domain != tgt_domain) continue;
+                Print(L"  [t%d dom=%d] ", me->turn, (int)me->domain);
+                for (int ci = 0; me->prompt[ci] && ci < 60; ci++)
+                    Print(L"%c", (CHAR16)(unsigned char)me->prompt[ci]);
+                Print(L"\r\n");
+                shown++;
+            }
+            if (!shown) Print(L"  (no entries match)\r\n");
+            Print(L"\r\n");
             continue;
         }
         // ─── Phase N: Session Fitness + DNA Evolution commands ────────────
@@ -9926,7 +9994,17 @@ static void llmk_repl_no_model_loop(void) {
                                 resp_summary[rs++] = tb[ci];
                         }
                         resp_summary[rs] = 0;
-                        soma_memory_record(&g_soma_memory, text, resp_summary);
+                        soma_memory_record_tagged(&g_soma_memory, text, resp_summary,
+                                                  (unsigned char)soma_domain_used);
+                        // Phase R: feed symbion with post-inference performance sample
+                        {
+                            SymbionSample ssamp;
+                            ssamp.latency_raw = (uint32_t)(g_sentinel.last_dt_cycles >> 10);
+                            ssamp.retries     = (uint32_t)g_soma_warden.violations_since_reset;
+                            ssamp.stress      = (uint8_t)(g_soma_warden.pressure_level * 30 > 100
+                                                ? 100 : g_soma_warden.pressure_level * 30);
+                            symbion_feed(&g_symbion, &ssamp);
+                        }
                         // Phase I: autosave journal every N turns
                         g_soma_journal_total_turns++;
                         g_soma_journal_turns_since_save++;

@@ -46,6 +46,7 @@ typedef struct {
     int   turn;                              // Turn index when recorded
     int   valid;                             // 1 = slot contains real data
     unsigned int prompt_hash;               // Fast hash for similarity
+    unsigned char domain;                   // Phase R: SomaDomain tag (0-6)
 } SomaMemEntry;
 
 // ============================================================
@@ -103,6 +104,13 @@ SomaMemResult soma_memory_scan(SomaMemCtx *ctx, const char *prompt);
 // Record a (prompt, response_summary) pair after inference.
 // Call after generate() completes.
 void soma_memory_record(SomaMemCtx *ctx, const char *prompt, const char *response_summary);
+
+// Phase R: Record with explicit domain tag (SomaDomain value 0-6).
+void soma_memory_record_tagged(SomaMemCtx *ctx, const char *prompt,
+                               const char *response_summary, unsigned char domain);
+
+// Phase R: Count entries matching a domain (0-6).
+int soma_memory_count_domain(const SomaMemCtx *ctx, unsigned char domain);
 
 // Print memory stats to serial (for /soma_memory_stats).
 void soma_memory_print_stats(const SomaMemCtx *ctx);
