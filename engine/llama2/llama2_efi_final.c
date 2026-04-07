@@ -86,6 +86,7 @@
 #include "../ssm/soma_warden.h"
 #include "../ssm/soma_session.h"
 #include "../ssm/soma_dna_persist.h"
+#include "../ssm/soma_dna_sampler.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -446,6 +447,7 @@ static EFI_STATUS llmk_mind_activate_attach_best_effort(const char *path, LlmkMo
 static void llmk_mind_collect_runtime_snapshot(LlmkMindRuntimeSnapshot *out);
 static void llmk_mind_select_next_action_from_snapshot(const LlmkMindRuntimeSnapshot *snapshot, const CHAR16 **out_action, const CHAR16 **out_reason);
 static void llmk_mind_select_next_action(const CHAR16 **out_action, const CHAR16 **out_reason, int *out_ready, int *out_core_ready, int *out_halt_ready, int *out_sidecar_ready);
+static const char *llmk_model_format_ascii(LlmkModelFormat fmt);
 
 static void llmk_mind_record_halt_apply(LlmkMindHaltApplyMode mode, int changed_enabled, int changed_threshold) {
     g_mind_runtime_halt_apply_seen = 1;
@@ -7301,7 +7303,7 @@ static void llmk_repl_no_model_loop(void) {
     // Phase P: enable immunion in record mode (logs threat patterns; no auto-react)
     immunion_set_mode(&g_immunion, IMMUNION_MODE_RECORD);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-P initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-Q initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -8178,7 +8180,7 @@ static void llmk_repl_no_model_loop(void) {
             // Use last cortex result for domain/safety if available
             int xdom = g_soma_cortex.loaded ? (int)g_soma_cortex.total_calls : 0;
             (void)xdom;
-            SomaExportResult xr = soma_export_write(&g_soma_mem, xroot,
+            SomaExportResult xr = soma_export_write(&g_soma_memory, xroot,
                                                     do_append, 0, 100);
             if (xroot) uefi_call_wrapper(xroot->Close, 1, xroot);
 
@@ -8321,6 +8323,32 @@ static void llmk_repl_no_model_loop(void) {
             soma_dna_init_default(&g_soma_dna);
             if (g_root) soma_dna_delete(g_root);
             Print(L"\r\n[DNA] Reset to defaults. soma_dna.bin deleted. gen=0\r\n\r\n");
+            continue;
+        }
+        // Phase Q: show current DNA sampler blend
+        if (my_strncmp(prompt, "/dna_sampler", 12) == 0) {
+            float t_logic  = soma_dna_blend_temperature(&g_soma_dna, SOMA_DOMAIN_MATH,     g_temperature);
+            float t_chat   = soma_dna_blend_temperature(&g_soma_dna, SOMA_DOMAIN_CHAT,     g_temperature);
+            float t_create = soma_dna_blend_temperature(&g_soma_dna, SOMA_DOMAIN_CREATIVE, g_temperature);
+            float tp_logic  = soma_dna_blend_top_p(&g_soma_dna, SOMA_DOMAIN_MATH,     g_top_p);
+            float tp_chat   = soma_dna_blend_top_p(&g_soma_dna, SOMA_DOMAIN_CHAT,     g_top_p);
+            float tp_create = soma_dna_blend_top_p(&g_soma_dna, SOMA_DOMAIN_CREATIVE, g_top_p);
+            Print(L"\r\n[DNA-Sampler] gen=%d  bias=%d%%  pressure=%d\r\n",
+                  (int)g_soma_dna.generation,
+                  (int)(g_soma_dna.cognition_bias * 100.0f),
+                  g_soma_warden.pressure_level);
+            Print(L"  solar: temp=%d/1000 top_p=%d/1000\r\n",
+                  (int)(g_soma_dna.temperature_solar * 1000.0f),
+                  (int)(g_soma_dna.top_p_solar * 1000.0f));
+            Print(L"  lunar: temp=%d/1000 top_p=%d/1000\r\n",
+                  (int)(g_soma_dna.temperature_lunar * 1000.0f),
+                  (int)(g_soma_dna.top_p_lunar * 1000.0f));
+            Print(L"  blended → logic:  temp=%d/1000 top_p=%d/1000\r\n",
+                  (int)(t_logic  * 1000.0f), (int)(tp_logic  * 1000.0f));
+            Print(L"  blended → chat:   temp=%d/1000 top_p=%d/1000\r\n",
+                  (int)(t_chat   * 1000.0f), (int)(tp_chat   * 1000.0f));
+            Print(L"  blended → create: temp=%d/1000 top_p=%d/1000\r\n\r\n",
+                  (int)(t_create * 1000.0f), (int)(tp_create * 1000.0f));
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
@@ -19820,6 +19848,20 @@ gguf_fallback_done:
         &stop_on_you,
         &stop_on_double_nl
     );
+
+    // Phase Q: Apply DNA-driven sampler bias (after config/profile, before autotune).
+    // Soft blend: 80% config + 20% DNA. Warden pressure reduces temperature further.
+    if (g_soma_initialized && g_soma_dna.generation > 0) {
+        temperature = soma_dna_blend_temperature(&g_soma_dna, soma_domain_used, temperature);
+        top_p       = soma_dna_blend_top_p     (&g_soma_dna, soma_domain_used, top_p);
+        temperature = soma_dna_pressure_temperature(temperature, g_soma_warden.pressure_level);
+        if (g_boot_verbose >= 2)
+            Print(L"[SomaDNA-Q] temp=%d/1000 top_p=%d/1000 bias=%d/100 gen=%d\r\n",
+                  (int)(temperature * 1000.0f),
+                  (int)(top_p       * 1000.0f),
+                  (int)(g_soma_dna.cognition_bias * 100.0f),
+                  (int)g_soma_dna.generation);
+    }
 
     int m18_base_temp_milli = (int)(temperature * 1000.0f + 0.5f);
     int m18_base_top_p_milli = (int)(top_p * 1000.0f + 0.5f);
