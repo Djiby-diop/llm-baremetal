@@ -67,6 +67,7 @@ void soma_session_init(SomaSessionCtx *s) {
     s->cortex_flagged     = 0;
     s->warden_escalations = 0;
     s->sentinel_trips     = 0;
+    s->immunion_reactions = 0;
     s->conf_sum_x1000     = 0;
     s->conf_count         = 0;
     s->fitness_score      = 50;
@@ -104,6 +105,13 @@ void soma_session_record(SomaSessionCtx *s,
 
     if (cortex_flag)  s->cortex_flagged++;
     if (warden_esc)   s->warden_escalations++;
+}
+
+// ─── soma_session_immunion_record ────────────────────────────────────────────
+
+void soma_session_immunion_record(SomaSessionCtx *s, int reactions_delta) {
+    if (!s || reactions_delta <= 0) return;
+    s->immunion_reactions += reactions_delta;
 }
 
 // ─── soma_session_score ─────────────────────────────────────────────────────
@@ -149,6 +157,9 @@ int soma_session_score(SomaSessionCtx *s, const SomaWardenCtx *warden) {
 
     // Warden pressure escalations: penalty
     score -= s->warden_escalations * 12;
+
+    // Phase P: Immunion reactions: threat events detected
+    score -= s->immunion_reactions * 6;
 
     // Sentinel trips
     if (warden && warden->last_sentinel_tripped)
@@ -263,6 +274,10 @@ int soma_session_status_str(const SomaSessionCtx *s, char *buf, int buflen) {
     p = ss_itoa(s->cortex_flagged, buf, p, buflen);
     p = ss_puts(buf, p, buflen, " reflex=");
     p = ss_itoa(s->turns_reflex, buf, p, buflen);
+    if (s->immunion_reactions > 0) {
+        p = ss_puts(buf, p, buflen, " imm=");
+        p = ss_itoa(s->immunion_reactions, buf, p, buflen);
+    }
     if (s->conf_count > 0) {
         int avg = s->conf_sum_x1000 / s->conf_count;  // 0-1000
         p = ss_puts(buf, p, buflen, " conf=0.");

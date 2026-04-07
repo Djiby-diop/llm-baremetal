@@ -17,6 +17,7 @@
 //   CRITICAL → threshold = 0.20 (almost always reflex; external blocked)
 //
 // Additionally exposes pressure to cortex (safety override) and journal.
+// Phase P: also bridges ImmunionEngine reactions into pressure escalation.
 //
 // Freestanding C11 — no libc, no malloc.
 
@@ -25,6 +26,7 @@
 #include "soma_router.h"
 #include "../../core/llmk_sentinel.h"
 #include "../../core/llmk_zones.h"
+#include "../../oo-modules/immunion-engine/core/immunion.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -83,6 +85,10 @@ typedef struct {
 
     // Cortex safety override (-1 = no override, else min safety score)
     int  cortex_safety_floor;       // Raised under pressure
+
+    // Phase P: Immunion integration
+    int  last_immunion_reactions;   // reactions_triggered snapshot from last sync
+    int  immunion_escalations;      // Times immunion triggered a pressure boost
 } SomaWardenCtx;
 
 // ============================================================
@@ -103,6 +109,16 @@ int soma_warden_update(SomaWardenCtx *w,
 
 // Reset pressure to NONE (e.g. after /sentinel_reset).
 void soma_warden_reset(SomaWardenCtx *w, SomaRouterCtx *router);
+
+// Phase P: Sync immunion reactions into warden pressure.
+// Call after soma_warden_update() each inference turn.
+// If new reactions appeared since last sync, boost violations and
+// ensure at least HIGH pressure is applied to the router.
+// Returns number of new reactions detected (0 if none).
+int soma_warden_immunion_sync(SomaWardenCtx *w,
+                              const ImmunionEngine *imm,
+                              SomaRouterCtx *router,
+                              int turn);
 
 // Return a one-line ASCII status string (written into buf, max buflen).
 // e.g. "NONE thresh=0.85 viol=0 mem=1024MiB"

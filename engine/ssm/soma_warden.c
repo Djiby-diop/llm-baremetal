@@ -91,6 +91,8 @@ void soma_warden_init(SomaWardenCtx *w) {
     w->applied_threshold       = 0.85f;
     w->last_update_turn        = 0;
     w->cortex_safety_floor     = 0;
+    w->last_immunion_reactions = 0;
+    w->immunion_escalations    = 0;
 }
 
 // ─── soma_warden_update ──────────────────────────────────────────────────────
@@ -237,6 +239,45 @@ void soma_warden_reset(SomaWardenCtx *w, SomaRouterCtx *router) {
     if (router) {
         soma_router_set_threshold(router, 0.85f);
     }
+}
+
+// ─── soma_warden_immunion_sync ───────────────────────────────────────────────
+//
+// Phase P: bridge ImmunionEngine reactions into warden pressure.
+// Each new immunion reaction counts as a violation. If any reactions
+// occurred, pressure is raised to at least HIGH immediately (no hysteresis)
+// because a triggered immune reaction indicates a real threat event.
+
+int soma_warden_immunion_sync(SomaWardenCtx *w,
+                              const ImmunionEngine *imm,
+                              SomaRouterCtx *router,
+                              int turn) {
+    if (!w || !imm) return 0;
+
+    int snapshot = (int)imm->reactions_triggered;
+    int new_reactions = snapshot - w->last_immunion_reactions;
+    if (new_reactions <= 0) return 0;
+
+    w->last_immunion_reactions = snapshot;
+    w->immunion_escalations   += new_reactions;
+
+    // Count each reaction as a warden violation
+    w->violations_since_reset += new_reactions;
+
+    // Ensure at least HIGH pressure — bypass normal hysteresis
+    if (w->pressure_level < SOMA_PRESSURE_HIGH) {
+        w->pressure_level      = SOMA_PRESSURE_HIGH;
+        w->escalation_count++;
+        w->cortex_safety_floor = pressure_to_safety_floor(SOMA_PRESSURE_HIGH);
+        if (router) {
+            float thr = pressure_to_threshold(SOMA_PRESSURE_HIGH);
+            w->applied_threshold = thr;
+            soma_router_set_threshold(router, thr);
+        }
+    }
+
+    (void)turn;
+    return new_reactions;
 }
 
 // ─── soma_warden_status_str ──────────────────────────────────────────────────

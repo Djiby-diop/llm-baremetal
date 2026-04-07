@@ -38,6 +38,7 @@ typedef struct {
     int cortex_flagged;         // Cortex safety flags raised
     int warden_escalations;     // Warden pressure escalations
     int sentinel_trips;         // Sentinel budget/OOB trips
+    int immunion_reactions;     // Immunion threat reactions (Phase P)
 
     // Running confidence average (fixed-point: x1000)
     int conf_sum_x1000;         // Sum of confidence * 1000
@@ -69,6 +70,11 @@ void soma_session_record(SomaSessionCtx *s,
 // Compute fitness score (0-100) from accumulated session metrics.
 // Stores result in s->fitness_score and s->mutation_magnitude.
 int soma_session_score(SomaSessionCtx *s, const SomaWardenCtx *warden);
+
+// Phase P: Record immunion reactions delta for this session.
+// reactions_delta: new reactions since last call (from immunion.reactions_triggered delta).
+// Penalty applied in soma_session_score(): -6 per reaction.
+void soma_session_immunion_record(SomaSessionCtx *s, int reactions_delta);
 
 // Sync session stats back into DNA persistent counters.
 // Call before evolve or at session shutdown.

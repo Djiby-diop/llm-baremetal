@@ -7298,8 +7298,10 @@ static void llmk_repl_no_model_loop(void) {
     soma_warden_init(&g_soma_warden);
     // Phase N: init session fitness tracker
     soma_session_init(&g_soma_session);
+    // Phase P: enable immunion in record mode (logs threat patterns; no auto-react)
+    immunion_set_mode(&g_immunion, IMMUNION_MODE_RECORD);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-O initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-P initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -8211,6 +8213,31 @@ static void llmk_repl_no_model_loop(void) {
                   g_soma_warden.last_sentinel_tripped ? L"YES" : L"no",
                   g_soma_warden.last_sentinel_error,
                   (unsigned long long)g_soma_warden.last_dt_cycles);
+            continue;
+        }
+        // ─── Phase P: Immunion mode commands ─────────────────────────────────
+        if (my_strncmp(prompt, "/immunion_mode", 14) == 0) {
+            const char *arg = prompt + 14;
+            while (*arg == ' ') arg++;
+            ImmunionMode newmode = IMMUNION_MODE_RECORD;
+            if (arg[0] == 'o' && arg[1] == 'f' && arg[2] == 'f')
+                newmode = IMMUNION_MODE_OFF;
+            else if (arg[0] == 'a' && arg[1] == 'c' && arg[2] == 't')
+                newmode = IMMUNION_MODE_ACT;
+            immunion_set_mode(&g_immunion, newmode);
+            Print(L"\r\n[Immunion] Mode set to: %s\r\n\r\n",
+                  newmode == IMMUNION_MODE_OFF ? L"off" :
+                  newmode == IMMUNION_MODE_ACT ? L"act" : L"record");
+            continue;
+        }
+        if (my_strncmp(prompt, "/immunion_status", 16) == 0) {
+            Print(L"\r\n[Immunion] mode=%s  patterns=%d  reactions=%d  warden_esc=%d  session_imm=%d\r\n\r\n",
+                  g_immunion.mode == IMMUNION_MODE_OFF    ? L"off" :
+                  g_immunion.mode == IMMUNION_MODE_ACT    ? L"act" : L"record",
+                  (int)g_immunion.patterns_recorded,
+                  (int)g_immunion.reactions_triggered,
+                  g_soma_warden.immunion_escalations,
+                  g_soma_session.immunion_reactions);
             continue;
         }
         // ─── Phase N: Session Fitness + DNA Evolution commands ────────────
@@ -9891,7 +9918,19 @@ static void llmk_repl_no_model_loop(void) {
                                                             &g_sentinel, &g_zones,
                                                             &g_soma_router,
                                                             (int)g_soma_journal_total_turns);
-                            warden_escalated_this_turn = (wpress > wpress_prev) ? 1 : 0;
+                            // Phase P: immunion sync (before session record)
+                            {
+                                static int s_last_imm_reactions = 0;
+                                int imm_new = soma_warden_immunion_sync(
+                                    &g_soma_warden, &g_immunion,
+                                    &g_soma_router,
+                                    (int)g_soma_journal_total_turns);
+                                soma_session_immunion_record(&g_soma_session, imm_new);
+                                if (imm_new > 0) s_last_imm_reactions += imm_new;
+                                (void)s_last_imm_reactions;
+                            }
+                            warden_escalated_this_turn = (wpress > wpress_prev ||
+                                g_soma_warden.immunion_escalations > 0) ? 1 : 0;
                             if (wpress >= SOMA_PRESSURE_HIGH && g_boot_verbose) {
                                 char wbuf[96];
                                 soma_warden_status_str(&g_soma_warden, wbuf, 96);
