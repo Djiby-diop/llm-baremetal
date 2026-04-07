@@ -82,25 +82,35 @@ EFI_STATUS llmk_zones_init(EFI_BOOT_SERVICES *BS, const LlmkZonesConfig *cfg_in,
     EFI_PHYSICAL_ADDRESS base = 0;
     UINTN pages = (UINTN)((cfg.total_bytes + 4095ULL) / 4096ULL);
 
-    /* Try below 3.5GB first (avoids PCI hole on x86 q35 machines),
-       then fall back to anywhere. */
-    EFI_PHYSICAL_ADDRESS try_max = 0x00000000DFFFFFFF; /* 3.5GB - 1 */
-    EFI_PHYSICAL_ADDRESS hint = try_max;
-    EFI_STATUS st = uefi_call_wrapper(BS->AllocatePages, 4,
-                        AllocateMaxAddress, EfiLoaderData, pages, &hint);
-    if (!EFI_ERROR(st)) {
-        base = hint;
+    /* For large allocations (>1 GiB), skip the below-3.5GB hint: scanning a
+       constrained address range on OVMF/TCG with a large page count is very
+       slow and almost certainly fails anyway.  Go straight to AllocateAnyPages
+       which finds the first fit quickly.
+       For small allocations, keep the sub-3.5GB preference (avoids PCI hole). */
+    EFI_STATUS st;
+    if (cfg.total_bytes > (1ULL << 30)) {
+        /* Large: any address */
+        st = uefi_call_wrapper(BS->AllocatePages, 4,
+                    AllocateAnyPages, EfiLoaderData, pages, &base);
     } else {
-        /* Second try: below 2GB (guaranteed below 32-bit PCI hole) */
-        hint = 0x000000007FFFFFFF;
+        /* Small: try below 3.5GB first (avoids PCI hole on q35) */
+        EFI_PHYSICAL_ADDRESS hint = 0x00000000DFFFFFFF;
         st = uefi_call_wrapper(BS->AllocatePages, 4,
                     AllocateMaxAddress, EfiLoaderData, pages, &hint);
         if (!EFI_ERROR(st)) {
             base = hint;
         } else {
-            /* Last resort: any address */
+            /* Fallback: below 2GB */
+            hint = 0x000000007FFFFFFF;
             st = uefi_call_wrapper(BS->AllocatePages, 4,
-                        AllocateAnyPages, EfiLoaderData, pages, &base);
+                        AllocateMaxAddress, EfiLoaderData, pages, &hint);
+            if (!EFI_ERROR(st)) {
+                base = hint;
+            } else {
+                /* Last resort: any address */
+                st = uefi_call_wrapper(BS->AllocatePages, 4,
+                            AllocateAnyPages, EfiLoaderData, pages, &base);
+            }
         }
     }
     if (EFI_ERROR(st)) {

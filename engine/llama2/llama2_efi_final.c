@@ -708,10 +708,12 @@ static void llmk_mind_print_attach_audit(void) {
     }
 
     Print(L"  kind="); llmk_print_ascii(g_mind_runtime_state.attach_kind[0] ? g_mind_runtime_state.attach_kind : "attach-model"); Print(L"\r\n");
+    Print(L"  format="); llmk_print_ascii(g_mind_runtime_state.attach_format[0] ? g_mind_runtime_state.attach_format : "unknown"); Print(L"\r\n");
     Print(L"  path="); llmk_print_ascii(g_mind_runtime_state.attach_path); Print(L"\r\n");
     Print(L"  backend=");
     if (g_mind_runtime_state.attach_active) Print(L"validated-attach-backend\r\n");
     else Print(L"registered-not-active\r\n");
+    Print(L"  validation="); llmk_print_ascii(g_mind_runtime_state.attach_last_validation[0] ? g_mind_runtime_state.attach_last_validation : "not-recorded"); Print(L"\r\n");
     Print(L"  core_link=");
     if (g_mind_runtime_state.core_active) Print(L"core-active-attach-secondary\r\n");
     else if (g_mind_runtime_state.core_requested) Print(L"core-requested-not-active\r\n");
@@ -803,7 +805,8 @@ static void llmk_mind_print_doctor(void) {
         manual_count++;
     }
 
-    if (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active) {
+    if (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active &&
+        (!g_mind_runtime_state.attach_path[0] || !bootstrap_can_help)) {
         Print(L"    step%u=/attach_load <file>  ; attach is registered but not active, so revalidate or reload it\r\n", manual_step++);
         manual_count++;
     }
@@ -1003,12 +1006,10 @@ static void llmk_mind_bootstrap_v1(void) {
             LlmkModelFormat attach_fmt = LLMK_MODEL_FMT_UNKNOWN;
             EFI_STATUS at = llmk_mind_activate_attach_best_effort(g_mind_runtime_state.attach_path, &attach_fmt);
             if (EFI_ERROR(at)) {
+                llmk_mind_set_attach_validation("validation-failed");
                 Print(L"  note=attach remains optional; stored attach validation failed (%r)\r\n", at);
             } else {
-                g_mind_runtime_state.attach_active = 1;
-                llmk_copy_ascii_bounded(g_mind_runtime_state.attach_kind,
-                                        (int)sizeof(g_mind_runtime_state.attach_kind),
-                                        (attach_fmt == LLMK_MODEL_FMT_GGUF) ? "attach-gguf" : "attach-bin");
+                llmk_mind_mark_attach_active(attach_fmt);
                 Print(L"  action=/attach_load <stored.file> auto-applied from saved request format=%a\r\n",
                       llmk_model_format_ascii(attach_fmt));
                 actions++;
@@ -1108,7 +1109,7 @@ static void llmk_mind_print_snapshot(int strict_mode) {
 
     if (!strict_mode) Print(L"\r\n[MindSnapshot]\r\n");
     Print(L"%sformat=kv-v1\r\n", prefix);
-    Print(L"%sschema=llmk-mind-snapshot-v1\r\n", prefix);
+    Print(L"%sschema=llmk-mind-snapshot-v2\r\n", prefix);
     Print(L"%sfield_order=fixed\r\n", prefix);
     Print(L"%sstrict=%d\r\n", prefix, strict_mode ? 1 : 0);
     Print(L"%sidentity=oo-somamind-core-primary\r\n", prefix);
@@ -1125,6 +1126,9 @@ static void llmk_mind_print_snapshot(int strict_mode) {
     Print(L"%shalting_hook_ready=%d\r\n", prefix, g_mind_halting_view.ready ? 1 : 0);
     Print(L"%sattach_requested=%d\r\n", prefix, g_mind_runtime_state.attach_requested);
     Print(L"%sattach_active=%d\r\n", prefix, g_mind_runtime_state.attach_active);
+    Print(L"%sattach_kind=", prefix); llmk_print_ascii(g_mind_runtime_state.attach_kind[0] ? g_mind_runtime_state.attach_kind : "attach-model"); Print(L"\r\n");
+    Print(L"%sattach_format=", prefix); llmk_print_ascii(g_mind_runtime_state.attach_format[0] ? g_mind_runtime_state.attach_format : "unknown"); Print(L"\r\n");
+    Print(L"%sattach_validation=", prefix); llmk_print_ascii(g_mind_runtime_state.attach_last_validation[0] ? g_mind_runtime_state.attach_last_validation : "not-recorded"); Print(L"\r\n");
     Print(L"%shalt_policy_enabled=%d\r\n", prefix, g_mind_runtime_halt_enabled);
     Print(L"%shalt_policy_threshold=%d.%03d\r\n", prefix,
           (int)g_mind_runtime_halt_threshold,
@@ -1251,7 +1255,9 @@ static void llmk_mind_print_status(void) {
         if (g_mind_runtime_state.attach_active) Print(L"active\r\n");
         else Print(L"requested\r\n");
         Print(L"    kind="); llmk_print_ascii(g_mind_runtime_state.attach_kind[0] ? g_mind_runtime_state.attach_kind : "attach-model"); Print(L"\r\n");
+        Print(L"    format="); llmk_print_ascii(g_mind_runtime_state.attach_format[0] ? g_mind_runtime_state.attach_format : "unknown"); Print(L"\r\n");
         Print(L"    path="); llmk_print_ascii(g_mind_runtime_state.attach_path); Print(L"\r\n");
+        Print(L"    validation="); llmk_print_ascii(g_mind_runtime_state.attach_last_validation[0] ? g_mind_runtime_state.attach_last_validation : "not-recorded"); Print(L"\r\n");
         Print(L"    route=");
         if (g_mind_runtime_state.attach_active) Print(L"validated attach backend; attach remains secondary to the OO core\r\n");
         else Print(L"registered but inactive; re-run /attach_load to validate the file again\r\n");
@@ -1328,6 +1334,21 @@ static void llmk_mind_print_diag(void) {
 
     Print(L"  attach.path=");
     if (g_mind_runtime_state.attach_path[0]) llmk_print_ascii(g_mind_runtime_state.attach_path);
+    else Print(L"(none)");
+    Print(L"\r\n");
+
+    Print(L"  attach.kind=");
+    if (g_mind_runtime_state.attach_kind[0]) llmk_print_ascii(g_mind_runtime_state.attach_kind);
+    else Print(L"(none)");
+    Print(L"\r\n");
+
+    Print(L"  attach.format=");
+    if (g_mind_runtime_state.attach_format[0]) llmk_print_ascii(g_mind_runtime_state.attach_format);
+    else Print(L"(none)");
+    Print(L"\r\n");
+
+    Print(L"  attach.validation=");
+    if (g_mind_runtime_state.attach_last_validation[0]) llmk_print_ascii(g_mind_runtime_state.attach_last_validation);
     else Print(L"(none)");
     Print(L"\r\n");
 
@@ -8629,13 +8650,11 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n[Mind] Attach model registered: %s\r\n", path16);
             Print(L"  Role: optional external extension\r\n");
             if (EFI_ERROR(at)) {
+                llmk_mind_set_attach_validation("validation-failed");
                 Print(L"  State: registered but inactive; validation failed (%r).\r\n", at);
                 Print(L"  Next: re-run /attach_load <file> with a readable GGUF or BIN export.\r\n");
             } else {
-                g_mind_runtime_state.attach_active = 1;
-                llmk_copy_ascii_bounded(g_mind_runtime_state.attach_kind,
-                                        (int)sizeof(g_mind_runtime_state.attach_kind),
-                                        (attach_fmt == LLMK_MODEL_FMT_GGUF) ? "attach-gguf" : "attach-bin");
+                llmk_mind_mark_attach_active(attach_fmt);
                 Print(L"  State: active attached model backend validated.\r\n");
                 Print(L"  Format: %a\r\n", llmk_model_format_ascii(attach_fmt));
             }
@@ -8727,6 +8746,9 @@ static void llmk_repl_no_model_loop(void) {
             // If boot happened in no-model mode, zones were not set up yet.
             if (BS && g_zones.zone_b_base == 0) {
                 Print(L"[OOSI] Initializing memory zones (no-model boot path)...\r\n");
+                Print(L"[OOSI] Requesting %d MB contiguous (weights=%d MB kv=32 scratch=20 acts=4)\r\n",
+                      (int)(oosi_size / (1024*1024)) + 60,
+                      (int)(oosi_size / (1024*1024)));
                 LlmkZonesConfig ssm_cfg;
                 ssm_cfg.weights_bytes     = oosi_size;
                 // v3: SSM recurrent state (20MB h_state + 5MB conv_buf + 7MB margin = 32MB)
