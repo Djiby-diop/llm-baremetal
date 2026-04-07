@@ -81,6 +81,7 @@
 #include "../ssm/soma_logic.h"
 #include "../ssm/soma_memory.h"
 #include "../ssm/soma_journal.h"
+#include "../ssm/soma_cortex.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -3101,6 +3102,8 @@ static SomaMemCtx      g_soma_memory;
 // Phase I: persistent journal (autosave counter)
 static unsigned int    g_soma_journal_total_turns = 0;  // cumulative across sessions
 static int             g_soma_journal_turns_since_save = 0;
+// Phase J: oo-model cortex (small OOSS routing brain)
+static SomaCortexCtx   g_soma_cortex;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -7087,6 +7090,10 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_journal_load    Reload journal from disk into memory buffer\r\n");
     Print(L"  /soma_journal_clear   Erase soma_journal.bin (fresh start)\r\n");
     Print(L"  /soma_journal_stats   Show journal file stats (turns, sessions, entries)\r\n");
+    Print(L"  /cortex_load <file>   Load oo-model cortex (small OOSS 15M-130M)\r\n");
+    Print(L"  /cortex_infer <text>  Run cortex only (domain+safety classification)\r\n");
+    Print(L"  /cortex_stats         Show cortex load status and call stats\r\n");
+    Print(L"  /cortex [0|1]         Enable/disable cortex pre-routing\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7252,8 +7259,10 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"[SomaJournal] WARNING: journal corrupt or unreadable\r\n");
         }
     }
+    // Phase J: init cortex (loaded later via /cortex_load)
+    soma_cortex_init(&g_soma_cortex);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-I initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-J initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7944,6 +7953,158 @@ static void llmk_repl_no_model_loop(void) {
                     Print(L"[Journal] Disk:    no file (or unreadable)\r\n");
             }
             Print(L"\r\n");
+            continue;
+        }
+        // ── Phase J: Cortex commands ─────────────────────────────────────
+        if (my_strncmp(prompt, "/cortex_load", 12) == 0) {
+            const char *arg = prompt + 12;
+            while (*arg == ' ') arg++;
+            if (!arg[0]) {
+                Print(L"\r\nUsage: /cortex_load <small_ooss_model.bin>\r\n");
+                Print(L"  Load a compact oo-model OOSS (15M-130M params) as cortex brain.\r\n\r\n");
+                continue;
+            }
+            if (!g_root) { Print(L"\r\n[Cortex] ERROR: no EFI root\r\n\r\n"); continue; }
+            // Open file on EFI partition
+            CHAR16 cpath16[192];
+            ascii_to_char16(cpath16, arg, (int)(sizeof(cpath16)/sizeof(cpath16[0])));
+            EFI_FILE_HANDLE cfh = NULL;
+            EFI_STATUS cst = uefi_call_wrapper(g_root->Open, 5, g_root, &cfh,
+                                               cpath16, EFI_FILE_MODE_READ, 0ULL);
+            if (EFI_ERROR(cst)) {
+                Print(L"\r\n[Cortex] ERROR: cannot open %s (%r)\r\n\r\n", cpath16, cst);
+                continue;
+            }
+            // Get size
+            EFI_FILE_INFO *cfi = NULL; UINTN cfisz = SIZE_OF_EFI_FILE_INFO + 256;
+            uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, cfisz, (void **)&cfi);
+            if (!cfi) { uefi_call_wrapper(cfh->Close, 1, cfh); Print(L"\r\n[Cortex] ERROR: alloc\r\n\r\n"); continue; }
+            uefi_call_wrapper(cfh->GetInfo, 4, cfh, &gEfiFileInfoGuid, &cfisz, cfi);
+            UINT64 csz = cfi->FileSize;
+            uefi_call_wrapper(BS->FreePool, 1, cfi);
+            Print(L"\r\n[Cortex] Loading %s (%d MB)...\r\n", cpath16, (int)(csz/(1024*1024)));
+            // Allocate from ZONE_C arena (dedicated cortex weights slot)
+            void *cbuf = llmk_arena_alloc(&g_zones, LLMK_ARENA_ZONE_C, csz, 64);
+            if (!cbuf) {
+                uefi_call_wrapper(cfh->Close, 1, cfh);
+                Print(L"[Cortex] ERROR: ZONE_C arena full (%d MB needed)\r\n\r\n", (int)(csz/(1024*1024)));
+                continue;
+            }
+            // Read file
+            UINT8 *cdst = (UINT8 *)cbuf; UINT64 crem = csz; int cok = 1;
+            while (crem > 0) {
+                UINTN chunk = (crem > 4*1024*1024) ? 4*1024*1024 : (UINTN)crem;
+                cst = uefi_call_wrapper(cfh->Read, 3, cfh, &chunk, cdst);
+                if (EFI_ERROR(cst) || chunk == 0) { cok = 0; break; }
+                cdst += chunk; crem -= chunk;
+            }
+            uefi_call_wrapper(cfh->Close, 1, cfh);
+            if (!cok) { Print(L"[Cortex] ERROR: read failed\r\n\r\n"); continue; }
+            // Allocate runtime buffers from SCRATCH arena
+            // Peek header to get dimensions
+            OosiV3Header *ch = (OosiV3Header *)cbuf;
+            if (ch->magic != OOSI_V3_MAGIC) {
+                Print(L"[Cortex] ERROR: not an OOSS v3 file (magic=0x%X)\r\n\r\n", ch->magic);
+                continue;
+            }
+            int cD  = (int)ch->d_model;
+            int cDi = (int)(ch->d_model * ch->expand);
+            int cS  = (int)ch->d_state;
+            int cDc = (int)ch->d_conv;
+            int cDt = (int)ch->dt_rank;
+            int cN  = (int)ch->n_layer;
+            int cV  = (int)ch->vocab_size;
+            int cHd = (int)ch->halt_d_input;
+            UINT64 csc_b = (UINT64)(3*cD + 4*cDi + cDt + 2*cS + 4) * sizeof(float);
+            UINT64 chs_b = (UINT64)cN * cDi * cS * sizeof(float);
+            UINT64 ccv_b = (UINT64)cN * cDi * cDc * sizeof(float);
+            UINT64 ccp_b = (UINT64)cN * sizeof(int);
+            g_soma_cortex.scratch  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, csc_b, 64);
+            g_soma_cortex.logits   = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, (UINT64)cV*sizeof(float), 16);
+            g_soma_cortex.h_state  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, chs_b, 64);
+            g_soma_cortex.conv_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, ccv_b, 64);
+            g_soma_cortex.conv_pos = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, ccp_b, 4);
+            g_soma_cortex.halt_h1  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, 512*sizeof(float), 16);
+            g_soma_cortex.halt_h2  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, 64*sizeof(float), 16);
+            g_soma_cortex.halt_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, (UINT64)(cHd+1)*sizeof(float), 16);
+            if (!g_soma_cortex.scratch || !g_soma_cortex.logits || !g_soma_cortex.h_state ||
+                !g_soma_cortex.conv_buf || !g_soma_cortex.conv_pos) {
+                Print(L"[Cortex] ERROR: SCRATCH arena exhausted\r\n\r\n");
+                continue;
+            }
+            int cr = soma_cortex_load(&g_soma_cortex, cbuf, csz, arg);
+            if (cr == 0) {
+                Print(L"[Cortex] OK: loaded %s (d=%d n=%d v=%d)\r\n",
+                      cpath16, cD, cN, cV);
+                Print(L"[Cortex] domain/safety routing active. Use /cortex [0|1] to toggle.\r\n\r\n");
+            } else {
+                Print(L"[Cortex] ERROR: soma_cortex_load failed (code %d)\r\n\r\n", cr);
+            }
+            (void)cDt; (void)cHd;
+            continue;
+        }
+        if (my_strncmp(prompt, "/cortex_infer", 13) == 0) {
+            const char *arg = prompt + 13;
+            while (*arg == ' ') arg++;
+            if (!arg[0]) { Print(L"\r\nUsage: /cortex_infer <text>\r\n\r\n"); continue; }
+            if (!g_soma_cortex.loaded) {
+                Print(L"\r\n[Cortex] Not loaded. Use /cortex_load <file>\r\n\r\n"); continue;
+            }
+            SomaCortexResult cr = soma_cortex_run(&g_soma_cortex, arg);
+            if (cr.valid) {
+                Print(L"\r\n[Cortex] domain=%d conf=%d%% safety=%d%s prefix=\"",
+                      cr.domain, cr.domain_conf, cr.safety_score,
+                      cr.safety_flagged ? L" [FLAGGED]" : L"");
+                for (int pi = 0; pi < cr.prefix_len; pi++)
+                    Print(L"%c", (CHAR16)(unsigned char)cr.prefix[pi]);
+                Print(L"\"\r\n[Cortex] tokens=%d ids:", cr.n_tokens);
+                for (int ti = 0; ti < cr.n_tokens && ti < 8; ti++)
+                    Print(L" %d", cr.token_ids[ti]);
+                Print(L"\r\n\r\n");
+            } else {
+                Print(L"\r\n[Cortex] inference failed\r\n\r\n");
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/cortex_stats", 13) == 0) {
+            Print(L"\r\n[Cortex] loaded=%s enabled=%s model=%s\r\n",
+                  g_soma_cortex.loaded ? L"yes" : L"no",
+                  g_soma_cortex.enabled ? L"yes" : L"no",
+                  g_soma_cortex.loaded ? L"ok" : L"none");
+            if (g_soma_cortex.loaded) {
+                Print(L"  calls=%d flagged=%d\r\n",
+                      g_soma_cortex.total_calls, g_soma_cortex.total_flagged);
+                Print(L"  d_model=%d n_layer=%d vocab=%d\r\n",
+                      g_soma_cortex.weights.d_model,
+                      g_soma_cortex.weights.n_layer,
+                      g_soma_cortex.weights.vocab_size);
+                // Print model name
+                Print(L"  model: ");
+                for (int mi = 0; g_soma_cortex.model_name[mi]; mi++)
+                    Print(L"%c", (CHAR16)(unsigned char)g_soma_cortex.model_name[mi]);
+                Print(L"\r\n");
+            }
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/cortex", 7) == 0) {
+            const char *arg = prompt + 7;
+            while (*arg == ' ') arg++;
+            if (*arg == '0') {
+                g_soma_cortex.enabled = 0;
+                Print(L"\r\n[Cortex] disabled\r\n\r\n");
+            } else if (*arg == '1') {
+                if (!g_soma_cortex.loaded) {
+                    Print(L"\r\n[Cortex] ERROR: not loaded yet. Use /cortex_load first.\r\n\r\n");
+                } else {
+                    g_soma_cortex.enabled = 1;
+                    Print(L"\r\n[Cortex] enabled\r\n\r\n");
+                }
+            } else {
+                Print(L"\r\n[Cortex] %s  calls=%d flagged=%d\r\n\r\n",
+                      g_soma_cortex.loaded ? (g_soma_cortex.enabled ? L"ACTIVE" : L"LOADED/DISABLED") : L"NOT LOADED",
+                      g_soma_cortex.total_calls, g_soma_cortex.total_flagged);
+            }
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
@@ -9227,6 +9388,24 @@ static void llmk_repl_no_model_loop(void) {
                 g_soma_dna.total_interactions++;
             }
             // ── end SomaMind Router ──────────────────────────────────────
+
+            // ── Phase J: Cortex pre-routing ─────────────────────────────────
+            // Run small oo-model cortex to classify domain + safety BEFORE Mamba-2.8B.
+            if (g_soma_cortex.loaded && g_soma_cortex.enabled) {
+                SomaCortexResult cr = soma_cortex_run(&g_soma_cortex, text);
+                if (cr.valid) {
+                    // Safety gate: warn on low safety score
+                    if (cr.safety_flagged) {
+                        Print(L"[Cortex] WARNING: safety_score=%d (threshold=%d) — continuing\r\n",
+                              cr.safety_score, SOMA_CORTEX_SAFE_THRESHOLD);
+                    }
+                    if (g_boot_verbose) {
+                        Print(L"[Cortex] domain=%d conf=%d%% safety=%d%s\r\n",
+                              cr.domain, cr.domain_conf, cr.safety_score,
+                              cr.safety_flagged ? L" [FLAG]" : L"");
+                    }
+                }
+            }
 
             // ── SomaMind Reflex: symbolic math + logic + memory pre-solve ───
             // Builds augmented prompt: [MEM:...]\n[MATH:...]\n[LOGIC:...]\n<original>
