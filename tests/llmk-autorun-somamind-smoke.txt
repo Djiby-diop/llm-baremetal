@@ -1,0 +1,11 @@
+# SomaMind Phase T smoke: validates all Phase A-S subsystems initialized
+# No model required - status commands work independently of inference
+
+/soma_status
+/immunion_status
+/sym_status
+/sym_mode
+/pheromion_status
+/dna_sampler
+/warden_status
+/session_status
