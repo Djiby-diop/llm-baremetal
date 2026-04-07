@@ -79,6 +79,7 @@
 #include "../ssm/soma_swarm.h"
 #include "../ssm/soma_reflex.h"
 #include "../ssm/soma_logic.h"
+#include "../ssm/soma_memory.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -122,8 +123,10 @@ typedef struct {
     int sidecar_active;
     char attach_path[192];
     char attach_kind[32];
+    char attach_format[16];
     int attach_requested;
     int attach_active;
+    char attach_last_validation[96];
     UINT32 sidecar_version;
     UINT32 sidecar_d_model;
     UINT32 sidecar_n_layer;
@@ -244,6 +247,8 @@ static void llmk_mind_clear_attach(void) {
     g_mind_runtime_state.attach_active = 0;
     g_mind_runtime_state.attach_path[0] = 0;
     g_mind_runtime_state.attach_kind[0] = 0;
+    g_mind_runtime_state.attach_format[0] = 0;
+    g_mind_runtime_state.attach_last_validation[0] = 0;
 }
 
 static void llmk_mind_set_core_request(const char *path, const char *kind) {
@@ -374,8 +379,49 @@ static void llmk_mind_set_sidecar_validation(const char *msg) {
 static void llmk_mind_set_attach_request(const char *path, const char *kind) {
     llmk_copy_ascii_bounded(g_mind_runtime_state.attach_path, (int)sizeof(g_mind_runtime_state.attach_path), path);
     llmk_copy_ascii_bounded(g_mind_runtime_state.attach_kind, (int)sizeof(g_mind_runtime_state.attach_kind), kind ? kind : "attach-model");
+    g_mind_runtime_state.attach_format[0] = 0;
     g_mind_runtime_state.attach_requested = (path && path[0]) ? 1 : 0;
     g_mind_runtime_state.attach_active = 0;
+    llmk_copy_ascii_bounded(g_mind_runtime_state.attach_last_validation,
+                            (int)sizeof(g_mind_runtime_state.attach_last_validation),
+                            g_mind_runtime_state.attach_requested ? "requested-not-validated" : "");
+}
+
+static void llmk_mind_set_attach_validation(const char *msg) {
+    llmk_copy_ascii_bounded(
+        g_mind_runtime_state.attach_last_validation,
+        (int)sizeof(g_mind_runtime_state.attach_last_validation),
+        msg ? msg : ""
+    );
+}
+
+static int llmk_ascii_streq(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+static void llmk_mind_store_attach_format(LlmkModelFormat fmt) {
+    const char *fmt_s = "unknown";
+    if (fmt == LLMK_MODEL_FMT_GGUF) fmt_s = "gguf";
+    else if (fmt == LLMK_MODEL_FMT_BIN) fmt_s = "bin";
+    llmk_copy_ascii_bounded(g_mind_runtime_state.attach_format,
+                            (int)sizeof(g_mind_runtime_state.attach_format),
+                            fmt_s);
+}
+
+static void llmk_mind_mark_attach_active(LlmkModelFormat fmt) {
+    g_mind_runtime_state.attach_active = g_mind_runtime_state.attach_requested ? 1 : 0;
+    llmk_copy_ascii_bounded(g_mind_runtime_state.attach_kind,
+                            (int)sizeof(g_mind_runtime_state.attach_kind),
+                            (fmt == LLMK_MODEL_FMT_GGUF) ? "attach-gguf" :
+                            (fmt == LLMK_MODEL_FMT_BIN) ? "attach-bin" : "attach-model");
+    llmk_mind_store_attach_format(fmt);
+    llmk_mind_set_attach_validation("validated");
 }
 
 /* Forward declarations for mind halt policy helpers (defined later) */
@@ -387,8 +433,10 @@ static EFI_STATUS llmk_mind_load_halt_policy_best_effort(void);
 static EFI_STATUS llmk_mind_apply_saved_halt_policy_best_effort(int *out_changed_enabled, int *out_changed_threshold);
 static EFI_STATUS llmk_mind_apply_saved_halt_policy_if_needed_best_effort(int *out_was_needed, int *out_changed_enabled, int *out_changed_threshold);
 static EFI_STATUS llmk_read_entire_file_best_effort(const CHAR16 *name, void **out_buf, UINTN *out_len);
+static EFI_STATUS llmk_open_read_file(EFI_FILE_HANDLE *out, const CHAR16 *name);
 static void llmk_mind_bind_core_backbone_v1(const char *path, int via_core_alias);
 static EFI_STATUS llmk_mind_register_sidecar_best_effort(const char *path, LlmkOoSidecarHeader *out_hdr, UINTN *out_raw_len);
+static EFI_STATUS llmk_mind_activate_attach_best_effort(const char *path, LlmkModelFormat *out_fmt);
 static void llmk_mind_collect_runtime_snapshot(LlmkMindRuntimeSnapshot *out);
 static void llmk_mind_select_next_action_from_snapshot(const LlmkMindRuntimeSnapshot *snapshot, const CHAR16 **out_action, const CHAR16 **out_reason);
 static void llmk_mind_select_next_action(const CHAR16 **out_action, const CHAR16 **out_reason, int *out_ready, int *out_core_ready, int *out_halt_ready, int *out_sidecar_ready);
@@ -458,7 +506,10 @@ static void llmk_mind_collect_runtime_snapshot(LlmkMindRuntimeSnapshot *out) {
     snapshot.ready = (snapshot.core_ready && snapshot.halt_ready && snapshot.sidecar_ready) ? 1 : 0;
     if ((g_mind_runtime_state.core_requested && !g_mind_runtime_state.core_active && g_mind_runtime_state.core_path[0]) ||
         (EFI_ERROR(snapshot.cfg_st) || !snapshot.found_any || !snapshot.in_sync) ||
-        (g_mind_runtime_state.sidecar_requested && !g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_path[0])) {
+        (g_mind_runtime_state.sidecar_requested && !g_mind_runtime_state.sidecar_active && g_mind_runtime_state.sidecar_path[0]) ||
+        (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active &&
+         g_mind_runtime_state.attach_path[0] &&
+         !llmk_ascii_streq(g_mind_runtime_state.attach_last_validation, "validation-failed"))) {
         snapshot.bootstrap_can_help = 1;
     }
 
@@ -659,15 +710,15 @@ static void llmk_mind_print_attach_audit(void) {
     Print(L"  kind="); llmk_print_ascii(g_mind_runtime_state.attach_kind[0] ? g_mind_runtime_state.attach_kind : "attach-model"); Print(L"\r\n");
     Print(L"  path="); llmk_print_ascii(g_mind_runtime_state.attach_path); Print(L"\r\n");
     Print(L"  backend=");
-    if (g_mind_runtime_state.attach_active) Print(L"active-attach-backend\r\n");
-    else Print(L"registered-only-backend-not-wired\r\n");
+    if (g_mind_runtime_state.attach_active) Print(L"validated-attach-backend\r\n");
+    else Print(L"registered-not-active\r\n");
     Print(L"  core_link=");
     if (g_mind_runtime_state.core_active) Print(L"core-active-attach-secondary\r\n");
     else if (g_mind_runtime_state.core_requested) Print(L"core-requested-not-active\r\n");
     else Print(L"no-core-bound-attach-alone\r\n");
     Print(L"  suggested_action=");
     if (!g_mind_runtime_state.core_active) Print(L"/core_load <file.mamb>\r\n");
-    else if (!g_mind_runtime_state.attach_active) Print(L"await-future-attach-backend\r\n");
+    else if (!g_mind_runtime_state.attach_active) Print(L"/attach_load <file>\r\n");
     else Print(L"attach-ready\r\n");
     Print(L"  rule=attach-must-not-redefine-oo-core\r\n\r\n");
 }
@@ -753,7 +804,7 @@ static void llmk_mind_print_doctor(void) {
     }
 
     if (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active) {
-        Print(L"    step%u=wait for future attach backend  ; attach is registered but backend is not wired yet\r\n", manual_step++);
+        Print(L"    step%u=/attach_load <file>  ; attach is registered but not active, so revalidate or reload it\r\n", manual_step++);
         manual_count++;
     }
 
@@ -818,8 +869,8 @@ static void llmk_mind_select_next_action_from_snapshot(
     }
 
     if (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active) {
-        if (out_action) *out_action = L"wait for future attach backend";
-        if (out_reason) *out_reason = L"attach is optional and currently not wired";
+        if (out_action) *out_action = L"/attach_load <file>";
+        if (out_reason) *out_reason = L"attach request is stored but the attached model is not active";
         return;
     }
 
@@ -948,7 +999,23 @@ static void llmk_mind_bootstrap_v1(void) {
     }
 
     if (g_mind_runtime_state.attach_requested && !g_mind_runtime_state.attach_active) {
-        Print(L"  note=attach remains optional; backend not wired yet\r\n");
+        if (g_mind_runtime_state.attach_path[0]) {
+            LlmkModelFormat attach_fmt = LLMK_MODEL_FMT_UNKNOWN;
+            EFI_STATUS at = llmk_mind_activate_attach_best_effort(g_mind_runtime_state.attach_path, &attach_fmt);
+            if (EFI_ERROR(at)) {
+                Print(L"  note=attach remains optional; stored attach validation failed (%r)\r\n", at);
+            } else {
+                g_mind_runtime_state.attach_active = 1;
+                llmk_copy_ascii_bounded(g_mind_runtime_state.attach_kind,
+                                        (int)sizeof(g_mind_runtime_state.attach_kind),
+                                        (attach_fmt == LLMK_MODEL_FMT_GGUF) ? "attach-gguf" : "attach-bin");
+                Print(L"  action=/attach_load <stored.file> auto-applied from saved request format=%a\r\n",
+                      llmk_model_format_ascii(attach_fmt));
+                actions++;
+            }
+        } else {
+            Print(L"  note=attach remains optional; no stored attach path is available\r\n");
+        }
     }
 
     llmk_mind_collect_runtime_snapshot(&snapshot);
@@ -1186,8 +1253,8 @@ static void llmk_mind_print_status(void) {
         Print(L"    kind="); llmk_print_ascii(g_mind_runtime_state.attach_kind[0] ? g_mind_runtime_state.attach_kind : "attach-model"); Print(L"\r\n");
         Print(L"    path="); llmk_print_ascii(g_mind_runtime_state.attach_path); Print(L"\r\n");
         Print(L"    route=");
-        if (g_mind_runtime_state.attach_active) Print(L"active attach backend\r\n");
-        else Print(L"registered only; backend not wired yet\r\n");
+        if (g_mind_runtime_state.attach_active) Print(L"validated attach backend; attach remains secondary to the OO core\r\n");
+        else Print(L"registered but inactive; re-run /attach_load to validate the file again\r\n");
     } else {
         Print(L"none\r\n");
     }
@@ -1688,6 +1755,71 @@ static LlmkModelFormat llmk_detect_model_format(EFI_FILE_HANDLE f) {
     if (m[0] == 'G' && m[1] == 'G' && m[2] == 'U' && m[3] == 'F') return LLMK_MODEL_FMT_GGUF;
     // .bin (llama2.c weights) does not have a magic; treat as BIN by default.
     return LLMK_MODEL_FMT_BIN;
+}
+
+static const char *llmk_model_format_ascii(LlmkModelFormat fmt) {
+    if (fmt == LLMK_MODEL_FMT_GGUF) return "gguf";
+    if (fmt == LLMK_MODEL_FMT_BIN) return "bin";
+    return "unknown";
+}
+
+static int llmk_bin_header_looks_valid(const int hdr[7]) {
+    int dim = hdr[0];
+    int hidden_dim = hdr[1];
+    int n_layers = hdr[2];
+    int n_heads = hdr[3];
+    int n_kv_heads = hdr[4];
+    int vocab_size = hdr[5];
+    int seq_len = hdr[6];
+
+    if (dim <= 0 || hidden_dim <= 0 || n_layers <= 0 || n_heads <= 0 || n_kv_heads <= 0) return 0;
+    if (n_kv_heads > n_heads) return 0;
+    if (vocab_size == 0) return 0;
+    if (seq_len <= 0) return 0;
+    return 1;
+}
+
+static EFI_STATUS llmk_mind_activate_attach_best_effort(const char *path, LlmkModelFormat *out_fmt) {
+    if (out_fmt) *out_fmt = LLMK_MODEL_FMT_UNKNOWN;
+    if (!path || !path[0]) return EFI_INVALID_PARAMETER;
+
+    CHAR16 path16[192];
+    ascii_to_char16(path16, path, (int)(sizeof(path16) / sizeof(path16[0])));
+
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_read_file(&f, path16);
+    if (EFI_ERROR(st) || !f) return EFI_NOT_FOUND;
+
+    LlmkModelFormat fmt = llmk_detect_model_format(f);
+    if (fmt == LLMK_MODEL_FMT_UNKNOWN) {
+        uefi_call_wrapper(f->Close, 1, f);
+        return EFI_UNSUPPORTED;
+    }
+
+    if (fmt == LLMK_MODEL_FMT_GGUF) {
+        GgufSummary summary;
+        st = gguf_read_summary(f, &summary);
+        uefi_call_wrapper(f->Close, 1, f);
+        if (EFI_ERROR(st)) return st;
+    } else {
+        EFI_STATUS pst = uefi_call_wrapper(f->SetPosition, 2, f, 0);
+        if (EFI_ERROR(pst)) {
+            uefi_call_wrapper(f->Close, 1, f);
+            return pst;
+        }
+
+        int hdr[7]; // SAFE: fixed-size BIN header (7 ints) read in one shot
+        for (int k = 0; k < 7; k++) hdr[k] = 0;
+        UINTN bytes = (UINTN)(7 * sizeof(int));
+        EFI_STATUS rst = uefi_call_wrapper(f->Read, 3, f, &bytes, hdr);
+        uefi_call_wrapper(f->Close, 1, f);
+        if (EFI_ERROR(rst)) return rst;
+        if (bytes != (UINTN)(7 * sizeof(int))) return EFI_END_OF_FILE;
+        if (!llmk_bin_header_looks_valid(hdr)) return EFI_LOAD_ERROR;
+    }
+
+    if (out_fmt) *out_fmt = fmt;
+    return EFI_SUCCESS;
 }
 
 static int llmk_char16_tolower(int c) {
@@ -2943,6 +3075,7 @@ static SomaSwarmCtx    g_soma_swarm;
 static SomaSwarmResult g_soma_swarm_last; // Last vote result (for fitness update)
 static SomaReflexCtx   g_soma_reflex;
 static SomaLogicCtx    g_soma_logic;
+static SomaMemCtx      g_soma_memory;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -6883,12 +7016,12 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /mind_bootstrap_v1  Auto-apply the obvious safe V1 bootstrap steps\r\n");
     Print(L"  /mind_path_v1  Print the minimal recommended V1 startup path\r\n");
     Print(L"  /oo_sidecar_audit  Audit the registered OOSS sidecar state and readiness\r\n");
-    Print(L"  /attach_audit  Audit the registered attached model state and role\r\n");
+    Print(L"  /attach_audit  Audit the registered attached model validation state and role\r\n");
     Print(L"  /mind_halt_policy_reset  Restore the V1 runtime halt policy defaults\r\n");
     Print(L"  /mind_halt_policy_diff  Compare runtime halt policy vs repl.cfg\r\n");
     Print(L"  /oo_sidecar <file>    Register an OO sidecar extension (future OOSS path)\r\n");
     Print(L"  /oo_sidecar_unload    Remove the registered OO sidecar\r\n");
-    Print(L"  /attach_load <file>   Register an optional attached external model\r\n");
+    Print(L"  /attach_load <file>   Validate and attach an optional external model\r\n");
     Print(L"  /attach_unload        Detach the optional external model\r\n");
     Print(L"  /mind_status          Show core vs attach runtime topology\r\n");
     Print(L"\r\n  SSM Inference:\r\n");
@@ -6922,6 +7055,9 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_reflex_test <expr>  Test reflex scanner on an expression\r\n");
     Print(L"  /soma_logic [0|1]     Enable/disable syllogism/logic pre-solver\r\n");
     Print(L"  /soma_logic_test <sentence>  Test logic scanner\r\n");
+    Print(L"  /soma_memory [0|1]    Enable/disable session memory reflex\r\n");
+    Print(L"  /soma_memory_stats    Show session memory ring buffer stats\r\n");
+    Print(L"  /soma_memory_test <prompt>  Test memory scan on a prompt\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7072,8 +7208,9 @@ static void llmk_repl_no_model_loop(void) {
     g_soma_swarm.ready   = 0;
     soma_reflex_init(&g_soma_reflex);
     soma_logic_init(&g_soma_logic);
+    soma_memory_init(&g_soma_memory);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-G initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-H initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7634,6 +7771,83 @@ static void llmk_repl_no_model_loop(void) {
                       g_soma_logic.total_triggers,
                       g_soma_logic.total_derived,
                       g_soma_logic.total_contradictions);
+            }
+            continue;
+        }
+        // ── Memory Reflex commands (Phase H) ─────────────────────────────
+        if (my_strncmp(prompt, "/soma_memory_test", 17) == 0) {
+            const char *arg = prompt + 17;
+            while (*arg == ' ') arg++;
+            if (*arg) {
+                SomaMemResult mr = soma_memory_scan(&g_soma_memory, arg);
+                if (mr.triggered) {
+                    Print(L"\r\n[Memory] Match found! turn=%d sim=%d%%\r\n",
+                          mr.match_turn, mr.match_similarity);
+                    Print(L"[Memory] Past prompt : ");
+                    for (int mi = 0; mr.match_prompt[mi]; mi++)
+                        Print(L"%c", (CHAR16)(unsigned char)mr.match_prompt[mi]);
+                    Print(L"\r\n[Memory] Past response: ");
+                    for (int mi = 0; mr.match_response[mi]; mi++)
+                        Print(L"%c", (CHAR16)(unsigned char)mr.match_response[mi]);
+                    Print(L"\r\n[Memory] Injection: ");
+                    for (int mi = 0; mr.injection[mi]; mi++)
+                        Print(L"%c", (CHAR16)(unsigned char)mr.injection[mi]);
+                    Print(L"\r\n\r\n");
+                } else {
+                    Print(L"\r\n[Memory] No match in %d entries (turns=%d)\r\n\r\n",
+                          g_soma_memory.count, g_soma_memory.total_turns);
+                }
+            } else {
+                Print(L"\r\n[Memory] usage: /soma_memory_test <prompt>\r\n\r\n");
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_memory_stats", 18) == 0) {
+            Print(L"\r\n[Memory] Phase H: Session Memory & Journal Reflex\r\n");
+            Print(L"  status    : %s\r\n", g_soma_memory.enabled ? L"ON" : L"OFF");
+            Print(L"  boot_count: %d\r\n",  g_soma_memory.boot_count);
+            Print(L"  turns     : %d\r\n",  g_soma_memory.total_turns);
+            Print(L"  entries   : %d / %d\r\n", g_soma_memory.count, SOMA_MEM_MAX_ENTRIES);
+            Print(L"  triggers  : %d\r\n",  g_soma_memory.total_triggers);
+            if (g_soma_memory.model_name[0]) {
+                Print(L"  model     : ");
+                for (int mi = 0; g_soma_memory.model_name[mi]; mi++)
+                    Print(L"%c", (CHAR16)(unsigned char)g_soma_memory.model_name[mi]);
+                Print(L"\r\n");
+            }
+            // Show last 4 entries
+            if (g_soma_memory.count > 0) {
+                Print(L"  recent entries:\r\n");
+                int shown = 0;
+                for (int ei = SOMA_MEM_MAX_ENTRIES - 1; ei >= 0 && shown < 4; ei--) {
+                    int idx = (g_soma_memory.head - 1 - shown + SOMA_MEM_MAX_ENTRIES) % SOMA_MEM_MAX_ENTRIES;
+                    SomaMemEntry *e = &g_soma_memory.entries[idx];
+                    if (!e->valid) continue;
+                    Print(L"    [%d] turn=%d  prompt=", shown, e->turn);
+                    for (int ci = 0; e->prompt[ci] && ci < 40; ci++)
+                        Print(L"%c", (CHAR16)(unsigned char)e->prompt[ci]);
+                    Print(L"\r\n");
+                    shown++;
+                }
+            }
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/soma_memory", 12) == 0) {
+            const char *arg = prompt + 12;
+            while (*arg == ' ') arg++;
+            if (*arg == '0') {
+                g_soma_memory.enabled = 0;
+                Print(L"\r\n[Memory] disabled\r\n\r\n");
+            } else if (*arg == '1') {
+                g_soma_memory.enabled = 1;
+                Print(L"\r\n[Memory] enabled\r\n\r\n");
+            } else {
+                Print(L"\r\n[Memory] status: %s  turns=%d entries=%d/%d triggers=%d\r\n\r\n",
+                      g_soma_memory.enabled ? L"ON" : L"OFF",
+                      g_soma_memory.total_turns,
+                      g_soma_memory.count, SOMA_MEM_MAX_ENTRIES,
+                      g_soma_memory.total_triggers);
             }
             continue;
         }
@@ -8404,15 +8618,27 @@ static void llmk_repl_no_model_loop(void) {
             while (*arg == ' ' || *arg == '\t') arg++;
             if (!arg[0]) {
                 Print(L"\r\nUsage: /attach_load <model>\r\n");
-                Print(L"  Register an optional external attached model without redefining the OO core.\r\n\r\n");
+                Print(L"  Validate and attach an optional external model without redefining the OO core.\r\n\r\n");
                 continue;
             }
             llmk_mind_set_attach_request(arg, "attach-model");
             CHAR16 path16[192];
             ascii_to_char16(path16, arg, (int)(sizeof(path16) / sizeof(path16[0])));
+            LlmkModelFormat attach_fmt = LLMK_MODEL_FMT_UNKNOWN;
+            EFI_STATUS at = llmk_mind_activate_attach_best_effort(arg, &attach_fmt);
             Print(L"\r\n[Mind] Attach model registered: %s\r\n", path16);
             Print(L"  Role: optional external extension\r\n");
-            Print(L"  State: requested only; attach backend not wired yet.\r\n");
+            if (EFI_ERROR(at)) {
+                Print(L"  State: registered but inactive; validation failed (%r).\r\n", at);
+                Print(L"  Next: re-run /attach_load <file> with a readable GGUF or BIN export.\r\n");
+            } else {
+                g_mind_runtime_state.attach_active = 1;
+                llmk_copy_ascii_bounded(g_mind_runtime_state.attach_kind,
+                                        (int)sizeof(g_mind_runtime_state.attach_kind),
+                                        (attach_fmt == LLMK_MODEL_FMT_GGUF) ? "attach-gguf" : "attach-bin");
+                Print(L"  State: active attached model backend validated.\r\n");
+                Print(L"  Format: %a\r\n", llmk_model_format_ascii(attach_fmt));
+            }
             Print(L"  Rule: attached models do not redefine OO-SomaMind identity.\r\n\r\n");
             continue;
         }
@@ -8646,6 +8872,9 @@ static void llmk_repl_no_model_loop(void) {
                 }
                 g_oosi_v3_valid = 1;
                 Print(L"[OOSI-v3] OK: full SSM inference ready. Use /ssm_infer <text>\r\n");
+                // Phase H: record which model is loaded
+                if (g_soma_memory.enabled)
+                    soma_memory_set_model(&g_soma_memory, arg);
 
                 // Precompute -exp(A_log) — skip if baked into binary (NEGA trailer)
                 if (g_oosi_v3_ctx.neg_exp_A) {
@@ -8903,12 +9132,26 @@ static void llmk_repl_no_model_loop(void) {
             }
             // ── end SomaMind Router ──────────────────────────────────────
 
-            // ── SomaMind Reflex: symbolic math + logic pre-solve ─────────────
-            // Builds augmented prompt: [MATH:...]\n[LOGIC:...]\n<original>
-            char reflex_prompt[512 + SOMA_REFLEX_INJECT_MAX + SOMA_LOGIC_INJECT_MAX];
+            // ── SomaMind Reflex: symbolic math + logic + memory pre-solve ───
+            // Builds augmented prompt: [MEM:...]\n[MATH:...]\n[LOGIC:...]\n<original>
+            char reflex_prompt[512 + SOMA_REFLEX_INJECT_MAX + SOMA_LOGIC_INJECT_MAX + SOMA_MEM_INJECT_MAX];
             const char *infer_text = text;
-            if (g_soma_initialized && (g_soma_reflex.enabled || g_soma_logic.enabled)) {
+            if (g_soma_initialized && (g_soma_reflex.enabled || g_soma_logic.enabled || g_soma_memory.enabled)) {
                 int ip = 0;
+                // Memory reflex (Phase H) — injects historical context first
+                if (g_soma_memory.enabled) {
+                    SomaMemResult mr = soma_memory_scan(&g_soma_memory, text);
+                    if (mr.triggered) {
+                        for (int mi = 0; mi < mr.injection_len && ip < (int)sizeof(reflex_prompt) - 2; mi++)
+                            reflex_prompt[ip++] = mr.injection[mi];
+                        if (g_boot_verbose) {
+                            Print(L"[Reflex/Memory] ");
+                            for (int mi = 0; mr.injection[mi] && mi < 70; mi++)
+                                Print(L"%c", (CHAR16)(unsigned char)mr.injection[mi]);
+                            Print(L"\r\n");
+                        }
+                    }
+                }
                 // Math reflex
                 if (g_soma_reflex.enabled) {
                     SomaReflexResult rf = soma_reflex_scan(&g_soma_reflex, text);
@@ -9151,6 +9394,20 @@ static void llmk_repl_no_model_loop(void) {
                                       ds.dream_quality,
                                       (int)(ds.recommended_bias_delta * 1000));
                         }
+                    }
+                    // Phase H: record this interaction in session memory
+                    if (g_soma_memory.enabled && n_out > 0) {
+                        // Build a short ASCII response summary from first decoded tokens
+                        char resp_summary[SOMA_MEM_RESPONSE_LEN];
+                        int rs = 0;
+                        for (int ri = 0; ri < n_out && rs < SOMA_MEM_RESPONSE_LEN - 1; ri++) {
+                            char tb[32]; int tl = 0;
+                            tl = llmk_oo_infer_decode_token(out_ids[ri], tb, sizeof(tb));
+                            for (int ci = 0; ci < tl && rs < SOMA_MEM_RESPONSE_LEN - 1; ci++)
+                                resp_summary[rs++] = tb[ci];
+                        }
+                        resp_summary[rs] = 0;
+                        soma_memory_record(&g_soma_memory, text, resp_summary);
                     }
                 }
                 continue;
