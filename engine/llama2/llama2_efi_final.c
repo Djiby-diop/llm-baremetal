@@ -84,6 +84,7 @@
 #include "../ssm/soma_cortex.h"
 #include "../ssm/soma_export.h"
 #include "../ssm/soma_warden.h"
+#include "../ssm/soma_session.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -3108,6 +3109,8 @@ static int             g_soma_journal_turns_since_save = 0;
 static SomaCortexCtx   g_soma_cortex;
 // Phase M: warden pressure bridge (sentinel → router feedback)
 static SomaWardenCtx   g_soma_warden;
+// Phase N: session fitness tracker (scoring + DNA evolution)
+static SomaSessionCtx  g_soma_session;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -7102,6 +7105,9 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_export_stats    Show soma_train.jsonl record count\r\n");
     Print(L"  /warden_status        Show warden pressure level and router threshold\r\n");
     Print(L"  /warden_reset         Reset pressure to NONE\r\n");
+    Print(L"  /session_score        Show session fitness score and mutation magnitude\r\n");
+    Print(L"  /session_reset        Reset session fitness counters\r\n");
+    Print(L"  /dna_evolve_session   Evolve DNA using scored mutation magnitude\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7271,8 +7277,10 @@ static void llmk_repl_no_model_loop(void) {
     soma_cortex_init(&g_soma_cortex);
     // Phase M: init warden pressure bridge
     soma_warden_init(&g_soma_warden);
+    // Phase N: init session fitness tracker
+    soma_session_init(&g_soma_session);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-M initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-N initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -8184,6 +8192,45 @@ static void llmk_repl_no_model_loop(void) {
                   g_soma_warden.last_sentinel_tripped ? L"YES" : L"no",
                   g_soma_warden.last_sentinel_error,
                   (unsigned long long)g_soma_warden.last_dt_cycles);
+            continue;
+        }
+        // ─── Phase N: Session Fitness + DNA Evolution commands ────────────
+        if (my_strncmp(prompt, "/session_reset", 14) == 0) {
+            soma_session_init(&g_soma_session);
+            Print(L"\r\n[Session] Fitness counters reset.\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/session_score", 14) == 0) {
+            int sc = soma_session_score(&g_soma_session, &g_soma_warden);
+            char sbuf[128];
+            soma_session_status_str(&g_soma_session, sbuf, 128);
+            Print(L"\r\n[Session] ");
+            for (int si = 0; sbuf[si]; si++)
+                Print(L"%c", (CHAR16)(unsigned char)sbuf[si]);
+            Print(L"\r\n  fitness=%d%%  mutation_mag=", sc);
+            // Print magnitude manually (2 decimal float)
+            int mag_i = (int)(g_soma_session.mutation_magnitude * 100.0f + 0.5f);
+            Print(L"0.%02d\r\n\r\n", mag_i);
+            continue;
+        }
+        if (my_strncmp(prompt, "/dna_evolve_session", 19) == 0) {
+            // Score first
+            int sc = soma_session_score(&g_soma_session, &g_soma_warden);
+            uint32_t rng = g_oosi_v3_valid ? g_oosi_v3_ctx.rng_state : 0xDEADBEEFu;
+            uint32_t old_hash = soma_dna_hash(&g_soma_dna);
+            int new_gen = soma_session_evolve_dna(&g_soma_session, &g_soma_dna, &rng);
+            if (g_oosi_v3_valid) g_oosi_v3_ctx.rng_state = rng;
+            uint32_t new_hash = soma_dna_hash(&g_soma_dna);
+            int mag_i = (int)(g_soma_session.mutation_magnitude * 100.0f + 0.5f);
+            Print(L"\r\n[DNA] Session-scored evolution: fitness=%d%% mag=0.%02d\r\n",
+                  sc, mag_i);
+            Print(L"  gen %d -> %d  hash 0x%08X -> 0x%08X\r\n",
+                  new_gen - 1, new_gen, old_hash, new_hash);
+            Print(L"  bias=%.2f conf_thr=%.2f temp_S=%.2f temp_L=%.2f\r\n\r\n",
+                  (double)g_soma_dna.cognition_bias,
+                  (double)g_soma_dna.confidence_threshold,
+                  (double)g_soma_dna.temperature_solar,
+                  (double)g_soma_dna.temperature_lunar);
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
@@ -9774,11 +9821,14 @@ static void llmk_repl_no_model_loop(void) {
                                       jsaved, (int)g_soma_journal_total_turns);
                         }
                         // Phase M: warden pressure update (sentinel → router feedback)
+                        int warden_escalated_this_turn = 0;
                         {
+                            int wpress_prev = g_soma_warden.pressure_level;
                             int wpress = soma_warden_update(&g_soma_warden,
                                                             &g_sentinel, &g_zones,
                                                             &g_soma_router,
                                                             (int)g_soma_journal_total_turns);
+                            warden_escalated_this_turn = (wpress > wpress_prev) ? 1 : 0;
                             if (wpress >= SOMA_PRESSURE_HIGH && g_boot_verbose) {
                                 char wbuf[96];
                                 soma_warden_status_str(&g_soma_warden, wbuf, 96);
@@ -9787,6 +9837,19 @@ static void llmk_repl_no_model_loop(void) {
                                     Print(L"%c", (CHAR16)(unsigned char)wbuf[wi]);
                                 Print(L"\r\n");
                             }
+                        }
+                        // Phase N: session fitness record
+                        {
+                            // Cortex flagged this turn?
+                            int cflag = g_soma_cortex.loaded ?
+                                (g_soma_cortex.total_flagged > g_soma_session.cortex_flagged +
+                                 g_soma_session.turns_total ? 1 : 0) : 0;
+                            // Route used: default EXTERNAL (big model ran)
+                            int route_used = 2; // SOMA_ROUTE_EXTERNAL
+                            soma_session_record(&g_soma_session, route_used,
+                                                850, /* confidence ~85% (default) */
+                                                cflag,
+                                                warden_escalated_this_turn);
                         }
                     }
                 }
