@@ -79,7 +79,7 @@ SOMA_OBJS = engine/ssm/soma_router.o engine/ssm/soma_dna.o engine/ssm/soma_dual.
 	engine/ssm/soma_smb.o engine/ssm/soma_dream.o engine/ssm/soma_meta.o \
 	engine/ssm/soma_swarm.o engine/ssm/soma_reflex.o engine/ssm/soma_logic.o \
 	engine/ssm/soma_memory.o engine/ssm/soma_journal.o engine/ssm/soma_cortex.o \
-	engine/ssm/soma_export.o
+	engine/ssm/soma_export.o engine/ssm/soma_warden.o
 
 REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
@@ -301,6 +301,9 @@ engine/ssm/soma_cortex.o: engine/ssm/soma_cortex.c engine/ssm/soma_cortex.h engi
 
 engine/ssm/soma_export.o: engine/ssm/soma_export.c engine/ssm/soma_export.h engine/ssm/soma_memory.h engine/ssm/soma_journal.h
 	$(CC) $(CFLAGS) -c engine/ssm/soma_export.c -o engine/ssm/soma_export.o
+
+engine/ssm/soma_warden.o: engine/ssm/soma_warden.c engine/ssm/soma_warden.h engine/ssm/soma_router.h core/llmk_sentinel.h core/llmk_zones.h
+	$(CC) $(CFLAGS) -c engine/ssm/soma_warden.c -o engine/ssm/soma_warden.o
 
 clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)

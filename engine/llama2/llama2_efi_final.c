@@ -83,6 +83,7 @@
 #include "../ssm/soma_journal.h"
 #include "../ssm/soma_cortex.h"
 #include "../ssm/soma_export.h"
+#include "../ssm/soma_warden.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -3105,6 +3106,8 @@ static unsigned int    g_soma_journal_total_turns = 0;  // cumulative across ses
 static int             g_soma_journal_turns_since_save = 0;
 // Phase J: oo-model cortex (small OOSS routing brain)
 static SomaCortexCtx   g_soma_cortex;
+// Phase M: warden pressure bridge (sentinel → router feedback)
+static SomaWardenCtx   g_soma_warden;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
@@ -7097,6 +7100,8 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /cortex [0|1]         Enable/disable cortex pre-routing\r\n");
     Print(L"  /soma_export          Export session to soma_train.jsonl (training data)\r\n");
     Print(L"  /soma_export_stats    Show soma_train.jsonl record count\r\n");
+    Print(L"  /warden_status        Show warden pressure level and router threshold\r\n");
+    Print(L"  /warden_reset         Reset pressure to NONE\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7264,8 +7269,10 @@ static void llmk_repl_no_model_loop(void) {
     }
     // Phase J: init cortex (loaded later via /cortex_load)
     soma_cortex_init(&g_soma_cortex);
+    // Phase M: init warden pressure bridge
+    soma_warden_init(&g_soma_warden);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-K initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-M initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -8153,6 +8160,30 @@ static void llmk_repl_no_model_loop(void) {
                       xr.lines_written,
                       xr.appended ? L"appended" : L"created",
                       xr.lines_skipped);
+            continue;
+        }
+        // ─── Phase M: Warden commands ─────────────────────────────────────
+        if (my_strncmp(prompt, "/warden_reset", 13) == 0) {
+            soma_warden_reset(&g_soma_warden, &g_soma_router);
+            Print(L"\r\n[Warden] Pressure reset to NONE. Router threshold=0.85\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/warden_status", 14) == 0) {
+            char wbuf[128];
+            soma_warden_status_str(&g_soma_warden, wbuf, 128);
+            Print(L"\r\n[Warden] ");
+            for (int wi = 0; wbuf[wi]; wi++)
+                Print(L"%c", (CHAR16)(unsigned char)wbuf[wi]);
+            Print(L"\r\n");
+            Print(L"  updates=%d esc=%d relief=%d safety_floor=%d\r\n",
+                  g_soma_warden.total_updates,
+                  g_soma_warden.escalation_count,
+                  g_soma_warden.relief_count,
+                  g_soma_warden.cortex_safety_floor);
+            Print(L"  sentinel_tripped=%s last_err=%d dt_cycles=%llu\r\n\r\n",
+                  g_soma_warden.last_sentinel_tripped ? L"YES" : L"no",
+                  g_soma_warden.last_sentinel_error,
+                  (unsigned long long)g_soma_warden.last_dt_cycles);
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
@@ -9741,6 +9772,21 @@ static void llmk_repl_no_model_loop(void) {
                             if (g_boot_verbose)
                                 Print(L"[SomaJournal] Auto-saved %d entries (total=%d)\r\n",
                                       jsaved, (int)g_soma_journal_total_turns);
+                        }
+                        // Phase M: warden pressure update (sentinel → router feedback)
+                        {
+                            int wpress = soma_warden_update(&g_soma_warden,
+                                                            &g_sentinel, &g_zones,
+                                                            &g_soma_router,
+                                                            (int)g_soma_journal_total_turns);
+                            if (wpress >= SOMA_PRESSURE_HIGH && g_boot_verbose) {
+                                char wbuf[96];
+                                soma_warden_status_str(&g_soma_warden, wbuf, 96);
+                                Print(L"[Warden] ");
+                                for (int wi = 0; wbuf[wi]; wi++)
+                                    Print(L"%c", (CHAR16)(unsigned char)wbuf[wi]);
+                                Print(L"\r\n");
+                            }
                         }
                     }
                 }
