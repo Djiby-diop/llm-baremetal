@@ -85,6 +85,7 @@
 #include "../ssm/soma_export.h"
 #include "../ssm/soma_warden.h"
 #include "../ssm/soma_session.h"
+#include "../ssm/soma_dna_persist.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
@@ -7108,6 +7109,9 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /session_score        Show session fitness score and mutation magnitude\r\n");
     Print(L"  /session_reset        Reset session fitness counters\r\n");
     Print(L"  /dna_evolve_session   Evolve DNA using scored mutation magnitude\r\n");
+    Print(L"  /dna_save             Save DNA to soma_dna.bin (EFI partition)\r\n");
+    Print(L"  /dna_load             Load DNA from soma_dna.bin\r\n");
+    Print(L"  /dna_reset            Reset DNA to defaults + delete soma_dna.bin\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
@@ -7273,6 +7277,21 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"[SomaJournal] WARNING: journal corrupt or unreadable\r\n");
         }
     }
+    // Phase O: load persistent DNA → resume evolution across reboots
+    if (g_root) {
+        int dret = soma_dna_load(&g_soma_dna, g_root);
+        if (dret == SOMA_DNA_PERSIST_OK) {
+            Print(L"[SomaDNA] Loaded: gen=%d bias=%.2f conf=%.2f hash=0x%08X\r\n",
+                  (int)g_soma_dna.generation,
+                  (double)g_soma_dna.cognition_bias,
+                  (double)g_soma_dna.avg_confidence,
+                  soma_dna_hash(&g_soma_dna));
+        } else if (dret == SOMA_DNA_PERSIST_NOT_FOUND) {
+            Print(L"[SomaDNA] No soma_dna.bin found (first boot, defaults applied)\r\n");
+        } else {
+            Print(L"[SomaDNA] WARNING: soma_dna.bin corrupt — using defaults\r\n");
+        }
+    }
     // Phase J: init cortex (loaded later via /cortex_load)
     soma_cortex_init(&g_soma_cortex);
     // Phase M: init warden pressure bridge
@@ -7280,7 +7299,7 @@ static void llmk_repl_no_model_loop(void) {
     // Phase N: init session fitness tracker
     soma_session_init(&g_soma_session);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-N initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-O initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -8226,11 +8245,55 @@ static void llmk_repl_no_model_loop(void) {
                   sc, mag_i);
             Print(L"  gen %d -> %d  hash 0x%08X -> 0x%08X\r\n",
                   new_gen - 1, new_gen, old_hash, new_hash);
-            Print(L"  bias=%.2f conf_thr=%.2f temp_S=%.2f temp_L=%.2f\r\n\r\n",
+            Print(L"  bias=%.2f conf_thr=%.2f temp_S=%.2f temp_L=%.2f\r\n",
                   (double)g_soma_dna.cognition_bias,
                   (double)g_soma_dna.confidence_threshold,
                   (double)g_soma_dna.temperature_solar,
                   (double)g_soma_dna.temperature_lunar);
+            // Phase O: auto-save evolved DNA
+            if (g_root) {
+                int dret = soma_dna_save(&g_soma_dna, g_root);
+                Print(L"  [DNA] %s\r\n\r\n",
+                      dret == SOMA_DNA_PERSIST_OK ? L"Auto-saved to soma_dna.bin" : L"WARNING: save failed");
+            } else {
+                Print(L"  [DNA] (no EFI root — save skipped)\r\n\r\n");
+            }
+            continue;
+        }
+        // ─── Phase O: DNA Persistence commands ───────────────────────────
+        if (my_strncmp(prompt, "/dna_save", 9) == 0) {
+            if (!g_root) {
+                Print(L"\r\n[DNA] ERROR: no EFI root\r\n\r\n"); continue;
+            }
+            int dret = soma_dna_save(&g_soma_dna, g_root);
+            if (dret == SOMA_DNA_PERSIST_OK)
+                Print(L"\r\n[DNA] Saved to soma_dna.bin (gen=%d hash=0x%08X)\r\n\r\n",
+                      (int)g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
+            else
+                Print(L"\r\n[DNA] ERROR: save failed (%d)\r\n\r\n", dret);
+            continue;
+        }
+        if (my_strncmp(prompt, "/dna_load", 9) == 0) {
+            if (!g_root) {
+                Print(L"\r\n[DNA] ERROR: no EFI root\r\n\r\n"); continue;
+            }
+            int dret = soma_dna_load(&g_soma_dna, g_root);
+            if (dret == SOMA_DNA_PERSIST_OK)
+                Print(L"\r\n[DNA] Loaded: gen=%d bias=%.2f conf=%.2f hash=0x%08X\r\n\r\n",
+                      (int)g_soma_dna.generation,
+                      (double)g_soma_dna.cognition_bias,
+                      (double)g_soma_dna.avg_confidence,
+                      soma_dna_hash(&g_soma_dna));
+            else if (dret == SOMA_DNA_PERSIST_NOT_FOUND)
+                Print(L"\r\n[DNA] soma_dna.bin not found\r\n\r\n");
+            else
+                Print(L"\r\n[DNA] soma_dna.bin corrupt — defaults restored\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/dna_reset", 10) == 0) {
+            soma_dna_init_default(&g_soma_dna);
+            if (g_root) soma_dna_delete(g_root);
+            Print(L"\r\n[DNA] Reset to defaults. soma_dna.bin deleted. gen=0\r\n\r\n");
             continue;
         }
         // ── end SomaMind commands ────────────────────────────────────────
