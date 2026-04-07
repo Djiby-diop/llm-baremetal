@@ -3099,6 +3099,14 @@ static SomaSmbCtx     g_soma_smb;
 static SomaDreamCtx   g_soma_dream;
 // Meta-Evolution: fitness scoring + auto-mutation
 static SomaMetaCtx    g_soma_meta;
+// Phase V: Multi-Reality Sampling — 3-way per-token candidate selection
+static int g_multireal_enabled = 0;
+static struct {
+    int solar_wins;
+    int lunar_wins;
+    int argmax_wins;
+    int total_tokens;
+} g_multireal_stats;
 // Swarm Intelligence: N agents voting on each token
 static SomaSwarmCtx    g_soma_swarm;
 static SomaSwarmResult g_soma_swarm_last; // Last vote result (for fitness update)
@@ -3115,6 +3123,80 @@ static SomaWardenCtx   g_soma_warden;
 // Phase N: session fitness tracker (scoring + DNA evolution)
 static SomaSessionCtx  g_soma_session;
 // ─────────────────────────────────────────────────────────────────────────────
+
+typedef struct {
+    float temperature;
+    float top_p;
+    float repetition_penalty;
+    int max_tokens;
+    int applied;
+} LlmkAttachRoutePolicyState;
+
+static const CHAR16 *llmk_soma_route_name_wide(SomaRoute route) {
+    switch (route) {
+        case SOMA_ROUTE_REFLEX: return L"REFLEX";
+        case SOMA_ROUTE_INTERNAL: return L"INTERNAL";
+        case SOMA_ROUTE_EXTERNAL: return L"EXTERNAL";
+        case SOMA_ROUTE_DUAL: return L"DUAL";
+        default: return L"UNKNOWN";
+    }
+}
+
+static void llmk_attach_route_policy_begin(SomaRoute route, LlmkAttachRoutePolicyState *state) {
+    if (!state) return;
+    SetMem(state, sizeof(*state), 0);
+    if (!g_oosi_v3_valid || !g_mind_runtime_state.attach_active) return;
+    if (!(route == SOMA_ROUTE_EXTERNAL || route == SOMA_ROUTE_DUAL)) return;
+
+    state->temperature = g_oosi_v3_ctx.temperature;
+    state->top_p = g_oosi_v3_ctx.top_p;
+    state->repetition_penalty = g_oosi_v3_ctx.repetition_penalty;
+    state->max_tokens = g_oosi_v3_ctx.max_tokens;
+
+    {
+        int temp_milli = (int)(g_oosi_v3_ctx.temperature * 1000.0f + 0.5f);
+        int top_p_milli = (int)(g_oosi_v3_ctx.top_p * 1000.0f + 0.5f);
+        int rep_milli = (int)(g_oosi_v3_ctx.repetition_penalty * 1000.0f + 0.5f);
+        int max_tokens = g_oosi_v3_ctx.max_tokens;
+        int target_temp = (route == SOMA_ROUTE_DUAL) ? 840 : 780;
+        int target_top_p = (route == SOMA_ROUTE_DUAL) ? 920 : 890;
+        int target_rep = (route == SOMA_ROUTE_DUAL) ? 1080 : 1120;
+        int target_max_tokens = (route == SOMA_ROUTE_DUAL) ? 176 : 144;
+
+        if (llmk_ascii_streq(g_mind_runtime_state.attach_format, "bin")) {
+            target_temp -= 40;
+            target_top_p -= 20;
+            target_rep += 40;
+            target_max_tokens -= 16;
+        } else if (llmk_ascii_streq(g_mind_runtime_state.attach_format, "gguf")) {
+            target_temp += 20;
+            target_top_p += 10;
+        }
+
+        if (temp_milli > target_temp) temp_milli = target_temp;
+        if (top_p_milli > target_top_p) top_p_milli = target_top_p;
+        if (rep_milli < target_rep) rep_milli = target_rep;
+        if (max_tokens > target_max_tokens) max_tokens = target_max_tokens;
+
+        g_oosi_v3_ctx.temperature = (float)temp_milli / 1000.0f;
+        g_oosi_v3_ctx.top_p = (float)top_p_milli / 1000.0f;
+        g_oosi_v3_ctx.repetition_penalty = (float)rep_milli / 1000.0f;
+        g_oosi_v3_ctx.max_tokens = max_tokens;
+
+        state->applied = (temp_milli != (int)(state->temperature * 1000.0f + 0.5f)) ||
+                         (top_p_milli != (int)(state->top_p * 1000.0f + 0.5f)) ||
+                         (rep_milli != (int)(state->repetition_penalty * 1000.0f + 0.5f)) ||
+                         (max_tokens != state->max_tokens);
+    }
+}
+
+static void llmk_attach_route_policy_end(const LlmkAttachRoutePolicyState *state) {
+    if (!state || !state->applied || !g_oosi_v3_valid) return;
+    g_oosi_v3_ctx.temperature = state->temperature;
+    g_oosi_v3_ctx.top_p = state->top_p;
+    g_oosi_v3_ctx.repetition_penalty = state->repetition_penalty;
+    g_oosi_v3_ctx.max_tokens = state->max_tokens;
+}
 
 // GOP framebuffer (best-effort; may be unavailable on headless firmware paths)
 static EFI_GRAPHICS_OUTPUT_PROTOCOL *g_gop = NULL;
@@ -7086,6 +7168,7 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /soma_dream [apply]   Run dream cycle (add 'apply' to update DNA)\r\n");
     Print(L"  /soma_meta            Show meta-evolution fitness history\r\n");
     Print(L"  /soma_evolve          Force fitness score + DNA mutation step\r\n");
+    Print(L"  /multireal [on|off|status]  3-way token selection (solar/lunar/argmax)\r\n");
     Print(L"  /soma_swarm [0|1]     Enable/disable swarm voting\r\n");
     Print(L"  /soma_swarm_stats     Show per-agent fitness and vote counts\r\n");
     Print(L"  /soma_swarm_mode [majority|weighted|confident]  Set consensus mode\r\n");
@@ -7259,6 +7342,9 @@ static void llmk_repl_no_model_loop(void) {
     soma_smb_init(&g_soma_smb);
     soma_dream_init(&g_soma_dream);
     soma_meta_init(&g_soma_meta);
+    g_multireal_enabled = 0;
+    g_multireal_stats.solar_wins = g_multireal_stats.lunar_wins =
+        g_multireal_stats.argmax_wins = g_multireal_stats.total_tokens = 0;
     // Swarm needs vocab_size — initialized fully on /ssm_load
     g_soma_swarm.enabled = 0;
     g_soma_swarm.ready   = 0;
@@ -7307,7 +7393,7 @@ static void llmk_repl_no_model_loop(void) {
     // Phase S: enable pheromion in trace mode (tracks hot domain/route paths)
     pheromion_set_mode(&g_pheromion, PHEROMION_MODE_TRACE);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-U initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-V initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7742,6 +7828,30 @@ static void llmk_repl_no_model_loop(void) {
             else
                 Print(L"\r\n[SomaMind] DNA scored (no mutation needed, score=%d%%)\r\n\r\n",
                       (int)(g_soma_meta.best_score * 100.0f));
+            continue;
+        }
+        // ── Phase V: Multi-Reality Sampling ─────────────────────────────────
+        if (my_strncmp(prompt, "/multireal", 10) == 0) {
+            const char *arg = prompt + 10;
+            while (*arg == ' ') arg++;
+            if (*arg == 0 || my_strncmp(arg, "status", 6) == 0) {
+                int tot = g_multireal_stats.total_tokens;
+                int sp = tot > 0 ? (g_multireal_stats.solar_wins  * 100 / tot) : 0;
+                int lp = tot > 0 ? (g_multireal_stats.lunar_wins  * 100 / tot) : 0;
+                int ap = tot > 0 ? (g_multireal_stats.argmax_wins * 100 / tot) : 0;
+                Print(L"\r\n[MultiReal] enabled=%d  tokens=%d\r\n"
+                      L"  solar=%d(%d%%)  lunar=%d(%d%%)  argmax=%d(%d%%)\r\n\r\n",
+                      g_multireal_enabled, tot,
+                      g_multireal_stats.solar_wins,  sp,
+                      g_multireal_stats.lunar_wins,  lp,
+                      g_multireal_stats.argmax_wins, ap);
+            } else if (my_strncmp(arg, "on", 2) == 0) {
+                g_multireal_enabled = 1;
+                Print(L"\r\n[MultiReal] enabled (3-way solar/lunar/argmax per token)\r\n\r\n");
+            } else if (my_strncmp(arg, "off", 3) == 0) {
+                g_multireal_enabled = 0;
+                Print(L"\r\n[MultiReal] disabled\r\n\r\n");
+            }
             continue;
         }
         // ── Swarm commands ───────────────────────────────────────────────
@@ -9684,6 +9794,8 @@ static void llmk_repl_no_model_loop(void) {
             SomaCoreUsed soma_core_used = SOMA_CORE_SOLAR;
             float soma_first_conf = 0.0f;
             int attach_route_advisory = 0;
+            LlmkAttachRoutePolicyState attach_policy_state;
+            SetMem(&attach_policy_state, sizeof(attach_policy_state), 0);
             if (g_soma_initialized) {
                 g_soma_router.soma_model_ready = (g_mind_runtime_state.core_active || g_oosi_v3_valid ||
                                                   (g_oosi_weights_valid && llmk_oo_infer_is_ready())) ? 1 : 0;
@@ -9882,6 +9994,18 @@ static void llmk_repl_no_model_loop(void) {
                           LLMK_MODEL_FMT_UNKNOWN));
             }
 
+            if (g_oosi_v3_valid && attach_route_advisory) {
+                llmk_attach_route_policy_begin(soma_route_used, &attach_policy_state);
+                if (attach_policy_state.applied) {
+                    Print(L"[AttachRoute] policy route=%s temp=%d/1000 top_p=%d/1000 rep=%d/1000 max_tokens=%d\r\n",
+                          llmk_soma_route_name_wide(soma_route_used),
+                          (int)(g_oosi_v3_ctx.temperature * 1000.0f + 0.5f),
+                          (int)(g_oosi_v3_ctx.top_p * 1000.0f + 0.5f),
+                          (int)(g_oosi_v3_ctx.repetition_penalty * 1000.0f + 0.5f),
+                          g_oosi_v3_ctx.max_tokens);
+                }
+            }
+
             Print(L"\r\n[OOSI] Input: ");
             llmk_print_ascii(infer_text);
             Print(L"\r\n[OOSI] Thinking...\r\n");
@@ -9969,6 +10093,28 @@ static void llmk_repl_no_model_loop(void) {
                                       (int)(sr.agent_confidence[sr.winning_agent] * 100.0f));
                             }
                         }
+                        // ── Phase V: Multi-Reality Selection (inside dual scope, dr valid) ──
+                        if (g_multireal_enabled) {
+                            int vsz = g_soma_dual.vocab_size > 0 ? g_soma_dual.vocab_size : 50282;
+                            int argmax_tok = 0;
+                            ssm_f32 best_raw = g_oosi_v3_ctx.logits[0];
+                            for (int _vi = 1; _vi < vsz; _vi++) {
+                                if (g_oosi_v3_ctx.logits[_vi] > best_raw) {
+                                    best_raw = g_oosi_v3_ctx.logits[_vi]; argmax_tok = _vi;
+                                }
+                            }
+                            ssm_f32 solar_raw = g_oosi_v3_ctx.logits[dr.solar_token];
+                            ssm_f32 lunar_raw = g_oosi_v3_ctx.logits[dr.lunar_token];
+                            int winner = 2; int win_tok = argmax_tok; ssm_f32 win_raw = best_raw;
+                            if (solar_raw > win_raw) { win_raw = solar_raw; win_tok = dr.solar_token; winner = 0; }
+                            if (lunar_raw > win_raw) { win_tok = dr.lunar_token; winner = 1; }
+                            r.token = win_tok;
+                            g_multireal_stats.total_tokens++;
+                            if (winner == 0)      g_multireal_stats.solar_wins++;
+                            else if (winner == 1) g_multireal_stats.lunar_wins++;
+                            else                  g_multireal_stats.argmax_wins++;
+                            (void)win_raw;
+                        }
                     } else if (n_out == 0) {
                         // Standard path: capture confidence from logits
                         soma_first_conf = soma_dual_confidence(g_oosi_v3_ctx.logits,
@@ -10049,6 +10195,7 @@ static void llmk_repl_no_model_loop(void) {
                         Print(L"\r\n[OOSI-v3] Done: %d tokens generated\r\n\r\n", n_out);
                     }
                 }
+                llmk_attach_route_policy_end(&attach_policy_state);
                 // SomaMind SMB: record this interaction into memory bus
                 if (g_soma_initialized && n_out > 0) {
                     uint16_t gist_ids[SOMA_SMB_GIST_LEN];
