@@ -7307,7 +7307,7 @@ static void llmk_repl_no_model_loop(void) {
     // Phase S: enable pheromion in trace mode (tracks hot domain/route paths)
     pheromion_set_mode(&g_pheromion, PHEROMION_MODE_TRACE);
     g_soma_initialized = 1;
-    Print(L"SomaMind: A-S initialized (gen=%d hash=0x%08X)\r\n\r\n",
+    Print(L"SomaMind: A-U initialized (gen=%d hash=0x%08X)\r\n\r\n",
           g_soma_dna.generation, soma_dna_hash(&g_soma_dna));
 
     // Best-effort autorun (no-model).
@@ -7479,12 +7479,14 @@ static void llmk_repl_no_model_loop(void) {
                 soma_dna_init_default(&g_soma_dna);
                 g_soma_initialized = 1;
             }
-            g_soma_router.external_model_ready = g_oosi_v3_valid ? 1 : 0;
+            g_soma_router.soma_model_ready = (g_mind_runtime_state.core_active || g_oosi_v3_valid ||
+                                    (g_oosi_weights_valid && llmk_oo_infer_is_ready())) ? 1 : 0;
+            g_soma_router.external_model_ready = g_mind_runtime_state.attach_active ? 1 : 0;
             Print(L"\r\n[SomaMind Router]\r\n");
             Print(L"  model_topology:\r\n");
-            Print(L"    internal (SomaMind 16M): %s\r\n",
+            Print(L"    internal (OO core backbone): %s\r\n",
                   g_soma_router.soma_model_ready ? L"LOADED" : L"not loaded");
-            Print(L"    external (Mamba 2.8B):   %s\r\n",
+            Print(L"    external (validated attach): %s\r\n",
                   g_soma_router.external_model_ready ? L"LOADED" : L"not loaded");
             Print(L"  routing_stats:\r\n");
             Print(L"    total=%d reflex=%d internal=%d external=%d\r\n",
@@ -7563,7 +7565,9 @@ static void llmk_repl_no_model_loop(void) {
                 soma_dna_init_default(&g_soma_dna);
                 g_soma_initialized = 1;
             }
-            g_soma_router.external_model_ready = g_oosi_v3_valid ? 1 : 0;
+            g_soma_router.soma_model_ready = (g_mind_runtime_state.core_active || g_oosi_v3_valid ||
+                                              (g_oosi_weights_valid && llmk_oo_infer_is_ready())) ? 1 : 0;
+            g_soma_router.external_model_ready = g_mind_runtime_state.attach_active ? 1 : 0;
             const char *text = prompt + 12;
             int tlen = 0;
             while (text[tlen]) tlen++;
@@ -7588,6 +7592,9 @@ static void llmk_repl_no_model_loop(void) {
             { int cf = (int)(rr.confidence * 100.0f);
               Print(L"\r\n[SomaMind Route]\r\n  route=%s  domain=%s  confidence=%d%%\r\n",
                     rname, dname, cf); }
+            Print(L"  external_attach=%s\r\n",
+                g_mind_runtime_state.attach_active ? L"validated" :
+                g_mind_runtime_state.attach_requested ? L"requested-not-active" : L"none");
             if (rr.reflex_response) {
                 Print(L"  reflex_response: ");
                 for (int ri = 0; ri < rr.reflex_response_len; ri++)
@@ -9676,14 +9683,19 @@ static void llmk_repl_no_model_loop(void) {
             SomaRoute soma_route_used = SOMA_ROUTE_EXTERNAL;
             SomaCoreUsed soma_core_used = SOMA_CORE_SOLAR;
             float soma_first_conf = 0.0f;
+            int attach_route_advisory = 0;
             if (g_soma_initialized) {
-                g_soma_router.external_model_ready = g_oosi_v3_valid ? 1 : 0;
+                g_soma_router.soma_model_ready = (g_mind_runtime_state.core_active || g_oosi_v3_valid ||
+                                                  (g_oosi_weights_valid && llmk_oo_infer_is_ready())) ? 1 : 0;
+                g_soma_router.external_model_ready = g_mind_runtime_state.attach_active ? 1 : 0;
                 int tlen = 0;
                 { const char *p = text; while (*p) { tlen++; p++; } }
                 soma_input_hash = soma_smb_hash(text, tlen);
                 SomaRouteResult rr = soma_route(&g_soma_router, text, tlen);
                 soma_domain_used = rr.domain;
                 soma_route_used  = rr.route;
+                attach_route_advisory = (g_mind_runtime_state.attach_active &&
+                                         (rr.route == SOMA_ROUTE_EXTERNAL || rr.route == SOMA_ROUTE_DUAL)) ? 1 : 0;
 
                 // Phase S: pheromion trail — emit domain + route signals
                 pheromion_touch(&g_pheromion, 100u + (uint32_t)rr.domain);
@@ -9772,6 +9784,7 @@ static void llmk_repl_no_model_loop(void) {
             // ── SomaMind Reflex: symbolic math + logic + memory pre-solve ───
             // Builds augmented prompt: [MEM:...]\n[MATH:...]\n[LOGIC:...]\n<original>
             char reflex_prompt[512 + SOMA_REFLEX_INJECT_MAX + SOMA_LOGIC_INJECT_MAX + SOMA_MEM_INJECT_MAX];
+            char attach_prompt[768 + SOMA_REFLEX_INJECT_MAX + SOMA_LOGIC_INJECT_MAX + SOMA_MEM_INJECT_MAX];
             const char *infer_text = text;
             if (g_soma_initialized && (g_soma_reflex.enabled || g_soma_logic.enabled || g_soma_memory.enabled)) {
                 int ip = 0;
@@ -9823,6 +9836,50 @@ static void llmk_repl_no_model_loop(void) {
                     reflex_prompt[ip] = 0;
                     infer_text = reflex_prompt;
                 }
+            }
+
+            if (attach_route_advisory) {
+                int ap = 0;
+                const char *prefix = "[ATTACH advisory role=secondary";
+                for (int i = 0; prefix[i] && ap < (int)sizeof(attach_prompt) - 1; i++)
+                    attach_prompt[ap++] = prefix[i];
+
+                if (g_mind_runtime_state.attach_format[0]) {
+                    const char *fmt_prefix = " format=";
+                    for (int i = 0; fmt_prefix[i] && ap < (int)sizeof(attach_prompt) - 1; i++)
+                        attach_prompt[ap++] = fmt_prefix[i];
+                    for (int i = 0; g_mind_runtime_state.attach_format[i] && ap < (int)sizeof(attach_prompt) - 1; i++)
+                        attach_prompt[ap++] = g_mind_runtime_state.attach_format[i];
+                }
+
+                if (g_mind_runtime_state.attach_kind[0]) {
+                    const char *kind_prefix = " kind=";
+                    for (int i = 0; kind_prefix[i] && ap < (int)sizeof(attach_prompt) - 1; i++)
+                        attach_prompt[ap++] = kind_prefix[i];
+                    for (int i = 0; g_mind_runtime_state.attach_kind[i] && ap < (int)sizeof(attach_prompt) - 1; i++)
+                        attach_prompt[ap++] = g_mind_runtime_state.attach_kind[i];
+                }
+
+                if (g_mind_runtime_state.attach_last_validation[0]) {
+                    const char *val_prefix = " validation=";
+                    for (int i = 0; val_prefix[i] && ap < (int)sizeof(attach_prompt) - 1; i++)
+                        attach_prompt[ap++] = val_prefix[i];
+                    for (int i = 0; g_mind_runtime_state.attach_last_validation[i] && ap < (int)sizeof(attach_prompt) - 1; i++)
+                        attach_prompt[ap++] = g_mind_runtime_state.attach_last_validation[i];
+                }
+
+                if (ap < (int)sizeof(attach_prompt) - 2) attach_prompt[ap++] = ']';
+                if (ap < (int)sizeof(attach_prompt) - 2) attach_prompt[ap++] = '\n';
+                for (int i = 0; infer_text[i] && ap < (int)sizeof(attach_prompt) - 1; i++)
+                    attach_prompt[ap++] = infer_text[i];
+                attach_prompt[ap] = 0;
+                infer_text = attach_prompt;
+                Print(L"[AttachRoute] advisory-secondary route=%s format=%a\r\n",
+                      soma_route_used == SOMA_ROUTE_DUAL ? L"DUAL" : L"EXTERNAL",
+                      llmk_model_format_ascii(
+                          llmk_ascii_streq(g_mind_runtime_state.attach_format, "gguf") ? LLMK_MODEL_FMT_GGUF :
+                          llmk_ascii_streq(g_mind_runtime_state.attach_format, "bin") ? LLMK_MODEL_FMT_BIN :
+                          LLMK_MODEL_FMT_UNKNOWN));
             }
 
             Print(L"\r\n[OOSI] Input: ");
