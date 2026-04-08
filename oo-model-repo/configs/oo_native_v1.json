@@ -1,0 +1,87 @@
+{
+  "model_name": "oo-native-v1",
+  "family": "oo-ssm",
+  "description": "OO Native SSM — architecture propre au projet OO. From scratch, bare-metal first.",
+  "version": "1.0.0",
+
+  "architecture": {
+    "type": "oo_ssm",
+    "vocab_size": 16384,
+    "d_model": 512,
+    "n_layer": 12,
+    "d_state": 16,
+    "d_conv": 4,
+    "expand": 2,
+    "context_length": 1024,
+    "dropout": 0.0,
+
+    "oo_heads": {
+      "policy_head": {
+        "enabled": true,
+        "n_actions": 32,
+        "description": "D+ policy compatibility — predicts allowed action class"
+      },
+      "pressure_head": {
+        "enabled": true,
+        "description": "Predicts memory pressure level [0.0=OK, 1.0=DYING]"
+      },
+      "halt_head": {
+        "enabled": true,
+        "d_input": 513,
+        "description": "Latent loop halting — HaltingHead SSM variant"
+      }
+    }
+  },
+
+  "tokenizer": {
+    "type": "oo_bpe",
+    "vocab_size": 16384,
+    "special_tokens": {
+      "loop_spacer": "=",
+      "oo_think": "[OO:THINK]",
+      "oo_act":   "[OO:ACT]",
+      "oo_feel":  "[OO:FEEL]",
+      "oo_end":   "[OO:END]",
+      "sys_cmd":  "[SYS]",
+      "safe_stop": "[SAFE]"
+    },
+    "domain_tokens": ["[MATH]", "[CODE]", "[SYSTEM]", "[CHAT]", "[PLAN]"]
+  },
+
+  "dataset": {
+    "train": "data/processed/train.jsonl",
+    "valid": "data/processed/valid.jsonl",
+    "test":  "data/processed/test.jsonl",
+    "eval":  "data/processed/eval_oo.jsonl"
+  },
+
+  "training": {
+    "strategy": "from_scratch",
+    "micro_batch_size": 8,
+    "gradient_accumulation": 8,
+    "max_steps": 5000,
+    "learning_rate": 0.0003,
+    "lr_schedule": "cosine_with_restarts",
+    "weight_decay": 0.1,
+    "warmup_steps": 200,
+    "seed": 42,
+    "bf16": true,
+    "grad_clip": 1.0
+  },
+
+  "export": {
+    "format": "oo_native_binary",
+    "magic": "OONV",
+    "quantization": "q8_0",
+    "runtime_target": "llm-baremetal",
+    "ssm_infer_compatible": true,
+    "max_size_mb": 128
+  },
+
+  "params_estimate": {
+    "embedding": "16384 * 512 = 8.4M",
+    "ssm_layers": "12 * (512*1024 + 512*16) = 6.4M",
+    "heads": "< 1M",
+    "total_approx": "~16M"
+  }
+}

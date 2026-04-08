@@ -1,0 +1,45 @@
+@@SOMA:C
+// Strict policy preset (should still PASS the UEFI/QEMU smoke test)
+
+@@GPU:ptx
+/* gpu marker for merit */
+
+@@SOMA:IO
+// Keep the demo deterministic and within bounds.
+interactive=0
+steps=10
+layers=0
+// dim kept at default 128
+
+@@WARDEN:MEM
+// High enough to not block Soma allocations (~400KiB weights)
+rate_window_ticks=10
+rate_limit_bytes=2097152
+
+@@WARDEN:POLICY
+// Phase 6 policy VM (RPN)
+// - Deny very large allocations (> 2MiB)
+// - Deny very long TTL (> 3000 ticks/ms)
+// - Force sandbox for any finite TTL
+ttl 3000 >
+deny_if_true
+bytes 2097152 >
+deny_if_true
+ttl 0 >
+sandbox_if_true
+allow
+
+@@CORTEX:HEUR
+// Phase 7 heuristics: suggest a prefetch after repeats
+enabled=1
+prefetch_repeat=3
+
+@@LAW
+// Keep LAW allocations bounded and explicit.
+allow mem.allocate op:7 bytes<=8192 ttl_ms<=2000 zone==sandbox
+allow mem.allocate op:8 bytes<=65536 ttl_ms<=0 zone==normal
+monitor behavior.access_denied count<=2
+
+@@PROOF
+proof op:7
+proof op:8

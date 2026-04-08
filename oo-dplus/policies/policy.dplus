@@ -1,0 +1,11 @@
+@@SOMA:C
+@@LAW
+allow mem.allocate op:7 bytes<=1048576
+allow mem.allocate op:8 bytes<=1048576
+
+@@WARDEN:POLICY
+bytes 1048576 > deny_if_true allow
+
+@@CORTEX:HEUR
+enabled=1
+prefetch_repeat=3

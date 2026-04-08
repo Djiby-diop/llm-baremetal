@@ -1,0 +1,25 @@
+@@SOMA:C
+// Preset policy: configures Warden rate limiting (MVP).
+
+@@SOMA:IO
+interactive=0
+steps=10
+layers=6
+dim=64
+
+@@WARDEN:MEM
+// Per-cell allocation rate limit. Applied to cell 1 in the UEFI smoke-test.
+rate_window_ticks=1000
+rate_limit_bytes=262144
+
+@@GPU:ptx
+/* gpu marker for merit */
+
+@@LAW
+allow mem.allocate op:7 bytes<=8192 ttl_ms<=2000 zone==sandbox
+allow mem.allocate op:8 bytes<=65536 ttl_ms<=0 zone==normal
+monitor behavior.access_denied count<=3
+
+@@PROOF
+proof op:7
+proof op:8

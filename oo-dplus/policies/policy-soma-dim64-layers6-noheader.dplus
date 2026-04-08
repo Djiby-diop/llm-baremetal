@@ -1,0 +1,21 @@
+@@SOMA:C
+// Preset policy: dim=64, layers=6, explicitly disable weights header usage.
+
+@@SOMA:IO
+interactive=0
+steps=10
+layers=6
+dim=64
+weights_header=0
+
+@@GPU:ptx
+/* gpu marker for merit */
+
+@@LAW
+allow mem.allocate op:7 bytes<=8192 ttl_ms<=2000 zone==sandbox
+allow mem.allocate op:8 bytes<=65536 ttl_ms<=0 zone==normal
+monitor behavior.access_denied count<=3
+
+@@PROOF
+proof op:7
+proof op:8

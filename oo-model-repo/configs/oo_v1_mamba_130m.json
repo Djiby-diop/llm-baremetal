@@ -1,0 +1,88 @@
+{
+  "model_name": "oo-v1-mamba-130m",
+  "family": "mamba-ssm",
+  "architecture": "mamba2",
+  "params_target": 130000000,
+  "context_length": 2048,
+  "vocab_size": 50277,
+  "d_model": 768,
+  "n_layer": 24,
+  "d_state": 16,
+  "d_conv": 4,
+  "expand": 2,
+  "dt_rank": "auto",
+  "dropout": 0.0,
+
+  "latent_reasoning": {
+    "enabled": true,
+    "loop_token": "=",
+    "halt_threshold": 0.7,
+    "domain_max_loops": {
+      "chat": 5,
+      "math": 20,
+      "code": 35,
+      "tool": 8,
+      "system": 12
+    },
+    "halting_head": {
+      "d_input": 769,
+      "hidden_dims": [512, 64],
+      "activation": "gelu",
+      "dropout": 0.1
+    }
+  },
+
+  "special_tokens": {
+    "loop_spacer": "=",
+    "agent_start": "[AGENT]",
+    "tool_start": "<TOOL: BASH>",
+    "tool_end": "</TOOL>",
+    "result_start": "<RESULT>",
+    "result_end": "</RESULT>"
+  },
+
+  "tokenizer": {
+    "base": "state-spaces/mamba-130m-hf",
+    "vocab_size": 50282,
+    "add_special_tokens": 5
+  },
+
+  "dataset": {
+    "train": "data/processed/train.jsonl",
+    "valid": "data/processed/valid.jsonl",
+    "test": "data/processed/test.jsonl",
+    "eval": "data/processed/eval_oo.jsonl",
+    "tool_use": "data/processed/tool_use.jsonl"
+  },
+
+  "training": {
+    "base_model": "state-spaces/mamba-130m-hf",
+    "trainable_params": ["x_proj", "dt_proj", "embed_tokens"],
+    "freeze_backbone": true,
+    "micro_batch_size": 4,
+    "gradient_accumulation": 8,
+    "max_steps": 2000,
+    "learning_rate": 0.001,
+    "lr_schedule": "cosine",
+    "weight_decay": 0.01,
+    "warmup_steps": 100,
+    "bf16": true,
+    "seed": 42,
+    "phases": [
+      {"id": 1, "name": "latent_sft",    "steps": 1000, "lr": 0.001},
+      {"id": 2, "name": "halting_head",  "steps": 200,  "lr": 0.001},
+      {"id": 3, "name": "tool_sft",      "steps": 300,  "lr": 0.0001},
+      {"id": 4, "name": "merge_export",  "steps": 0,    "lr": 0.0}
+    ]
+  },
+
+  "integration": {
+    "quantization_target": "bf16",
+    "export_format": "ssm_binary",
+    "runtime_target": "llm-baremetal",
+    "ssm_infer_compatible": true,
+    "export_script": "scripts/export_ssm_binary.py"
+  },
+
+  "notes": "130M variant of batteryphil latent reasoning engine. Dark-loop (=) recurrence + HaltingHead. Maps to D+ policy layer in OO cognitive loop."
+}

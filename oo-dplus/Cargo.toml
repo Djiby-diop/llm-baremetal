@@ -1,0 +1,66 @@
+[package]
+name = "osg-memory-warden"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Default build is `no_std`.
+default = []
+# Enable `std` only for unit tests and host-side kernel tooling (dplus_*).
+std = []
+# Enable UEFI kernel image build.
+uefi = []
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "osg_uefi"
+path = "src/bin/osg_uefi.rs"
+required-features = ["uefi"]
+
+[[bin]]
+name = "dplus_check"
+path = "src/bin/dplus_check.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "dplus_weaver"
+path = "src/bin/dplus_weaver.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "dplus_graph"
+path = "src/bin/dplus_graph.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "dplus_judge"
+path = "src/bin/dplus_judge.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "dplus_heal"
+path = "src/bin/dplus_heal.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "dplus_replay"
+path = "src/bin/dplus_replay.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "dplus_merit"
+path = "src/bin/dplus_merit.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "dplus_compile_oo"
+path = "src/bin/dplus_compile_oo.rs"
+required-features = ["std"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

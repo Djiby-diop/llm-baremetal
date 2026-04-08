@@ -1,0 +1,24 @@
+@@SOMA:C
+// Interactive preset policy for OS-G QEMU runs.
+
+@@SOMA:IO
+interactive=1
+// Optional knobs (safe ranges enforced at boot):
+// - steps: 1..256
+// - layers: 0..64 (0 = use all allocated layers)
+// - dim: 16..256
+steps=32
+layers=0
+dim=128
+
+@@GPU:ptx
+/* gpu marker for merit */
+
+@@LAW
+allow mem.allocate op:7 bytes<=8192 ttl_ms<=2000 zone==sandbox
+allow mem.allocate op:8 bytes<=65536 ttl_ms<=0 zone==normal
+monitor behavior.access_denied count<=3
+
+@@PROOF
+proof op:7
+proof op:8

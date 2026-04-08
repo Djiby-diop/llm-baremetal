@@ -1,174 +1,334 @@
-#!/usr/bin/env python3
 """
-export_soma_dataset.py — Phase X
-Convert soma_train.jsonl (exported from OO bare-metal via /soma_export)
-into a clean HuggingFace-compatible dataset for oo-model cortex training.
+export_soma_dataset.py — SomaMind Phase L: Journal → oo-model Training Pipeline
 
-Input:  soma_train.jsonl  (one JSON record per line)
-Output: soma_dataset/train.jsonl + soma_dataset/meta.json
+Reads soma_train.jsonl produced by the bare-metal kernel (Phase K), validates
+and cleans entries, maps cortex domain integers to oo-model domain strings, and
+outputs oo-model-compatible JSONL ready for train_oo_native.py.
 
-Usage:
-    python export_soma_dataset.py --input soma_train.jsonl --output soma_dataset/
+Usage
+-----
+  # Preview (dry-run, print stats only):
+  python scripts/export_soma_dataset.py --input soma_train.jsonl --dry-run
 
-Record format from /soma_export:
-  {"turn": 42, "prompt": "...", "response": "...", "domain": 2,
-   "confidence": 0.87, "solar_tok": 1234, "lunar_tok": 5678,
-   "dna_gen": 7, "dna_hash": "0xDEADBEEF", "smb_ticks": 128}
+  # Convert and write to separate file:
+  python scripts/export_soma_dataset.py --input soma_train.jsonl \
+         --output data/processed/soma_corpus.jsonl
+
+  # Convert and APPEND to existing training split:
+  python scripts/export_soma_dataset.py --input soma_train.jsonl \
+         --output data/processed/train.jsonl --append
+
+  # With safety threshold (drop entries flagged below threshold):
+  python scripts/export_soma_dataset.py --input soma_train.jsonl \
+         --min-safety 30 --output data/processed/soma_corpus.jsonl
+
+  # After appending, re-generate manifest:
+  python scripts/prepare_dataset.py --recount
+
+Soma domain → oo-model domain mapping
+--------------------------------------
+  0 GENERAL    → "system"
+  1 MEMORY     → "arch"        (memory architecture)
+  2 SYSTEM     → "system"
+  3 REASONING  → "policy"      (logic/D+ reasoning)
+  4 PLANNING   → "policy"
+  5 MATH       → "math"
+  6 LANGUAGE   → "chat"
+
+Dark-loop heuristic (complexity proxy)
+--------------------------------------
+  response_len < 60 chars  → 3 loops
+  response_len < 150 chars → 4 loops
+  response_len < 300 chars → 5 loops
+  else                     → 6 loops
 """
+
+from __future__ import annotations
 
 import argparse
 import json
-import os
+import re
 import sys
 from pathlib import Path
+from typing import Iterator
 
-DOMAIN_NAMES = {
-    0: "system",
-    1: "code",
-    2: "reasoning",
-    3: "creative",
-    4: "factual",
-    5: "safety",
-    6: "meta",
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Maps soma cortex domain integer (0-6) → oo-model domain string.
+# Must match SOMA_DOMAIN_* enum in engine/ssm/soma_cortex.h.
+SOMA_TO_OO_DOMAIN: dict[int, str] = {
+    0: "system",    # SOMA_DOMAIN_GENERAL
+    1: "arch",      # SOMA_DOMAIN_MEMORY    (memory arch / zone management)
+    2: "system",    # SOMA_DOMAIN_SYSTEM
+    3: "policy",    # SOMA_DOMAIN_REASONING (D+, logic, constraints)
+    4: "policy",    # SOMA_DOMAIN_PLANNING
+    5: "math",      # SOMA_DOMAIN_MATH
+    6: "chat",      # SOMA_DOMAIN_LANGUAGE
 }
 
-# Confidence threshold — discard low-quality turns
-MIN_CONFIDENCE = 0.35
+# oo-model valid domain values (from inspect of train.jsonl)
+OO_VALID_DOMAINS = {"policy", "math", "arch", "system", "chat"}
+
+# Minimum response length to keep (chars)
+MIN_RESPONSE_LEN = 4
+
+# Minimum prompt/instruction length to keep
+MIN_PROMPT_LEN = 3
+
+# ANSI escape stripper (kernel output may contain escape sequences)
+_ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
+# OO memory tag stripper: "[MEM: turn=N sim=S boot=N] " injected by soma_memory
+_MEM_TAG_RE = re.compile(r"\[MEM:[^\]]*\]\s*")
 
 
-def load_jsonl(path: str):
-    records = []
-    with open(path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            line = line.strip()
-            if not line:
+# ---------------------------------------------------------------------------
+# Dark-loop heuristic
+# ---------------------------------------------------------------------------
+
+def compute_dark_loops(response: str) -> int:
+    """Estimate number of latent thinking loops from response complexity."""
+    n = len(response)
+    if n < 60:
+        return 3
+    if n < 150:
+        return 4
+    if n < 300:
+        return 5
+    return 6
+
+
+# ---------------------------------------------------------------------------
+# Cleaning
+# ---------------------------------------------------------------------------
+
+def clean_text(text: str) -> str:
+    """Strip ANSI codes, memory injection tags, normalise whitespace."""
+    text = _ANSI_RE.sub("", text)
+    text = _MEM_TAG_RE.sub("", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Collapse runs of whitespace (not newlines)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
+# Parser for soma_train.jsonl (produced by soma_export.c)
+# ---------------------------------------------------------------------------
+
+def parse_soma_jsonl(path: Path) -> Iterator[dict]:
+    """Yield raw dicts from soma_train.jsonl, skipping malformed lines."""
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for lineno, raw in enumerate(fh, 1):
+            raw = raw.strip()
+            if not raw:
                 continue
             try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError as e:
-                print(f"[WARN] line {i+1} parse error: {e}", file=sys.stderr)
-    return records
+                obj = json.loads(raw)
+                yield obj
+            except json.JSONDecodeError as exc:
+                print(f"  [WARN] line {lineno}: JSON error: {exc}", file=sys.stderr)
 
 
-def clean_record(rec: dict) -> dict | None:
-    prompt = rec.get("prompt", "").strip()
-    response = rec.get("response", "").strip()
-    if not prompt or not response:
+# ---------------------------------------------------------------------------
+# Conversion
+# ---------------------------------------------------------------------------
+
+def convert_entry(raw: dict, min_safety: int) -> dict | None:
+    """
+    Convert a soma_train.jsonl entry to oo-model JSONL format.
+    Returns None if the entry should be skipped.
+    """
+    prompt = raw.get("prompt", "")
+    response = raw.get("response", "")
+    domain_int = int(raw.get("domain", 0))
+    safety = int(raw.get("safety", 100))
+    session = int(raw.get("session", 0))
+    turn = int(raw.get("turn", 0))
+
+    # Safety filter: drop entries explicitly flagged as unsafe
+    # (soma_cortex safety_score < 30 ≈ flagged)
+    if safety < min_safety:
         return None
-    # Filter very low-confidence outputs
-    conf = float(rec.get("confidence", 1.0))
-    if conf < MIN_CONFIDENCE:
+
+    # Clean text
+    prompt = clean_text(prompt)
+    response = clean_text(response)
+
+    # Length filter
+    if len(prompt) < MIN_PROMPT_LEN or len(response) < MIN_RESPONSE_LEN:
         return None
-    domain = int(rec.get("domain", 0))
+
+    # Skip entries that are just "/help" or similar REPL commands
+    if prompt.startswith("/") and len(prompt) < 20:
+        return None
+
+    # Map domain
+    oo_domain = SOMA_TO_OO_DOMAIN.get(domain_int, "system")
+
+    # Dark loops
+    dark_loops = compute_dark_loops(response)
+
     return {
-        "prompt": prompt,
+        "instruction": prompt,
+        "dark_loops": dark_loops,
         "response": response,
-        "domain": domain,
-        "domain_name": DOMAIN_NAMES.get(domain, "unknown"),
-        "confidence": round(conf, 4),
-        "dna_gen": int(rec.get("dna_gen", 0)),
-        "dna_hash": rec.get("dna_hash", "0x00000000"),
-        "smb_ticks": int(rec.get("smb_ticks", 0)),
-        # Cortex training format: instruction + output
-        "text": f"<|soma|>{prompt}<|/soma|><|response|>{response}<|/response|>",
+        "domain": oo_domain,
+        # Preserve provenance metadata as optional fields
+        "_soma_session": session,
+        "_soma_turn": turn,
+        "_soma_safety": safety,
+        "_soma_domain_raw": domain_int,
     }
 
 
-def write_dataset(records: list, output_dir: str):
-    os.makedirs(output_dir, exist_ok=True)
-    train_path = os.path.join(output_dir, "train.jsonl")
-    meta_path = os.path.join(output_dir, "meta.json")
+# ---------------------------------------------------------------------------
+# Statistics
+# ---------------------------------------------------------------------------
 
-    domain_counts = {d: 0 for d in DOMAIN_NAMES}
-    with open(train_path, "w", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            domain_counts[rec["domain"]] = domain_counts.get(rec["domain"], 0) + 1
+class Stats:
+    def __init__(self) -> None:
+        self.total = 0
+        self.skipped_safety = 0
+        self.skipped_length = 0
+        self.skipped_repl = 0
+        self.written = 0
+        self.by_domain: dict[str, int] = {}
+        self.by_loops: dict[int, int] = {}
 
-    meta = {
-        "total_records": len(records),
-        "domain_counts": {DOMAIN_NAMES[k]: v for k, v in domain_counts.items()},
-        "format": "soma-v1",
-        "special_tokens": {
-            "soma_open": "<|soma|>",
-            "soma_close": "<|/soma|>",
-            "response_open": "<|response|>",
-            "response_close": "<|/response|>",
-        },
-    }
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
+    def record(self, entry: dict) -> None:
+        self.written += 1
+        d = entry["domain"]
+        self.by_domain[d] = self.by_domain.get(d, 0) + 1
+        lp = entry["dark_loops"]
+        self.by_loops[lp] = self.by_loops.get(lp, 0) + 1
 
-    print(f"[OK] Exported {len(records)} records → {train_path}")
-    print(f"[OK] Meta → {meta_path}")
-    for dn, count in meta["domain_counts"].items():
-        if count > 0:
-            print(f"  {dn:12s}: {count}")
-
-
-def generate_synthetic_sample(output_path: str, n: int = 50):
-    """Generate synthetic training data for cold-start when no USB data exists."""
-    import random
-    random.seed(42)
-
-    samples = [
-        ("What is the kernel doing?", "The kernel is managing memory zones and scheduling inference tasks.", 0),
-        ("Explain the SomaMind architecture.", "SomaMind runs dual-core solar/lunar inference with DNA-driven temperature control.", 2),
-        ("Write a bare-metal memory allocator.", "Use zone-based allocation: divide physical memory into zones (DMA, normal, high), each with a free list.", 1),
-        ("What is homeostatic loss?", "Homeostatic loss combines survival pressure, routing accuracy, and memory coherence into a single training signal.", 2),
-        ("How does speculative decoding work?", "A draft model proposes tokens; the main model verifies via acceptance ratio p_verify/p_draft.", 2),
-        ("Describe the OO swarm.", "Four DNA-diverse agents (BASE, SOLAR, LUNAR, XPLR) vote on each token via majority or confidence-weighted consensus.", 3),
-        ("List UEFI boot steps.", "1. Firmware POST. 2. GPT scan. 3. EFI loader. 4. ExitBootServices. 5. Kernel entry.", 0),
-        ("What is D+ policy?", "D+ is the OO decision engine: routes inference through domain-specific DNA profiles with warden safety checks.", 0),
-        ("How do zones protect memory?", "Each zone has guard pages at boundaries; writes outside zone bounds trigger warden reflex halt.", 5),
-        ("Describe pheromion signals.", "Pheromion encodes gradient-like pressure signals between soma agents, biasing token sampling toward high-fitness regions.", 3),
-    ]
-
-    records = []
-    for i in range(n):
-        prompt, response, domain = random.choice(samples)
-        # Add slight variation
-        conf = 0.6 + random.random() * 0.35
-        records.append({
-            "turn": i,
-            "prompt": prompt,
-            "response": response,
-            "domain": domain,
-            "confidence": round(conf, 4),
-            "dna_gen": random.randint(0, 12),
-            "dna_hash": f"0x{random.randint(0, 0xFFFFFFFF):08X}",
-            "smb_ticks": random.randint(0, 512),
-        })
-
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r) + "\n")
-    print(f"[OK] Generated {n} synthetic records → {output_path}")
+    def print_report(self) -> None:
+        print(f"\n{'─'*50}")
+        print(f"  soma_train.jsonl → oo-model pipeline report")
+        print(f"{'─'*50}")
+        print(f"  Input records   : {self.total}")
+        print(f"  Written         : {self.written}")
+        print(f"  Skipped (safety): {self.skipped_safety}")
+        print(f"  Skipped (length): {self.skipped_length}")
+        print(f"  Skipped (REPL)  : {self.skipped_repl}")
+        if self.written:
+            print(f"\n  By domain:")
+            for d, n in sorted(self.by_domain.items()):
+                print(f"    {d:<12}: {n}")
+            print(f"\n  By dark_loops:")
+            for lp, n in sorted(self.by_loops.items()):
+                print(f"    loops={lp}: {n}")
+        print(f"{'─'*50}\n")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Export soma_train.jsonl to cortex training dataset")
-    parser.add_argument("--input", default="soma_train.jsonl", help="Input JSONL from /soma_export")
-    parser.add_argument("--output", default="soma_dataset", help="Output directory")
-    parser.add_argument("--gen-synthetic", action="store_true", help="Generate synthetic sample if no USB data")
-    parser.add_argument("--synthetic-n", type=int, default=50, help="Number of synthetic records")
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Export soma_train.jsonl → oo-model training JSONL"
+    )
+    parser.add_argument(
+        "--input", "-i",
+        required=True,
+        type=Path,
+        help="Path to soma_train.jsonl (from USB EFI partition or copy)",
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=Path,
+        default=None,
+        help="Output JSONL file. Default: data/processed/soma_corpus.jsonl",
+    )
+    parser.add_argument(
+        "--append", "-a",
+        action="store_true",
+        help="Append to existing output file instead of overwriting",
+    )
+    parser.add_argument(
+        "--min-safety",
+        type=int,
+        default=0,
+        help="Minimum safety score (0-100). Default: 0 (keep all). "
+             "Set to 30 to drop entries flagged by cortex.",
+    )
+    parser.add_argument(
+        "--strip-metadata",
+        action="store_true",
+        help="Remove _soma_* provenance fields from output (cleaner for training)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse and validate but do not write output. Prints stats.",
+    )
     args = parser.parse_args()
 
-    if args.gen_synthetic or not os.path.exists(args.input):
-        synth_path = args.input if args.gen_synthetic else "soma_train_synthetic.jsonl"
-        generate_synthetic_sample(synth_path, n=args.synthetic_n)
-        if not os.path.exists(args.input):
-            args.input = synth_path
+    # Resolve output path
+    if args.output is None:
+        root = Path(__file__).resolve().parents[1]
+        args.output = root / "data" / "processed" / "soma_corpus.jsonl"
 
-    raw = load_jsonl(args.input)
-    print(f"[INFO] Loaded {len(raw)} raw records from {args.input}")
+    # Validate input
+    if not args.input.exists():
+        print(f"ERROR: input file not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
 
-    cleaned = [c for r in raw if (c := clean_record(r)) is not None]
-    discarded = len(raw) - len(cleaned)
-    print(f"[INFO] Cleaned: {len(cleaned)} kept, {discarded} discarded (conf < {MIN_CONFIDENCE})")
+    stats = Stats()
 
-    write_dataset(cleaned, args.output)
+    # Collect converted entries
+    entries: list[dict] = []
+    for raw in parse_soma_jsonl(args.input):
+        stats.total += 1
+        result = convert_entry(raw, min_safety=args.min_safety)
+        if result is None:
+            # Determine skip reason for stats
+            prompt = clean_text(raw.get("prompt", ""))
+            response = clean_text(raw.get("response", ""))
+            safety = int(raw.get("safety", 100))
+            if safety < args.min_safety:
+                stats.skipped_safety += 1
+            elif prompt.startswith("/") and len(prompt) < 20:
+                stats.skipped_repl += 1
+            else:
+                stats.skipped_length += 1
+            continue
+
+        if args.strip_metadata:
+            result = {k: v for k, v in result.items() if not k.startswith("_")}
+
+        stats.record(result)
+        entries.append(result)
+
+    stats.print_report()
+
+    if args.dry_run:
+        print("  [DRY RUN] No output written.")
+        return
+
+    if not entries:
+        print("  No valid entries to write. Exiting.", file=sys.stderr)
+        sys.exit(0)
+
+    # Write output
+    mode = "a" if args.append else "w"
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with args.output.open(mode, encoding="utf-8") as fh:
+        for entry in entries:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    action = "Appended" if args.append else "Written"
+    print(f"  {action} {len(entries)} records → {args.output}")
+
+    # Count total lines if appending
+    if args.append:
+        with args.output.open("r", encoding="utf-8") as fh:
+            total_lines = sum(1 for ln in fh if ln.strip())
+        print(f"  Total records in file: {total_lines}")
 
 
 if __name__ == "__main__":

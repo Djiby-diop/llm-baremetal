@@ -1,0 +1,35 @@
+{
+  "model_name": "oo-v1-15m",
+  "family": "decoder-transformer",
+  "params_target": 15000000,
+  "context_length": 1024,
+  "vocab_size": 16000,
+  "embedding_dim": 512,
+  "num_layers": 12,
+  "num_heads": 8,
+  "ffn_dim": 1536,
+  "dropout": 0.0,
+  "tokenizer": {
+    "type": "sentencepiece",
+    "vocab_size": 16000
+  },
+  "dataset": {
+    "train": "data/processed/train.jsonl",
+    "valid": "data/processed/valid.jsonl",
+    "test": "data/processed/test.jsonl",
+    "eval": "data/processed/eval_oo.jsonl"
+  },
+  "training": {
+    "micro_batch_size": 8,
+    "gradient_accumulation": 8,
+    "max_steps": 1000,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.1,
+    "warmup_steps": 100,
+    "seed": 42
+  },
+  "integration": {
+    "quantization_target": "q8_0",
+    "runtime_target": "llm-baremetal"
+  }
+}
