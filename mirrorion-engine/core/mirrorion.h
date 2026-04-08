@@ -1,56 +1,81 @@
 #pragma once
 /*
  * mirrorion-engine — Self-Introspection Engine
- * NOVEL: During idle, AI generates questions about itself and answers them.
- * Self-knowledge ring becomes training data (OO_MIRROR.JSONL).
- * Recursive self-improvement from bare-metal signals, no external reward.
+ * ===============================================
+ * NOVEL: During idle cycles, OO generates Q/A pairs ABOUT ITSELF.
+ * The model trains on its own introspection — recursive self-improvement
+ * from bare-metal signals, no external reward, no human intervention.
+ *
+ * Self-knowledge ring → OO_MIRROR.JSONL → training pipeline
+ *
+ * Output format:
+ *   {"role":"self","q":"What is my DNA?","a":"0x932DF0EA","tick":N,"dna":"0xHEX"}
  */
 #ifndef MIRRORION_H
 #define MIRRORION_H
 
-#define MIRRORION_MAX_KNOWLEDGE  64
-#define MIRRORION_Q_LEN         128
-#define MIRRORION_A_LEN         256
+#include <stdint.h>
 
+#define MIRRORION_RING_SIZE        64
+#define MIRRORION_CONTEXT_SIZE     256
+#define MIRRORION_MAX_QUESTIONS    32
+#define MIRRORION_IDLE_THRESHOLD   100  /* idle ticks between questions */
+
+/* ── Single Q/A entry ─────────────────────────────────────────────── */
 typedef struct {
-    char question[MIRRORION_Q_LEN];
-    char answer[MIRRORION_A_LEN];
-    int  confidence;
-    int  source_signal;
-    unsigned int step_stamp;
+    char     question[MIRRORION_CONTEXT_SIZE / 2];
+    char     answer[MIRRORION_CONTEXT_SIZE / 2];
+    uint64_t tick;
+    uint32_t dna_hash;
 } MirrorionEntry;
 
-typedef enum {
-    MIRROR_TRIGGER_HIGH_HALT_PROB = 0,
-    MIRROR_TRIGGER_MEM_PRESSURE   = 1,
-    MIRROR_TRIGGER_SLOW_INFERENCE = 2,
-    MIRROR_TRIGGER_DNA_CHANGED    = 3,
-    MIRROR_TRIGGER_BOOT_NEW       = 4,
-    MIRROR_TRIGGER_IDLE_LONG      = 5,
-    MIRROR_TRIGGER_DPLUS_DENY     = 6,
-    MIRROR_TRIGGER_MODULE_FAIL    = 7,
-} MirrorionTrigger;
-
+/* ── Caller-provided system state snapshot ───────────────────────── */
 typedef struct {
-    int             enabled;
-    int             mode;  /* 0=off 1=passive 2=active */
-    MirrorionEntry  ring[MIRRORION_MAX_KNOWLEDGE];
-    int             ring_head;
-    int             ring_count;
-    int             generating;
-    MirrorionTrigger current_trigger;
-    char            pending_question[MIRRORION_Q_LEN];
-    unsigned int    reflections_done;
-    unsigned int    reflections_saved;
+    uint64_t step_count;
+    uint64_t boot_count;
+    uint32_t dna_hash;
+    int      mem_pressure;   /* 0-100 */
+    float    last_halt_prob; /* 0.0-1.0 */
+} MirrorionState;
+
+/* ── Engine context ──────────────────────────────────────────────── */
+typedef struct {
+    int      enabled;
+    uint64_t idle_tick_threshold;
+    uint64_t idle_ticks;
+    uint64_t total_questions;
+    uint64_t total_answers;
+    uint32_t flush_count;
+    char     pending_question[MIRRORION_CONTEXT_SIZE];
+    char     pending_context[MIRRORION_CONTEXT_SIZE];   /* formatted prefix for inference */
+    int      has_pending;
 } MirrorionEngine;
 
-void        mirrorion_init(MirrorionEngine *e);
-void        mirrorion_set_mode(MirrorionEngine *e, int mode);
-const char *mirrorion_trigger(MirrorionEngine *e, MirrorionTrigger t, const char *context);
-void        mirrorion_record_answer(MirrorionEngine *e, const char *answer, int confidence);
-void        mirrorion_get_context(const MirrorionEngine *e, const char *query_hint,
-                                   char *buf, int buf_size);
-int         mirrorion_flush_jsonl(const MirrorionEngine *e, void *efi_root);
-void        mirrorion_print(const MirrorionEngine *e);
+/* ── API ─────────────────────────────────────────────────────────── */
 
-#endif
+void mirrorion_init(MirrorionEngine *e);
+
+/**
+ * mirrorion_trigger() — call every idle tick
+ * Returns 1 if a question is ready in e->pending_context (pass to SSM infer)
+ */
+int  mirrorion_trigger(MirrorionEngine *e, const MirrorionState *state);
+
+/**
+ * mirrorion_record_answer() — store the inference answer for the pending question
+ */
+void mirrorion_record_answer(MirrorionEngine *e, const char *answer,
+                              const MirrorionState *state);
+
+/**
+ * mirrorion_flush_jsonl() — dump ring to buf as JSONL
+ * Returns bytes written (ring is cleared after flush)
+ */
+int  mirrorion_flush_jsonl(MirrorionEngine *e, char *buf, int buf_size);
+
+/**
+ * mirrorion_status() — debug string
+ */
+void mirrorion_status(const MirrorionEngine *e, char *buf, int buf_size);
+
+#endif /* MIRRORION_H */
