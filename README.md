@@ -48,6 +48,11 @@ Current runtime skeleton commands:
 - `/oo_sidecar_unload`
 - `/attach_load <file>`
 - `/attach_audit`
+- `/attach_policy [status|audit|diff|sync|sync_force|reset [route]|<route> <temp> <top_p> <rep> <max_tokens>]`
+- `/attach_policy_audit`
+- `/attach_policy_diff`
+- `/attach_policy_sync`
+- `/attach_policy_sync_force`
 - `/attach_unload`
 - `/mind_status`
 
@@ -56,8 +61,11 @@ Current sidecar behavior:
 - validates a minimal `OOSS` header
 - keeps the validated sidecar blob resident in memory
 - exposes a first `HaltingHead` hook when the exported layout matches the expected V1 sidecar layout
+- validates an attach request on `/attach_load` by opening the file and checking a readable `GGUF` summary or a sane legacy `.bin` header before marking it active
+- lets an active validated attach influence `SomaMind` routing as the external battery, and injects compact advisory attach context into `/ssm_infer` when the selected route is `EXTERNAL` or `DUAL`
+- applies transient attach-route sampling caps during `/ssm_infer` for `EXTERNAL` or `DUAL` routes (temperature/top_p/repetition/max_tokens), then restores the route-tuned base values after generation
 - exposes `/oo_sidecar_audit` to summarize sidecar residency, header validity, halting-hook readiness, and suggested next action
-- exposes `/attach_audit` to summarize attached-model registration, backend status, relation to core, and suggested next action
+- exposes `/attach_audit` to summarize attached-model registration, validation/backend status, relation to core, and suggested next action
 - can now early-stop active decode loops at runtime when `halt_prob >= threshold`
 - exposes a configurable runtime halt policy via `/mind_halt_policy`
 - separates runtime changes from disk persistence with `/mind_halt_policy_save` and `/mind_halt_policy_load`
@@ -66,19 +74,26 @@ Current sidecar behavior:
 - exposes `/mind_halt_policy_sync` as a simpler semantic alias for syncing runtime from `repl.cfg` only when needed
 - exposes `/mind_halt_policy_sync_force` to reload runtime from `repl.cfg` even when it is already in sync
 - exposes `/mind_halt_policy_audit` to summarize runtime policy, persisted policy, sync state, and last apply/sync effect
-- exposes `/mind_audit` to aggregate halt-policy, sidecar, and attach audits into one global runtime report, then append normalized readiness and next-action fields
+- exposes `/mind_audit` to aggregate halt-policy, attach-policy, sidecar, and attach audits into one global runtime report, then append normalized readiness and next-action fields
 - exposes `/mind_doctor` to split the next safe corrective sequence into auto-fixable actions vs manual follow-up from current runtime state, then emit normalized `next_action` and `next_reason`
 - exposes `/mind_next` to print exactly one best next action from current runtime state
-- exposes `/mind_snapshot` to print a compact stable key=value machine-readable runtime snapshot (`format=kv-v1`, fixed field order)
+- exposes `/mind_snapshot` to print a compact stable key=value machine-readable runtime snapshot (`format=kv-v1`, schema `llmk-mind-snapshot-v5`, fixed field order), including attach kind/format/validation fields plus EXTERNAL/DUAL attach policy config, preview, and persisted sync fields, plus `/mind_snapshot strict` for headerless script-friendly output
+- exposes `/soma_status` and `/soma_route` to preview the attach-driven EXTERNAL/DUAL policy caps before generation
+- exposes `/attach_policy` to inspect, audit, diff, sync, reset, or override the runtime attach policy profiles used by EXTERNAL and DUAL routes, best-effort persists overrides into `repl.cfg` so they reload at boot, and reports persisted-vs-runtime sync in `status`
+- exposes `/attach_policy_audit`, `/attach_policy_diff`, `/attach_policy_sync`, and `/attach_policy_sync_force` as direct aliases for the persisted attach-policy control plane
 - exposes `/mind_ready` as a short binary readiness check for the V1 runtime path, now with the same recommended next action used by `/mind_next`
-- exposes `/mind_bootstrap_v1` to auto-apply the obvious safe V1 bootstrap steps, including reusing stored core/sidecar requests when available, and then report normalized `next_action` and `next_reason`
+- exposes `/mind_bootstrap_v1` to auto-apply the obvious safe V1 bootstrap steps, including reusing stored core/sidecar/attach requests when available, and then report normalized `next_action` and `next_reason`
 - exposes `/mind_path_v1` to print the shortest recommended V1 startup sequence from the current runtime state, including `/mind_bootstrap_v1` when it is the best shortcut, then emit normalized `next_action` and `next_reason`
 - stores persisted values in `repl.cfg` via `mind_halt_enabled` and `mind_halt_threshold`
+- stores attach policy persistence in `repl.cfg` via `attach_policy_external_*` and `attach_policy_dual_*`
 - can restore runtime V1 halt defaults via `/mind_halt_policy_reset`
 - shows whether runtime halt policy is in sync with `repl.cfg` in `/mind_status`
+- shows whether runtime attach policy is in sync with `repl.cfg` in `/mind_status`
 - shows the mode and effect of the latest apply/sync action in `/mind_status`
+- shows the mode and effect of the latest attach-policy sync/apply action in `/mind_status`
 - shows normalized readiness fields plus `next_action` and `next_reason` in `/mind_status`
 - can print explicit runtime vs persisted halt deltas with `/mind_halt_policy_diff`
+- can print explicit runtime vs persisted attach-policy deltas with `/attach_policy_diff`
 - does not yet execute broader sidecar semantics (budgets, tool metadata, richer OO policies)
 
 Reference docs:

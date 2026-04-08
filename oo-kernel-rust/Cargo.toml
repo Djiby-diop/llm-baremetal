@@ -1,0 +1,33 @@
+[package]
+name = "oo-kernel-rust"
+version = "0.3.0"
+edition = "2021"
+description = "OO Bare-Metal Rust Kernel — Parallel to C god file, memory-safe, advanced"
+authors = ["Djiby Diop <djibydiop@oo>"]
+
+[lib]
+name = "oo_kernel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oo_uefi"
+path = "src/boot/oo_uefi_entry.rs"
+required-features = ["uefi"]
+
+[features]
+default = []
+uefi = []      # bare-metal UEFI build (no_std)
+std  = []      # host-side tools (testing, D+ compiler)
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+panic = "abort"
+
+# No external crates — freestanding C spirit, in Rust
+# All code is in this crate, zero dependencies

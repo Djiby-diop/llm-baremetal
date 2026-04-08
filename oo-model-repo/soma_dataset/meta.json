@@ -1,0 +1,25 @@
+{
+  "total_records": 2000,
+  "domain_counts": {
+    "reasoning": 2000
+  },
+  "specialty": "mathematics",
+  "format": "soma-v1",
+  "special_tokens": {
+    "soma_open": "<|soma|>",
+    "soma_close": "<|/soma|>",
+    "response_open": "<|response|>",
+    "response_close": "<|/response|>"
+  },
+  "categories": [
+    "arithmetic",
+    "fractions",
+    "number_theory",
+    "algebra",
+    "combinatorics",
+    "boolean_logic",
+    "proof",
+    "word_problems",
+    "calculus_concepts"
+  ]
+}

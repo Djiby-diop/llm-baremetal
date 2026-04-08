@@ -122,6 +122,43 @@ static int g_mind_runtime_halt_apply_changed_threshold = 0;
 static LlmkMindHaltApplyMode g_mind_runtime_halt_apply_mode = LLMK_MIND_HALT_APPLY_NEVER;
 
 typedef struct {
+    float temperature;
+    float top_p;
+    float repetition_penalty;
+    int max_tokens;
+    int applied;
+} LlmkAttachRoutePolicyState;
+
+typedef struct {
+    int temperature_milli;
+    int top_p_milli;
+    int repetition_penalty_milli;
+    int max_tokens;
+} LlmkAttachRoutePolicyConfig;
+
+typedef struct {
+    int active;
+    int applied;
+    int temperature_milli;
+    int top_p_milli;
+    int repetition_penalty_milli;
+    int max_tokens;
+} LlmkAttachRoutePolicyPreview;
+
+typedef enum {
+    LLMK_ATTACH_POLICY_APPLY_NEVER = 0,
+    LLMK_ATTACH_POLICY_APPLY_SYNC = 1,
+    LLMK_ATTACH_POLICY_APPLY_SYNC_FORCE = 2,
+} LlmkAttachPolicyApplyMode;
+
+static LlmkAttachRoutePolicyConfig g_attach_policy_external_cfg = { 780, 890, 1120, 144 };
+static LlmkAttachRoutePolicyConfig g_attach_policy_dual_cfg = { 840, 920, 1080, 176 };
+static int g_attach_policy_apply_seen = 0;
+static int g_attach_policy_apply_changed_external = 0;
+static int g_attach_policy_apply_changed_dual = 0;
+static LlmkAttachPolicyApplyMode g_attach_policy_apply_mode = LLMK_ATTACH_POLICY_APPLY_NEVER;
+
+typedef struct {
     char core_path[192];
     char core_kind[32];
     int core_requested;
@@ -441,6 +478,22 @@ static EFI_STATUS llmk_mind_query_halt_policy_cfg_best_effort(
 static EFI_STATUS llmk_mind_load_halt_policy_best_effort(void);
 static EFI_STATUS llmk_mind_apply_saved_halt_policy_best_effort(int *out_changed_enabled, int *out_changed_threshold);
 static EFI_STATUS llmk_mind_apply_saved_halt_policy_if_needed_best_effort(int *out_was_needed, int *out_changed_enabled, int *out_changed_threshold);
+static EFI_STATUS llmk_attach_route_policy_query_cfg_best_effort(
+    LlmkAttachRoutePolicyConfig *out_external,
+    LlmkAttachRoutePolicyConfig *out_dual,
+    int *out_found_external_fields,
+    int *out_found_dual_fields);
+static void llmk_attach_route_policy_get_default(SomaRoute route, LlmkAttachRoutePolicyConfig *out);
+static void llmk_attach_route_policy_preview(SomaRoute route, LlmkAttachRoutePolicyPreview *out);
+static EFI_STATUS llmk_attach_route_policy_query_sync_state_best_effort(
+    LlmkAttachRoutePolicyConfig *out_external,
+    LlmkAttachRoutePolicyConfig *out_dual,
+    int *out_found_external_fields,
+    int *out_found_dual_fields,
+    int *out_found_any,
+    int *out_in_sync);
+static EFI_STATUS llmk_attach_route_policy_load_best_effort(int *out_changed_external, int *out_changed_dual);
+static EFI_STATUS llmk_attach_route_policy_apply_saved_if_needed_best_effort(int *out_was_needed, int *out_changed_external, int *out_changed_dual);
 static EFI_STATUS llmk_read_entire_file_best_effort(const CHAR16 *name, void **out_buf, UINTN *out_len);
 static EFI_STATUS llmk_open_read_file(EFI_FILE_HANDLE *out, const CHAR16 *name);
 static void llmk_mind_bind_core_backbone_v1(const char *path, int via_core_alias);
@@ -450,6 +503,11 @@ static void llmk_mind_collect_runtime_snapshot(LlmkMindRuntimeSnapshot *out);
 static void llmk_mind_select_next_action_from_snapshot(const LlmkMindRuntimeSnapshot *snapshot, const CHAR16 **out_action, const CHAR16 **out_reason);
 static void llmk_mind_select_next_action(const CHAR16 **out_action, const CHAR16 **out_reason, int *out_ready, int *out_core_ready, int *out_halt_ready, int *out_sidecar_ready);
 static const char *llmk_model_format_ascii(LlmkModelFormat fmt);
+static void llmk_attach_route_policy_print_audit(void);
+static void llmk_attach_route_policy_print_diff(void);
+static void llmk_attach_route_policy_print_apply_mode(LlmkAttachPolicyApplyMode mode);
+static void llmk_attach_route_policy_print_apply_effect(void);
+static void llmk_attach_route_policy_print_apply_command_result(LlmkAttachPolicyApplyMode mode, int was_needed, int changed_external, int changed_dual);
 
 static void llmk_mind_record_halt_apply(LlmkMindHaltApplyMode mode, int changed_enabled, int changed_threshold) {
     g_mind_runtime_halt_apply_seen = 1;
@@ -540,6 +598,47 @@ static void llmk_mind_print_halt_apply_effect(void) {
     if (g_mind_runtime_halt_apply_changed_enabled || g_mind_runtime_halt_apply_changed_threshold) Print(L"runtime-updated");
     else if (g_mind_runtime_halt_apply_mode == LLMK_MIND_HALT_APPLY_SYNC_FORCE) Print(L"forced-reload-no-delta");
     else Print(L"no-op-already-in-sync");
+}
+
+static void llmk_attach_route_policy_record_apply(LlmkAttachPolicyApplyMode mode, int changed_external, int changed_dual) {
+    g_attach_policy_apply_seen = 1;
+    g_attach_policy_apply_mode = mode;
+    g_attach_policy_apply_changed_external = changed_external ? 1 : 0;
+    g_attach_policy_apply_changed_dual = changed_dual ? 1 : 0;
+}
+
+static void llmk_attach_route_policy_print_apply_mode(LlmkAttachPolicyApplyMode mode) {
+    switch (mode) {
+        case LLMK_ATTACH_POLICY_APPLY_SYNC: Print(L"sync"); break;
+        case LLMK_ATTACH_POLICY_APPLY_SYNC_FORCE: Print(L"sync_force"); break;
+        default: Print(L"never"); break;
+    }
+}
+
+static void llmk_attach_route_policy_print_apply_effect(void) {
+    if (g_attach_policy_apply_changed_external || g_attach_policy_apply_changed_dual) Print(L"runtime-updated");
+    else if (g_attach_policy_apply_mode == LLMK_ATTACH_POLICY_APPLY_SYNC_FORCE) Print(L"forced-reload-no-delta");
+    else Print(L"no-op-already-in-sync");
+}
+
+static void llmk_attach_route_policy_print_apply_command_result(LlmkAttachPolicyApplyMode mode, int was_needed, int changed_external, int changed_dual) {
+    llmk_attach_route_policy_record_apply(mode, changed_external, changed_dual);
+
+    if (mode == LLMK_ATTACH_POLICY_APPLY_SYNC) {
+        if (!was_needed) {
+            Print(L"\r\n[AttachPolicy] sync skipped; runtime already matched repl.cfg changed.external=%d changed.dual=%d sync=in-sync\r\n\r\n",
+                  changed_external, changed_dual);
+        } else {
+            Print(L"\r\n[AttachPolicy] sync applied from repl.cfg changed.external=%d changed.dual=%d sync=in-sync\r\n\r\n",
+                  changed_external, changed_dual);
+        }
+        return;
+    }
+
+    if (mode == LLMK_ATTACH_POLICY_APPLY_SYNC_FORCE) {
+        Print(L"\r\n[AttachPolicy] forced sync reloaded repl.cfg changed.external=%d changed.dual=%d sync=in-sync\r\n\r\n",
+              changed_external, changed_dual);
+    }
 }
 
 static void llmk_mind_print_apply_command_result(LlmkMindHaltApplyMode mode, int was_needed, int changed_enabled, int changed_threshold) {
@@ -743,10 +842,11 @@ static void llmk_mind_print_global_audit(void) {
     llmk_mind_select_next_action_from_snapshot(&snapshot, &next_action, &next_reason);
 
     Print(L"\r\n[MindAudit]\r\n");
-    Print(L"  scope=topology+halt_policy+sidecar+attach\r\n");
+    Print(L"  scope=topology+halt_policy+attach_policy+sidecar+attach\r\n");
     Print(L"  identity=oo-somamind-core-primary\r\n");
-    Print(L"  audit_sections=4\r\n");
+    Print(L"  audit_sections=5\r\n");
     llmk_mind_print_halt_policy_audit();
+    llmk_attach_route_policy_print_audit();
     llmk_mind_print_sidecar_audit();
     llmk_mind_print_attach_audit();
     Print(L"  ready=%d\r\n", snapshot.ready);
@@ -1116,14 +1216,30 @@ static void llmk_mind_print_snapshot(int strict_mode) {
     LlmkMindRuntimeSnapshot snapshot;
     LlmkAttachRoutePolicyPreview attach_external_policy;
     LlmkAttachRoutePolicyPreview attach_dual_policy;
+    LlmkAttachRoutePolicyConfig persisted_external_cfg;
+    LlmkAttachRoutePolicyConfig persisted_dual_cfg;
+    int attach_cfg_found_external = 0;
+    int attach_cfg_found_dual = 0;
+    int attach_cfg_found_any = 0;
+    int attach_cfg_in_sync = 0;
+    EFI_STATUS attach_cfg_st;
     llmk_mind_collect_runtime_snapshot(&snapshot);
     llmk_mind_select_next_action_from_snapshot(&snapshot, &next_action, &next_reason);
     llmk_attach_route_policy_preview(SOMA_ROUTE_EXTERNAL, &attach_external_policy);
     llmk_attach_route_policy_preview(SOMA_ROUTE_DUAL, &attach_dual_policy);
+    llmk_attach_route_policy_get_default(SOMA_ROUTE_EXTERNAL, &persisted_external_cfg);
+    llmk_attach_route_policy_get_default(SOMA_ROUTE_DUAL, &persisted_dual_cfg);
+    attach_cfg_st = llmk_attach_route_policy_query_sync_state_best_effort(
+        &persisted_external_cfg,
+        &persisted_dual_cfg,
+        &attach_cfg_found_external,
+        &attach_cfg_found_dual,
+        &attach_cfg_found_any,
+        &attach_cfg_in_sync);
 
     if (!strict_mode) Print(L"\r\n[MindSnapshot]\r\n");
     Print(L"%sformat=kv-v1\r\n", prefix);
-    Print(L"%sschema=llmk-mind-snapshot-v4\r\n", prefix);
+    Print(L"%sschema=llmk-mind-snapshot-v5\r\n", prefix);
     Print(L"%sfield_order=fixed\r\n", prefix);
     Print(L"%sstrict=%d\r\n", prefix, strict_mode ? 1 : 0);
     Print(L"%sidentity=oo-somamind-core-primary\r\n", prefix);
@@ -1189,6 +1305,38 @@ static void llmk_mind_print_snapshot(int strict_mode) {
             attach_dual_policy.repetition_penalty_milli / 1000,
             attach_dual_policy.repetition_penalty_milli % 1000);
         Print(L"%sattach_policy_dual_max_tokens=%d\r\n", prefix, attach_dual_policy.max_tokens);
+        Print(L"%sattach_policy_persisted_status=", prefix);
+        if (EFI_ERROR(attach_cfg_st) || !attach_cfg_found_any) Print(L"not-found\r\n");
+        else if (attach_cfg_found_external == 4 && attach_cfg_found_dual == 4) Print(L"available\r\n");
+        else Print(L"partial\r\n");
+        Print(L"%sattach_policy_persisted_external_fields=%d\r\n", prefix, attach_cfg_found_external);
+        Print(L"%sattach_policy_persisted_dual_fields=%d\r\n", prefix, attach_cfg_found_dual);
+        Print(L"%sattach_policy_persisted_sync=", prefix);
+        if (EFI_ERROR(attach_cfg_st) || !attach_cfg_found_any) Print(L"unknown\r\n");
+        else if (attach_cfg_in_sync) Print(L"in-sync\r\n");
+        else Print(L"runtime!=repl.cfg\r\n");
+        Print(L"%sattach_policy_persisted_external_temp=%d.%03d\r\n", prefix,
+            persisted_external_cfg.temperature_milli / 1000,
+            persisted_external_cfg.temperature_milli % 1000);
+        Print(L"%sattach_policy_persisted_external_top_p=%d.%03d\r\n", prefix,
+            persisted_external_cfg.top_p_milli / 1000,
+            persisted_external_cfg.top_p_milli % 1000);
+        Print(L"%sattach_policy_persisted_external_rep=%d.%03d\r\n", prefix,
+            persisted_external_cfg.repetition_penalty_milli / 1000,
+            persisted_external_cfg.repetition_penalty_milli % 1000);
+        Print(L"%sattach_policy_persisted_external_max_tokens=%d\r\n", prefix,
+            persisted_external_cfg.max_tokens);
+        Print(L"%sattach_policy_persisted_dual_temp=%d.%03d\r\n", prefix,
+            persisted_dual_cfg.temperature_milli / 1000,
+            persisted_dual_cfg.temperature_milli % 1000);
+        Print(L"%sattach_policy_persisted_dual_top_p=%d.%03d\r\n", prefix,
+            persisted_dual_cfg.top_p_milli / 1000,
+            persisted_dual_cfg.top_p_milli % 1000);
+        Print(L"%sattach_policy_persisted_dual_rep=%d.%03d\r\n", prefix,
+            persisted_dual_cfg.repetition_penalty_milli / 1000,
+            persisted_dual_cfg.repetition_penalty_milli % 1000);
+        Print(L"%sattach_policy_persisted_dual_max_tokens=%d\r\n", prefix,
+            persisted_dual_cfg.max_tokens);
     Print(L"%shalt_policy_enabled=%d\r\n", prefix, g_mind_runtime_halt_enabled);
     Print(L"%shalt_policy_threshold=%d.%03d\r\n", prefix,
           (int)g_mind_runtime_halt_threshold,
@@ -1216,8 +1364,24 @@ static void llmk_mind_print_status(void) {
     const CHAR16 *next_action = L"/mind_doctor";
     const CHAR16 *next_reason = L"state is not fully ready and needs a broader corrective snapshot";
     LlmkMindRuntimeSnapshot snapshot;
+    LlmkAttachRoutePolicyConfig persisted_external_cfg;
+    LlmkAttachRoutePolicyConfig persisted_dual_cfg;
+    int attach_cfg_found_external = 0;
+    int attach_cfg_found_dual = 0;
+    int attach_cfg_found_any = 0;
+    int attach_cfg_in_sync = 0;
+    EFI_STATUS attach_cfg_st;
     llmk_mind_collect_runtime_snapshot(&snapshot);
     llmk_mind_select_next_action_from_snapshot(&snapshot, &next_action, &next_reason);
+    llmk_attach_route_policy_get_default(SOMA_ROUTE_EXTERNAL, &persisted_external_cfg);
+    llmk_attach_route_policy_get_default(SOMA_ROUTE_DUAL, &persisted_dual_cfg);
+    attach_cfg_st = llmk_attach_route_policy_query_sync_state_best_effort(
+        &persisted_external_cfg,
+        &persisted_dual_cfg,
+        &attach_cfg_found_external,
+        &attach_cfg_found_dual,
+        &attach_cfg_found_any,
+        &attach_cfg_in_sync);
 
     Print(L"\r\n[Mind] OO-SomaMind runtime topology\r\n");
     Print(L"  identity: internal native core\r\n");
@@ -1323,6 +1487,46 @@ static void llmk_mind_print_status(void) {
         else Print(L"registered but inactive; re-run /attach_load to validate the file again\r\n");
     } else {
         Print(L"none\r\n");
+    }
+
+    Print(L"  attach_policy_cfg: ");
+    if (EFI_ERROR(attach_cfg_st) || !attach_cfg_found_any) {
+        Print(L"not found\r\n");
+    } else {
+        if (attach_cfg_found_external == 4 && attach_cfg_found_dual == 4) Print(L"available sync=");
+        else Print(L"partial sync=");
+        if (attach_cfg_in_sync) Print(L"in-sync\r\n");
+        else Print(L"runtime!=repl.cfg\r\n");
+        Print(L"    persisted.external=temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d fields=%d/4\r\n",
+              persisted_external_cfg.temperature_milli / 1000,
+              persisted_external_cfg.temperature_milli % 1000,
+              persisted_external_cfg.top_p_milli / 1000,
+              persisted_external_cfg.top_p_milli % 1000,
+              persisted_external_cfg.repetition_penalty_milli / 1000,
+              persisted_external_cfg.repetition_penalty_milli % 1000,
+              persisted_external_cfg.max_tokens,
+              attach_cfg_found_external);
+        Print(L"    persisted.dual=temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d fields=%d/4\r\n",
+              persisted_dual_cfg.temperature_milli / 1000,
+              persisted_dual_cfg.temperature_milli % 1000,
+              persisted_dual_cfg.top_p_milli / 1000,
+              persisted_dual_cfg.top_p_milli % 1000,
+              persisted_dual_cfg.repetition_penalty_milli / 1000,
+              persisted_dual_cfg.repetition_penalty_milli % 1000,
+              persisted_dual_cfg.max_tokens,
+              attach_cfg_found_dual);
+    }
+    Print(L"  attach_policy_last_apply: ");
+    if (!g_attach_policy_apply_seen) {
+        Print(L"never\r\n");
+    } else {
+        Print(L"mode=");
+        llmk_attach_route_policy_print_apply_mode(g_attach_policy_apply_mode);
+        Print(L" changed.external=%d changed.dual=%d result=",
+              g_attach_policy_apply_changed_external,
+              g_attach_policy_apply_changed_dual);
+        llmk_attach_route_policy_print_apply_effect();
+        Print(L"\r\n");
     }
 
     Print(L"  ready=%d\r\n", snapshot.ready);
@@ -3181,33 +3385,6 @@ static ssm_f32        *g_soma_spec_buf = 0;
 static SomaSwarmNetCtx g_soma_swarm_net;
 // ─────────────────────────────────────────────────────────────────────────────
 
-typedef struct {
-    float temperature;
-    float top_p;
-    float repetition_penalty;
-    int max_tokens;
-    int applied;
-} LlmkAttachRoutePolicyState;
-
-typedef struct {
-    int temperature_milli;
-    int top_p_milli;
-    int repetition_penalty_milli;
-    int max_tokens;
-} LlmkAttachRoutePolicyConfig;
-
-typedef struct {
-    int active;
-    int applied;
-    int temperature_milli;
-    int top_p_milli;
-    int repetition_penalty_milli;
-    int max_tokens;
-} LlmkAttachRoutePolicyPreview;
-
-static LlmkAttachRoutePolicyConfig g_attach_policy_external_cfg = { 780, 890, 1120, 144 };
-static LlmkAttachRoutePolicyConfig g_attach_policy_dual_cfg = { 840, 920, 1080, 176 };
-
 static const CHAR16 *llmk_soma_route_name_wide(SomaRoute route) {
     switch (route) {
         case SOMA_ROUTE_REFLEX: return L"REFLEX";
@@ -3262,6 +3439,370 @@ static void llmk_attach_route_policy_reset(SomaRoute route) {
     *slot = cfg;
 }
 
+static int llmk_attach_route_policy_cfg_equals(
+    const LlmkAttachRoutePolicyConfig *a,
+    const LlmkAttachRoutePolicyConfig *b
+) {
+    if (!a || !b) return 0;
+    return a->temperature_milli == b->temperature_milli &&
+           a->top_p_milli == b->top_p_milli &&
+           a->repetition_penalty_milli == b->repetition_penalty_milli &&
+           a->max_tokens == b->max_tokens;
+}
+
+static EFI_STATUS llmk_attach_route_policy_query_cfg_best_effort(
+    LlmkAttachRoutePolicyConfig *out_external,
+    LlmkAttachRoutePolicyConfig *out_dual,
+    int *out_found_external_fields,
+    int *out_found_dual_fields
+) {
+    if (out_found_external_fields) *out_found_external_fields = 0;
+    if (out_found_dual_fields) *out_found_dual_fields = 0;
+    if (!g_root) return EFI_NOT_READY;
+
+    if (out_external) llmk_attach_route_policy_get_default(SOMA_ROUTE_EXTERNAL, out_external);
+    if (out_dual) llmk_attach_route_policy_get_default(SOMA_ROUTE_DUAL, out_dual);
+
+    void *raw = NULL;
+    UINTN raw_len = 0;
+    EFI_STATUS st = llmk_read_entire_file_best_effort(L"repl.cfg", &raw, &raw_len);
+    if (EFI_ERROR(st) || !raw || raw_len == 0) {
+        if (raw) uefi_call_wrapper(BS->FreePool, 1, raw);
+        return EFI_NOT_FOUND;
+    }
+
+    char *buf = NULL;
+    EFI_STATUS st2 = uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, raw_len + 1, (void **)&buf);
+    if (EFI_ERROR(st2) || !buf) {
+        uefi_call_wrapper(BS->FreePool, 1, raw);
+        return EFI_OUT_OF_RESOURCES;
+    }
+    CopyMem(buf, raw, raw_len);
+    buf[raw_len] = 0;
+    uefi_call_wrapper(BS->FreePool, 1, raw);
+
+    char *p = buf;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+
+        llmk_cfg_trim(&line);
+        if (line[0] == 0 || line[0] == '#' || line[0] == ';') continue;
+        for (char *c = line; *c; c++) {
+            if (*c == '#') { *c = 0; break; }
+        }
+        llmk_cfg_trim(&line);
+        if (line[0] == 0) continue;
+
+        char *eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        llmk_cfg_trim(&key);
+        llmk_cfg_trim(&val);
+        if (key[0] == 0) continue;
+        for (char *k = key; *k; k++) *k = llmk_cfg_tolower(*k);
+
+        if (llmk_cfg_streq_ci(key, "attach_policy_external_temp")) {
+            float v = 0.0f;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.10f) v = 0.10f;
+                if (v > 5.0f) v = 5.0f;
+                if (out_external) out_external->temperature_milli = (int)(v * 1000.0f + 0.5f);
+                if (out_found_external_fields) (*out_found_external_fields)++;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_external_top_p")) {
+            float v = 0.0f;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                if (out_external) out_external->top_p_milli = (int)(v * 1000.0f + 0.5f);
+                if (out_found_external_fields) (*out_found_external_fields)++;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_external_rep")) {
+            float v = 0.0f;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 1.0f) v = 1.0f;
+                if (v > 3.0f) v = 3.0f;
+                if (out_external) out_external->repetition_penalty_milli = (int)(v * 1000.0f + 0.5f);
+                if (out_found_external_fields) (*out_found_external_fields)++;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_external_max_tokens")) {
+            int v = 0;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > MAX_TOKENS) v = MAX_TOKENS;
+                if (out_external) out_external->max_tokens = v;
+                if (out_found_external_fields) (*out_found_external_fields)++;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_dual_temp")) {
+            float v = 0.0f;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.10f) v = 0.10f;
+                if (v > 5.0f) v = 5.0f;
+                if (out_dual) out_dual->temperature_milli = (int)(v * 1000.0f + 0.5f);
+                if (out_found_dual_fields) (*out_found_dual_fields)++;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_dual_top_p")) {
+            float v = 0.0f;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                if (out_dual) out_dual->top_p_milli = (int)(v * 1000.0f + 0.5f);
+                if (out_found_dual_fields) (*out_found_dual_fields)++;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_dual_rep")) {
+            float v = 0.0f;
+            if (llmk_cfg_parse_f32(val, &v)) {
+                if (v < 1.0f) v = 1.0f;
+                if (v > 3.0f) v = 3.0f;
+                if (out_dual) out_dual->repetition_penalty_milli = (int)(v * 1000.0f + 0.5f);
+                if (out_found_dual_fields) (*out_found_dual_fields)++;
+            }
+        } else if (llmk_cfg_streq_ci(key, "attach_policy_dual_max_tokens")) {
+            int v = 0;
+            if (llmk_cfg_parse_i32(val, &v)) {
+                if (v < 1) v = 1;
+                if (v > MAX_TOKENS) v = MAX_TOKENS;
+                if (out_dual) out_dual->max_tokens = v;
+                if (out_found_dual_fields) (*out_found_dual_fields)++;
+            }
+        }
+    }
+
+    uefi_call_wrapper(BS->FreePool, 1, buf);
+    if ((out_found_external_fields && *out_found_external_fields > 0) ||
+        (out_found_dual_fields && *out_found_dual_fields > 0)) {
+        return EFI_SUCCESS;
+    }
+    return EFI_NOT_FOUND;
+}
+
+static EFI_STATUS llmk_attach_route_policy_query_sync_state_best_effort(
+    LlmkAttachRoutePolicyConfig *out_external,
+    LlmkAttachRoutePolicyConfig *out_dual,
+    int *out_found_external_fields,
+    int *out_found_dual_fields,
+    int *out_found_any,
+    int *out_in_sync
+) {
+    LlmkAttachRoutePolicyConfig persisted_external;
+    LlmkAttachRoutePolicyConfig persisted_dual;
+    int found_external_fields = 0;
+    int found_dual_fields = 0;
+    EFI_STATUS st;
+
+    llmk_attach_route_policy_get_default(SOMA_ROUTE_EXTERNAL, &persisted_external);
+    llmk_attach_route_policy_get_default(SOMA_ROUTE_DUAL, &persisted_dual);
+    st = llmk_attach_route_policy_query_cfg_best_effort(
+        &persisted_external,
+        &persisted_dual,
+        &found_external_fields,
+        &found_dual_fields);
+
+    if (out_external) *out_external = persisted_external;
+    if (out_dual) *out_dual = persisted_dual;
+    if (out_found_external_fields) *out_found_external_fields = found_external_fields;
+    if (out_found_dual_fields) *out_found_dual_fields = found_dual_fields;
+
+    if (EFI_ERROR(st) || (found_external_fields == 0 && found_dual_fields == 0)) {
+        if (out_found_any) *out_found_any = 0;
+        if (out_in_sync) *out_in_sync = 0;
+        return st;
+    }
+
+    if (out_found_any) *out_found_any = 1;
+    if (out_in_sync) {
+        *out_in_sync = llmk_attach_route_policy_cfg_equals(&persisted_external, &g_attach_policy_external_cfg) &&
+                       llmk_attach_route_policy_cfg_equals(&persisted_dual, &g_attach_policy_dual_cfg);
+    }
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS llmk_attach_route_policy_load_best_effort(int *out_changed_external, int *out_changed_dual) {
+    LlmkAttachRoutePolicyConfig persisted_external;
+    LlmkAttachRoutePolicyConfig persisted_dual;
+    LlmkAttachRoutePolicyConfig prev_external = g_attach_policy_external_cfg;
+    LlmkAttachRoutePolicyConfig prev_dual = g_attach_policy_dual_cfg;
+    int found_external_fields = 0;
+    int found_dual_fields = 0;
+    EFI_STATUS st = llmk_attach_route_policy_query_cfg_best_effort(
+        &persisted_external,
+        &persisted_dual,
+        &found_external_fields,
+        &found_dual_fields);
+    if (EFI_ERROR(st)) return st;
+
+    g_attach_policy_external_cfg = persisted_external;
+    g_attach_policy_dual_cfg = persisted_dual;
+
+    if (out_changed_external) {
+        *out_changed_external = !llmk_attach_route_policy_cfg_equals(&prev_external, &g_attach_policy_external_cfg);
+    }
+    if (out_changed_dual) {
+        *out_changed_dual = !llmk_attach_route_policy_cfg_equals(&prev_dual, &g_attach_policy_dual_cfg);
+    }
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS llmk_attach_route_policy_apply_saved_if_needed_best_effort(int *out_was_needed, int *out_changed_external, int *out_changed_dual) {
+    LlmkAttachRoutePolicyConfig persisted_external;
+    LlmkAttachRoutePolicyConfig persisted_dual;
+    int found_external_fields = 0;
+    int found_dual_fields = 0;
+    int found_any = 0;
+    int in_sync = 0;
+    EFI_STATUS st = llmk_attach_route_policy_query_sync_state_best_effort(
+        &persisted_external,
+        &persisted_dual,
+        &found_external_fields,
+        &found_dual_fields,
+        &found_any,
+        &in_sync);
+    if (EFI_ERROR(st)) return st;
+    if (!found_any) return EFI_NOT_FOUND;
+
+    if (in_sync) {
+        if (out_was_needed) *out_was_needed = 0;
+        if (out_changed_external) *out_changed_external = 0;
+        if (out_changed_dual) *out_changed_dual = 0;
+        return EFI_SUCCESS;
+    }
+
+    if (out_was_needed) *out_was_needed = 1;
+    return llmk_attach_route_policy_load_best_effort(out_changed_external, out_changed_dual);
+}
+
+static void llmk_attach_route_policy_print_signed_milli_delta(int milli) {
+    int abs_milli = milli < 0 ? -milli : milli;
+    Print(L"%c%d.%03d", milli < 0 ? L'-' : L'+', abs_milli / 1000, abs_milli % 1000);
+}
+
+static void llmk_attach_route_policy_print_signed_i32_delta(int v) {
+    int abs_v = v < 0 ? -v : v;
+    Print(L"%c%d", v < 0 ? L'-' : L'+', abs_v);
+}
+
+static void llmk_attach_route_policy_print_runtime_cfg_line(const CHAR16 *label, const LlmkAttachRoutePolicyConfig *cfg) {
+    if (!cfg) return;
+    Print(L"  runtime.%s=temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d\r\n",
+          label,
+          cfg->temperature_milli / 1000,
+          cfg->temperature_milli % 1000,
+          cfg->top_p_milli / 1000,
+          cfg->top_p_milli % 1000,
+          cfg->repetition_penalty_milli / 1000,
+          cfg->repetition_penalty_milli % 1000,
+          cfg->max_tokens);
+}
+
+static void llmk_attach_route_policy_print_persisted_cfg_line(const CHAR16 *label, const LlmkAttachRoutePolicyConfig *cfg, int found_fields) {
+    if (!cfg) return;
+    Print(L"  persisted.%s=temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d fields=%d/4\r\n",
+          label,
+          cfg->temperature_milli / 1000,
+          cfg->temperature_milli % 1000,
+          cfg->top_p_milli / 1000,
+          cfg->top_p_milli % 1000,
+          cfg->repetition_penalty_milli / 1000,
+          cfg->repetition_penalty_milli % 1000,
+          cfg->max_tokens,
+          found_fields);
+}
+
+static void llmk_attach_route_policy_print_diff(void) {
+    LlmkAttachRoutePolicyConfig persisted_external;
+    LlmkAttachRoutePolicyConfig persisted_dual;
+    int found_external_fields = 0;
+    int found_dual_fields = 0;
+    int found_any = 0;
+    int in_sync = 0;
+    EFI_STATUS st = llmk_attach_route_policy_query_sync_state_best_effort(
+        &persisted_external,
+        &persisted_dual,
+        &found_external_fields,
+        &found_dual_fields,
+        &found_any,
+        &in_sync);
+
+    Print(L"\r\n[AttachPolicyDiff]\r\n");
+    llmk_attach_route_policy_print_runtime_cfg_line(L"external", &g_attach_policy_external_cfg);
+    llmk_attach_route_policy_print_runtime_cfg_line(L"dual", &g_attach_policy_dual_cfg);
+
+    if (EFI_ERROR(st) || !found_any) {
+        Print(L"  persisted=(not found in repl.cfg)\r\n\r\n");
+        return;
+    }
+
+    llmk_attach_route_policy_print_persisted_cfg_line(L"external", &persisted_external, found_external_fields);
+    llmk_attach_route_policy_print_persisted_cfg_line(L"dual", &persisted_dual, found_dual_fields);
+    Print(L"  delta.external.temp=");
+    llmk_attach_route_policy_print_signed_milli_delta(g_attach_policy_external_cfg.temperature_milli - persisted_external.temperature_milli);
+    Print(L" top_p=");
+    llmk_attach_route_policy_print_signed_milli_delta(g_attach_policy_external_cfg.top_p_milli - persisted_external.top_p_milli);
+    Print(L" rep=");
+    llmk_attach_route_policy_print_signed_milli_delta(g_attach_policy_external_cfg.repetition_penalty_milli - persisted_external.repetition_penalty_milli);
+    Print(L" max_tokens=");
+    llmk_attach_route_policy_print_signed_i32_delta(g_attach_policy_external_cfg.max_tokens - persisted_external.max_tokens);
+    Print(L"\r\n");
+    Print(L"  delta.dual.temp=");
+    llmk_attach_route_policy_print_signed_milli_delta(g_attach_policy_dual_cfg.temperature_milli - persisted_dual.temperature_milli);
+    Print(L" top_p=");
+    llmk_attach_route_policy_print_signed_milli_delta(g_attach_policy_dual_cfg.top_p_milli - persisted_dual.top_p_milli);
+    Print(L" rep=");
+    llmk_attach_route_policy_print_signed_milli_delta(g_attach_policy_dual_cfg.repetition_penalty_milli - persisted_dual.repetition_penalty_milli);
+    Print(L" max_tokens=");
+    llmk_attach_route_policy_print_signed_i32_delta(g_attach_policy_dual_cfg.max_tokens - persisted_dual.max_tokens);
+    Print(L"\r\n");
+    Print(L"  sync=%s\r\n\r\n", in_sync ? L"in-sync" : L"runtime!=repl.cfg");
+}
+
+static void llmk_attach_route_policy_print_audit(void) {
+    LlmkAttachRoutePolicyConfig persisted_external;
+    LlmkAttachRoutePolicyConfig persisted_dual;
+    int found_external_fields = 0;
+    int found_dual_fields = 0;
+    int found_any = 0;
+    int in_sync = 0;
+    EFI_STATUS st = llmk_attach_route_policy_query_sync_state_best_effort(
+        &persisted_external,
+        &persisted_dual,
+        &found_external_fields,
+        &found_dual_fields,
+        &found_any,
+        &in_sync);
+
+    Print(L"\r\n[AttachPolicyAudit]\r\n");
+    llmk_attach_route_policy_print_runtime_cfg_line(L"external", &g_attach_policy_external_cfg);
+    llmk_attach_route_policy_print_runtime_cfg_line(L"dual", &g_attach_policy_dual_cfg);
+
+    if (EFI_ERROR(st) || !found_any) {
+        Print(L"  persisted=(not found in repl.cfg)\r\n");
+        Print(L"  sync=unknown\r\n");
+        Print(L"  suggested_action=/attach_policy reset\r\n");
+    } else {
+        llmk_attach_route_policy_print_persisted_cfg_line(L"external", &persisted_external, found_external_fields);
+        llmk_attach_route_policy_print_persisted_cfg_line(L"dual", &persisted_dual, found_dual_fields);
+        Print(L"  sync=%s\r\n", in_sync ? L"in-sync" : L"runtime!=repl.cfg");
+        Print(L"  suggested_action=%s\r\n", in_sync ? L"already-synchronized" : L"/attach_policy_sync");
+    }
+
+    Print(L"  last_apply=");
+    if (!g_attach_policy_apply_seen) {
+        Print(L"never\r\n\r\n");
+        return;
+    }
+    llmk_attach_route_policy_print_apply_mode(g_attach_policy_apply_mode);
+    Print(L" effect=");
+    llmk_attach_route_policy_print_apply_effect();
+    Print(L" changed.external=%d changed.dual=%d\r\n\r\n",
+          g_attach_policy_apply_changed_external,
+          g_attach_policy_apply_changed_dual);
+}
+
 static void llmk_attach_route_policy_print_profile(const CHAR16 *label, SomaRoute route) {
     LlmkAttachRoutePolicyConfig *slot = llmk_attach_route_policy_config_slot(route);
     LlmkAttachRoutePolicyPreview preview;
@@ -3289,6 +3830,26 @@ static void llmk_attach_route_policy_print_profile(const CHAR16 *label, SomaRout
 }
 
 static void llmk_attach_route_policy_print_status(void) {
+    LlmkAttachRoutePolicyConfig persisted_external;
+    LlmkAttachRoutePolicyConfig persisted_dual;
+    int found_external_fields = 0;
+    int found_dual_fields = 0;
+    int any_found = 0;
+    int in_sync = 0;
+    EFI_STATUS persisted_st;
+
+    llmk_attach_route_policy_get_default(SOMA_ROUTE_EXTERNAL, &persisted_external);
+    llmk_attach_route_policy_get_default(SOMA_ROUTE_DUAL, &persisted_dual);
+    persisted_st = llmk_attach_route_policy_query_cfg_best_effort(
+        &persisted_external,
+        &persisted_dual,
+        &found_external_fields,
+        &found_dual_fields);
+    any_found = (found_external_fields > 0 || found_dual_fields > 0) ? 1 : 0;
+    in_sync = any_found &&
+              llmk_attach_route_policy_cfg_equals(&persisted_external, &g_attach_policy_external_cfg) &&
+              llmk_attach_route_policy_cfg_equals(&persisted_dual, &g_attach_policy_dual_cfg);
+
     Print(L"\r\n[AttachPolicy]\r\n");
     Print(L"  scope=runtime-route-policy\r\n");
     Print(L"  attach_active=%d format=", g_mind_runtime_state.attach_active);
@@ -3296,6 +3857,48 @@ static void llmk_attach_route_policy_print_status(void) {
     Print(L"\r\n");
     llmk_attach_route_policy_print_profile(L"external", SOMA_ROUTE_EXTERNAL);
     llmk_attach_route_policy_print_profile(L"dual", SOMA_ROUTE_DUAL);
+    Print(L"  persisted.status=");
+    if (EFI_ERROR(persisted_st) || !any_found) {
+        Print(L"not-found\r\n");
+    } else if (found_external_fields == 4 && found_dual_fields == 4) {
+        Print(L"available\r\n");
+    } else {
+        Print(L"partial\r\n");
+    }
+    Print(L"  persisted.external_fields=%d/4 dual_fields=%d/4\r\n",
+          found_external_fields, found_dual_fields);
+    if (!EFI_ERROR(persisted_st) && any_found) {
+        Print(L"    external persisted=temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d\r\n",
+              persisted_external.temperature_milli / 1000,
+              persisted_external.temperature_milli % 1000,
+              persisted_external.top_p_milli / 1000,
+              persisted_external.top_p_milli % 1000,
+              persisted_external.repetition_penalty_milli / 1000,
+              persisted_external.repetition_penalty_milli % 1000,
+              persisted_external.max_tokens);
+        Print(L"    dual     persisted=temp=%d.%03d top_p=%d.%03d rep=%d.%03d max_tokens=%d\r\n",
+              persisted_dual.temperature_milli / 1000,
+              persisted_dual.temperature_milli % 1000,
+              persisted_dual.top_p_milli / 1000,
+              persisted_dual.top_p_milli % 1000,
+              persisted_dual.repetition_penalty_milli / 1000,
+              persisted_dual.repetition_penalty_milli % 1000,
+              persisted_dual.max_tokens);
+        Print(L"  persisted.sync=%s\r\n", in_sync ? L"in-sync" : L"runtime!=repl.cfg");
+    } else {
+        Print(L"  persisted.sync=unknown\r\n");
+    }
+    Print(L"  last_apply=");
+    if (!g_attach_policy_apply_seen) {
+        Print(L"never\r\n");
+    } else {
+        llmk_attach_route_policy_print_apply_mode(g_attach_policy_apply_mode);
+        Print(L" effect=");
+        llmk_attach_route_policy_print_apply_effect();
+        Print(L" changed.external=%d changed.dual=%d\r\n",
+              g_attach_policy_apply_changed_external,
+              g_attach_policy_apply_changed_dual);
+    }
     Print(L"\r\n");
 }
 
@@ -7367,7 +7970,11 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /mind_path_v1  Print the minimal recommended V1 startup path\r\n");
     Print(L"  /oo_sidecar_audit  Audit the registered OOSS sidecar state and readiness\r\n");
     Print(L"  /attach_audit  Audit the registered attached model validation state and role\r\n");
-    Print(L"  /attach_policy [status|reset|<route> <temp> <top_p> <rep> <max_tokens>]  Configure attach route policy\r\n");
+    Print(L"  /attach_policy [status|audit|diff|sync|sync_force|reset [route]|<route> <temp> <top_p> <rep> <max_tokens>]  Configure attach route policy\r\n");
+    Print(L"  /attach_policy_audit  Audit runtime vs persisted attach route policy\r\n");
+    Print(L"  /attach_policy_diff   Compare runtime attach route policy vs repl.cfg\r\n");
+    Print(L"  /attach_policy_sync   Sync runtime attach route policy from repl.cfg when needed\r\n");
+    Print(L"  /attach_policy_sync_force  Force a runtime attach route policy reload from repl.cfg\r\n");
     Print(L"  /mind_halt_policy_reset  Restore the V1 runtime halt policy defaults\r\n");
     Print(L"  /mind_halt_policy_diff  Compare runtime halt policy vs repl.cfg\r\n");
     Print(L"  /oo_sidecar <file>    Register an OO sidecar extension (future OOSS path)\r\n");
@@ -7793,12 +8400,78 @@ static void llmk_repl_no_model_loop(void) {
             }
             continue;
         }
+        if (my_strncmp(prompt, "/attach_policy_audit", 20) == 0) {
+            llmk_attach_route_policy_print_audit();
+            continue;
+        }
+        if (my_strncmp(prompt, "/attach_policy_diff", 19) == 0) {
+            llmk_attach_route_policy_print_diff();
+            continue;
+        }
+        if (my_strncmp(prompt, "/attach_policy_sync_force", 25) == 0) {
+            int changed_external = 0;
+            int changed_dual = 0;
+            EFI_STATUS ast = llmk_attach_route_policy_load_best_effort(&changed_external, &changed_dual);
+            if (EFI_ERROR(ast)) {
+                Print(L"\r\n[AttachPolicy] warning: forced sync from repl.cfg failed (%r)\r\n\r\n", ast);
+            } else {
+                llmk_attach_route_policy_print_apply_command_result(LLMK_ATTACH_POLICY_APPLY_SYNC_FORCE, 1, changed_external, changed_dual);
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/attach_policy_sync", 19) == 0) {
+            int was_needed = 0;
+            int changed_external = 0;
+            int changed_dual = 0;
+            EFI_STATUS ast = llmk_attach_route_policy_apply_saved_if_needed_best_effort(&was_needed, &changed_external, &changed_dual);
+            if (EFI_ERROR(ast)) {
+                Print(L"\r\n[AttachPolicy] warning: sync from repl.cfg failed (%r)\r\n\r\n", ast);
+            } else if (!was_needed) {
+                llmk_attach_route_policy_print_apply_command_result(LLMK_ATTACH_POLICY_APPLY_SYNC, 0, changed_external, changed_dual);
+            } else {
+                llmk_attach_route_policy_print_apply_command_result(LLMK_ATTACH_POLICY_APPLY_SYNC, 1, changed_external, changed_dual);
+            }
+            continue;
+        }
         if (my_strncmp(prompt, "/attach_policy", 14) == 0) {
             const char *arg = prompt + 14;
             EFI_STATUS persist_st = EFI_SUCCESS;
             while (*arg == ' ' || *arg == '\t') arg++;
             if (!arg[0] || my_strcmp(arg, "status") == 0) {
                 llmk_attach_route_policy_print_status();
+                continue;
+            }
+            if (my_strcmp(arg, "audit") == 0) {
+                llmk_attach_route_policy_print_audit();
+                continue;
+            }
+            if (my_strcmp(arg, "diff") == 0) {
+                llmk_attach_route_policy_print_diff();
+                continue;
+            }
+            if (my_strcmp(arg, "sync") == 0) {
+                int was_needed = 0;
+                int changed_external = 0;
+                int changed_dual = 0;
+                EFI_STATUS ast = llmk_attach_route_policy_apply_saved_if_needed_best_effort(&was_needed, &changed_external, &changed_dual);
+                if (EFI_ERROR(ast)) {
+                    Print(L"\r\n[AttachPolicy] warning: sync from repl.cfg failed (%r)\r\n\r\n", ast);
+                } else if (!was_needed) {
+                    llmk_attach_route_policy_print_apply_command_result(LLMK_ATTACH_POLICY_APPLY_SYNC, 0, changed_external, changed_dual);
+                } else {
+                    llmk_attach_route_policy_print_apply_command_result(LLMK_ATTACH_POLICY_APPLY_SYNC, 1, changed_external, changed_dual);
+                }
+                continue;
+            }
+            if (my_strcmp(arg, "sync_force") == 0) {
+                int changed_external = 0;
+                int changed_dual = 0;
+                EFI_STATUS ast = llmk_attach_route_policy_load_best_effort(&changed_external, &changed_dual);
+                if (EFI_ERROR(ast)) {
+                    Print(L"\r\n[AttachPolicy] warning: forced sync from repl.cfg failed (%r)\r\n\r\n", ast);
+                } else {
+                    llmk_attach_route_policy_print_apply_command_result(LLMK_ATTACH_POLICY_APPLY_SYNC_FORCE, 1, changed_external, changed_dual);
+                }
                 continue;
             }
             if (my_strncmp(arg, "reset", 5) == 0 && (arg[5] == 0 || arg[5] == ' ' || arg[5] == '\t')) {
@@ -7844,31 +8517,31 @@ static void llmk_repl_no_model_loop(void) {
                 }
                 route_buf[ri] = 0;
                 if (!llmk_attach_route_policy_parse_route(route_buf, &route)) {
-                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    Print(L"\r\nUsage: /attach_policy [status|audit|diff|sync|sync_force|reset [external|dual]|<external|dual> <temp> <top_p> <rep> <max_tokens>]\r\n\r\n");
                     continue;
                 }
                 arg += ri;
                 while (*arg == ' ' || *arg == '\t') arg++;
                 if (!llmk_cfg_parse_f32(arg, &temp)) {
-                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    Print(L"\r\nUsage: /attach_policy [status|audit|diff|sync|sync_force|reset [external|dual]|<external|dual> <temp> <top_p> <rep> <max_tokens>]\r\n\r\n");
                     continue;
                 }
                 while (*arg && *arg != ' ' && *arg != '\t') arg++;
                 while (*arg == ' ' || *arg == '\t') arg++;
                 if (!llmk_cfg_parse_f32(arg, &top_p)) {
-                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    Print(L"\r\nUsage: /attach_policy [status|audit|diff|sync|sync_force|reset [external|dual]|<external|dual> <temp> <top_p> <rep> <max_tokens>]\r\n\r\n");
                     continue;
                 }
                 while (*arg && *arg != ' ' && *arg != '\t') arg++;
                 while (*arg == ' ' || *arg == '\t') arg++;
                 if (!llmk_cfg_parse_f32(arg, &rep)) {
-                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    Print(L"\r\nUsage: /attach_policy [status|audit|diff|sync|sync_force|reset [external|dual]|<external|dual> <temp> <top_p> <rep> <max_tokens>]\r\n\r\n");
                     continue;
                 }
                 while (*arg && *arg != ' ' && *arg != '\t') arg++;
                 while (*arg == ' ' || *arg == '\t') arg++;
                 if (!llmk_cfg_parse_i32(arg, &max_tokens)) {
-                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    Print(L"\r\nUsage: /attach_policy [status|audit|diff|sync|sync_force|reset [external|dual]|<external|dual> <temp> <top_p> <rep> <max_tokens>]\r\n\r\n");
                     continue;
                 }
 
@@ -7883,7 +8556,7 @@ static void llmk_repl_no_model_loop(void) {
 
                 slot = llmk_attach_route_policy_config_slot(route);
                 if (!slot) {
-                    Print(L"\r\nUsage: /attach_policy <external|dual> <temp> <top_p> <rep> <max_tokens>\r\n\r\n");
+                    Print(L"\r\nUsage: /attach_policy [status|audit|diff|sync|sync_force|reset [external|dual]|<external|dual> <temp> <top_p> <rep> <max_tokens>]\r\n\r\n");
                     continue;
                 }
                 slot->temperature_milli = (int)(temp * 1000.0f + 0.5f);
@@ -9925,7 +10598,7 @@ static void llmk_repl_no_model_loop(void) {
         if (my_strncmp(prompt, "/ssm_info", 9) == 0) {
             Print(L"\r\n[SSM] Mamba bare-metal engine v0.1\r\n");
             Print(L"  Commands: /ssm_load <file>, /ssm_infer <text>, /ssm_reset\r\n");
-            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_apply_saved_if_needed, /mind_halt_policy_sync, /mind_halt_policy_sync_force, /mind_halt_policy_audit, /mind_audit, /mind_doctor, /mind_next, /mind_snapshot, /mind_ready, /mind_bootstrap_v1, /mind_path_v1, /oo_sidecar <file>, /oo_sidecar_audit, /oo_sidecar_unload, /attach_load <file>, /attach_audit, /attach_policy, /attach_unload, /mind_halt_policy_reset, /mind_halt_policy_diff, /mind_status\r\n");
+            Print(L"  Mind cmds: /core_load <file>, /mind_diag, /mind_halt_probe [x], /mind_halt_decide [x] [t], /mind_halt_sweep [a] [b] [s] [t], /mind_halt_policy [t] [on|off], /mind_halt_policy_save, /mind_halt_policy_load, /mind_halt_policy_apply_saved, /mind_halt_policy_apply_saved_if_needed, /mind_halt_policy_sync, /mind_halt_policy_sync_force, /mind_halt_policy_audit, /mind_audit, /mind_doctor, /mind_next, /mind_snapshot, /mind_ready, /mind_bootstrap_v1, /mind_path_v1, /oo_sidecar <file>, /oo_sidecar_audit, /oo_sidecar_unload, /attach_load <file>, /attach_audit, /attach_policy, /attach_policy_audit, /attach_policy_diff, /attach_policy_sync, /attach_policy_sync_force, /attach_unload, /mind_halt_policy_reset, /mind_halt_policy_diff, /mind_status\r\n");
             Print(L"  Weight format: MAMB binary\r\n");
             Print(L"  Exporters: runtime export_mamba_baremetal.py | oo-model export_mamb_binary.py\r\n");
             Print(L"  Architecture: Mamba SSM, freestanding, O(1) memory per token\r\n");
