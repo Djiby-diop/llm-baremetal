@@ -172,15 +172,15 @@ def export_ooss_binary(model, output_path: str, vocab_size: int, d_model: int, n
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     state = model.state_dict()
 
-    # Flatten all weights to F32
+    # Flatten all weights to F32 using pure torch (no numpy dependency)
     weight_tensors = []
     weight_names = []
     total_floats = 0
     for name, param in state.items():
-        flat = param.detach().cpu().float().numpy().flatten()
+        flat = param.detach().cpu().float().reshape(-1)
         weight_tensors.append(flat)
         weight_names.append(name)
-        total_floats += len(flat)
+        total_floats += flat.numel()
 
     total_bytes = 64 + total_floats * 4  # 64-byte header + F32 weights
 
@@ -196,10 +196,13 @@ def export_ooss_binary(model, output_path: str, vocab_size: int, d_model: int, n
         f.write(struct.pack("<I", len(weight_tensors)))  # n_tensors
         f.write(b'\x00' * (64 - 32))                # padding to 64 bytes
 
-        # Weights (F32, little-endian)
-        import numpy as np
+        # Weights (F32 little-endian — stdlib array, no numpy needed)
+        import array as _array, sys as _sys
         for flat in weight_tensors:
-            f.write(flat.astype('<f4').tobytes())
+            buf = _array.array('f', flat.to(torch.float32).tolist())
+            if _sys.byteorder == 'big':
+                buf.byteswap()
+            f.write(buf.tobytes())
 
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     print(f"[OK] OOSS binary → {output_path}  ({size_mb:.1f} MB)")
