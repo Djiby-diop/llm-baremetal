@@ -1,0 +1,12 @@
+{
+  "total": 378,
+  "domains": {
+    "0_system": 170,
+    "2_reasoning": 54,
+    "4_policy": 42,
+    "5_memory": 48,
+    "6_organism": 64
+  },
+  "halt_examples": 120,
+  "seed": "0xd31b10e"
+}
