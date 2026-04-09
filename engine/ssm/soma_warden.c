@@ -3,6 +3,7 @@
 // Freestanding C11 — no libc, no malloc.
 
 #include "soma_warden.h"
+#include "oo_bus_bridge.h"   // Phase J: bus emit on D+ verdict change
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -247,6 +248,8 @@ int soma_warden_update(SomaWardenCtx *w,
                 soma_router_set_threshold(router, 0.05f);
                 router->external_model_ready = 0;
             }
+            // J: emit goal_halt to bus
+            oo_bus_emit_goal_halt("dplus_emergency");
         }
         // D+ QUARANTINE or above: block external model if not already
         else if (dv >= DPLUS_QUARANTINE && router) {
@@ -255,6 +258,11 @@ int soma_warden_update(SomaWardenCtx *w,
         // D+ relief — clear emergency halt if verdict recovered
         if (dv < DPLUS_FORBID && w->emergency_halt) {
             w->emergency_halt = 0;
+        }
+
+        // J: emit warden_alert on verdict change
+        if (dv != w->dplus.verdict_prev) {
+            oo_bus_emit_warden_alert(dv, w->dplus.last_reason_flags, (int)new_level);
         }
     }
 

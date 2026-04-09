@@ -96,6 +96,7 @@
 #include "../ssm/soma_export.h"
 #include "../ssm/soma_warden.h"
 #include "../ssm/oo_dplus_gate.h"
+#include "../ssm/oo_bus_bridge.h"
 #include "../ssm/soma_session.h"
 #include "../ssm/soma_dna_persist.h"
 #include "../ssm/soma_dna_sampler.h"

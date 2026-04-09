@@ -26,6 +26,8 @@
 #define OO_CH_DIAGNOSTION  0x0801ULL
 #define OO_CH_SOMAMIND     0x1000ULL  /* SomaMind routing hub */
 #define OO_CH_WARDEN       0x2000ULL  /* D+ verdict bus */
+#define OO_CH_SENTINEL     0x2001ULL  /* Sentinel violation alert */
+#define OO_CH_DPLUS        0x2002ULL  /* D+ policy eval request */
 
 /* Minimal no-op handler for unimplemented modules */
 static hermes_status_t oo_noop_handler(const hermes_msg_t *msg, hermes_msg_t *resp) {
@@ -70,6 +72,10 @@ hermes_status_t oo_bus_register_modules(hermes_bus_t *bus) {
     /* Hub channels */
     s = hermes_register(bus, OO_CH_SOMAMIND,     oo_noop_handler); if (s) return s;
     s = hermes_register(bus, OO_CH_WARDEN,       oo_noop_handler); if (s) return s;
+
+    /* Security channels (Phase J) */
+    s = hermes_register(bus, OO_CH_SENTINEL,     oo_noop_handler); if (s) return s;
+    s = hermes_register(bus, OO_CH_DPLUS,        oo_noop_handler); if (s) return s;
 
     return HERMES_OK;
 }
