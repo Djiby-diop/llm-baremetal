@@ -46,8 +46,15 @@ def push_to_hf(repo_id: str, token: str, dry_run: bool):
                             private=False, token=token)
 
     # Collect files to upload
+    CANDIDATE_FILES = [
+        "train.jsonl",
+        "val.jsonl",
+        "metadata.json",
+        "mamba3_training.jsonl",   # Phase N: Mamba3 merged dataset
+        "mamba3_stats.json",       # Phase N: stats
+    ]
     files_to_push = []
-    for fname in ["train.jsonl", "val.jsonl", "metadata.json"]:
+    for fname in CANDIDATE_FILES:
         fpath = OUT_DIR / fname
         if fpath.exists():
             files_to_push.append(fpath)
@@ -55,7 +62,7 @@ def push_to_hf(repo_id: str, token: str, dry_run: bool):
             print(f"[WARN] {fname} not found — skipping")
 
     if not files_to_push:
-        print("[ERROR] No files to push. Run auto_export_training.py first.", file=sys.stderr)
+        print("[ERROR] No files to push. Run generate_mamba3_dataset.py or auto_export_training.py first.", file=sys.stderr)
         sys.exit(1)
 
     # Load metadata for commit message

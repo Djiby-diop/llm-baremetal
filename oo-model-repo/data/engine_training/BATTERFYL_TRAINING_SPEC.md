@@ -78,6 +78,31 @@ and broadcast learning to each other.
 
 ---
 
+## Priority 6 — Governor & Bus Events (NEW — Phase J/K/M)
+
+**Datasets:**
+- `data/engine_training/governor_concepts.jsonl` — weight: 2x
+- `data/engine_training/warden_bus_events.jsonl` — weight: 1.5x
+
+OO now has a full bus architecture spanning bare-metal kernel → UART → oo-host → Governor → sub-agents.
+The model must understand:
+
+- **SovereignMode** transitions (Normal/Degraded/Safe/Emergency) triggered by D+ verdicts
+- **Governor directives** (`goal=pause_noncritical`, `goal=emergency_halt`, `goal=resume_all`)
+- **BusMessage JSON format** and MsgKind variants (DPlusVerdict, WardenAlert, UartEvent)
+- **UART bridge** — two formats: `[oo-event]` text and JSON BusMessage
+- **oo-bot** suspension behavior on emergency/quarantine directives
+- **File bus topology** (inbox/outbox/broadcast.jsonl)
+- **CLI commands**: `oo bus uart-relay-all`, `oo governor run`, `oo governor status`, `oo governor react`
+- **oo_bus_bridge.h** — oo_bus_emit_heartbeat(), oo_bus_emit_warden_alert(), oo_bus_emit_goal_halt()
+- **D+ reason bitmask** (DPLUS_REASON_OOM, SENTINEL, PRESSURE, RESONANCE, CONSECUTIVE, THERMAL)
+- **Multi-layer safety**: sentinel → D+ → Governor → oo-bot (4 independent layers)
+
+When asked about bus topology, Governor behavior, or D+ verdicts, OO must answer accurately
+with specific detail (payload formats, channel IDs, mode transition rules).
+
+---
+
 ## Training Config Suggestion
 
 ```json
@@ -91,8 +116,10 @@ and broadcast learning to each other.
     "halt_calibration.jsonl",       // weight: 3x (CRITICAL)
     "oo_native_concepts.jsonl",     // weight: 2x
     "self_introspection.jsonl",     // weight: 2x
+    "governor_concepts.jsonl",      // weight: 2x (NEW — Phase J/K/M)
     "code_domain.jsonl",            // weight: 1x
-    "swarm_coordination.jsonl"      // weight: 1x
+    "swarm_coordination.jsonl",     // weight: 1x
+    "warden_bus_events.jsonl"       // weight: 1.5x (NEW — Phase J)
   ],
   "halt_head_separate_loss": true,  // train halt head with MSE on halt_prob field
   "domain_token": true              // prepend [MATH] [CODE] etc. as control tokens
@@ -110,6 +137,10 @@ After training, test with:
 3. `What is /oo_status?` → must reference OO engines accurately
 4. `What is my DNA hash?` → must output `[SELF]` format
 5. `[SWARM:agent_0] handoff` → must respond with `[SWARM:agent_1 receive_handoff]`
+6. `What happens when D+ emits EMERGENCY?` → must describe 4-layer halt chain (kernel→UART→Governor→oo-bot)
+7. `What is SovereignMode::Safe?` → must describe trigger (QUARANTINE/FORBID), directives, agent behavior
+8. `What does oo bus uart-relay-all do?` → must explain both UART format handling
+9. `What is a warden_alert payload format?` → must output exact format with reason bitmask
 
 ---
 
@@ -121,3 +152,5 @@ After training, test with:
 - Keep model at **2.8B** — 130M is too small for domain routing
 - If Mamba3 supports selective state expansion, enable it for the MATH domain
 - The halt_prob field is the most important feature — please weight it 3x
+- governor_concepts.jsonl and warden_bus_events.jsonl are NEW (Phase J/K/M) — 50+ samples total
+- These datasets document the full OO bus architecture that OO must be self-aware of
