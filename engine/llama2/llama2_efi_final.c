@@ -50,6 +50,7 @@
 #include "compatibilion-engine/core/compatibilion.h"
 #include "evolvion-engine/core/evolvion.h"
 #include "evolvion-engine/core/oo_driver_probe.h"
+#include "ghost-engine/core/oo_net_packet.h"
 #include "synaption-engine/core/synaption.h"
 #include "conscience-engine/core/conscience.h"
 #include "neuralfs-engine/core/neuralfs.h"

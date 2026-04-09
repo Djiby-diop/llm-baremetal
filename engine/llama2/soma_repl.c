@@ -1817,7 +1817,74 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n[Evolvion] codegen need recorded — run /ssm_infer to materialize\r\n\r\n");
             continue;
         }
-        /* ── OO Driver System ─────────────────────────────────────────── */
+        /* ── OO-NET Distributed OO ───────────────────────────────────── */
+        if (my_strncmp(prompt, "/oo_net_status", 14) == 0) {
+            Print(L"\r\n[OO-NET] node_id=%u  sent=%u recv=%u merges=%u  ghost_pkts_sent=%u recv=%u\r\n",
+                  (unsigned)g_collectivion.node_id,
+                  (unsigned)g_collectivion.broadcasts_sent,
+                  (unsigned)g_collectivion.broadcasts_recv,
+                  (unsigned)g_collectivion.dna_merges,
+                  (unsigned)g_ghost.pkts_sent,
+                  (unsigned)g_ghost.pkts_recv);
+            Print(L"  peers:");
+            int any = 0;
+            for (int _i = 0; _i < COLLECTIVION_PEER_MAX; _i++) {
+                if (g_collectivion.peers[_i].node_id != 0xFFFFFFFFU) {
+                    Print(L" [node=%u seq=%u dna=0x%08X]",
+                          (unsigned)g_collectivion.peers[_i].node_id,
+                          (unsigned)g_collectivion.peers[_i].last_seen_seq,
+                          (unsigned)g_collectivion.peers[_i].dna_hash);
+                    any = 1;
+                }
+            }
+            if (!any) Print(L" (none yet)");
+            Print(L"\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_net_hello", 13) == 0) {
+            collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_ACTIVE);
+            ghost_set_mode(&g_ghost, GHOST_MODE_SEND);
+            collectivion_send_hello(&g_collectivion, &g_ghost);
+            Print(L"\r\n[OO-NET] HELLO broadcast (node_id=%u)\r\n\r\n",
+                  (unsigned)g_collectivion.node_id);
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_net_send ", 13) == 0) {
+            const char *txt = prompt + 13;
+            collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_ACTIVE);
+            ghost_set_mode(&g_ghost, GHOST_MODE_SEND);
+            collectivion_send_text(&g_collectivion, &g_ghost, txt);
+            Print(L"\r\n[OO-NET] TEXT sent: ");
+            for (int _k = 0; txt[_k]; _k++) Print(L"%c", (CHAR16)(unsigned char)txt[_k]);
+            Print(L"\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_net_sync_dna", 16) == 0) {
+            collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_ACTIVE);
+            ghost_set_mode(&g_ghost, GHOST_MODE_SEND);
+            uint32_t dh = soma_dna_hash(&g_soma_dna);
+            collectivion_sync_dna(&g_collectivion, &g_ghost,
+                                  dh, 0.0f, 0.0f);
+            Print(L"\r\n[OO-NET] DNA_SYNC broadcast (hash=0x%08X)\r\n\r\n",
+                  (unsigned)dh);
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_net_recv", 12) == 0) {
+            ghost_set_mode(&g_ghost, GHOST_MODE_RECV);
+            float dt = 0.f, dp = 0.f;
+            int n = collectivion_recv_all(&g_collectivion, &g_ghost, &dt, &dp);
+            if (n == 0) {
+                Print(L"\r\n[OO-NET] no packets received\r\n\r\n");
+            } else {
+                Print(L"\r\n[OO-NET] %d packet(s) processed", n);
+                if (g_collectivion.dna_merges > 0)
+                    Print(L" | DNA delta: temp=%d.%02d topp=%d.%02d",
+                          (int)dt, (int)(dt*100)%100,
+                          (int)dp, (int)(dp*100)%100);
+                Print(L"\r\n\r\n");
+            }
+            continue;
+        }
         if (my_strncmp(prompt, "/oo_probe_pci", 13) == 0) {
             oo_driver_probe_pci(&g_oo_driver_probe);
             Print(L"\r\n[OO-Driver] PCI scan: %d device(s), %d unknown\r\n",

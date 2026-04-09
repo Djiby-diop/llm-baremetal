@@ -26,10 +26,20 @@ static inline void ghost_io_wait(void) {
 
 void ghost_init(GhostEngine *e) {
     if (!e) return;
-    e->mode = GHOST_MODE_OFF;
-    e->channel = GHOST_CHANNEL_LED;
-    e->tokens_sent = 0;
-    e->tokens_recv = 0;
+    e->mode         = GHOST_MODE_OFF;
+    e->channel      = GHOST_CHANNEL_LED;
+    e->tokens_sent  = 0;
+    e->tokens_recv  = 0;
+    e->ring_head    = 0;
+    e->ring_tail    = 0;
+    e->ring_len     = 0;
+    e->pkts_sent    = 0;
+    e->pkts_recv    = 0;
+    e->tx_seq       = 0;
+    e->pkt_rx_head  = 0;
+    e->pkt_rx_tail  = 0;
+    e->pkt_rx_len   = 0;
+    for (int i = 0; i < GHOST_RING_MAX; i++) e->ring[i] = 0;
 }
 
 void ghost_set_mode(GhostEngine *e, GhostMode mode) {
@@ -117,4 +127,75 @@ void ghost_led_write(uint8_t led_bits) {
     retries = 0x10000u;
     while ((ghost_inb(0x64) & 0x02u) && --retries) ghost_io_wait();
     ghost_outb(0x60, led_bits & 0x07u);
+}
+
+/* ── OO-NET Packet layer ──────────────────────────────────────────────────
+ *
+ * Physical encoding: each byte of the 32-byte frame is transmitted as 8
+ * successive LED writes, toggling Caps-Lock bit (bit 2) to represent each
+ * data bit (MSB first). The receiving OO machine reads its keyboard LED
+ * status register on a polling loop.
+ *
+ * On USB-only hardware (no PS/2 8042): ghost_led_write() is a no-op, so
+ * ghost_send_packet() falls back to *loopback* — it injects the packet
+ * directly into the local receive queue. Useful for single-machine testing.
+ */
+
+static void ghost_pkt_enqueue_rx(GhostEngine *e, const OoNetPacket *pkt) {
+    if (e->pkt_rx_len >= GHOST_PKT_RX_MAX) return;  /* queue full — drop */
+    uint8_t slot = e->pkt_rx_tail % GHOST_PKT_RX_MAX;
+    e->pkt_rx_queue[slot] = *pkt;
+    e->pkt_rx_tail++;
+    e->pkt_rx_len++;
+    e->pkts_recv++;
+}
+
+void ghost_send_packet(GhostEngine *e, const OoNetPacket *pkt) {
+    if (!e || !pkt) return;
+    if (e->mode == GHOST_MODE_OFF) return;
+
+    uint8_t frame[OO_NET_PKT_SIZE];
+    oo_net_pkt_to_bytes(pkt, frame);
+
+    /* Detect 8042 presence: try one LED write and see if status clears.
+     * If retries exhaust immediately → USB-only → loopback. */
+    unsigned int probe = 0x1000u;
+    while ((ghost_inb(0x64) & 0x02u) && --probe) ghost_io_wait();
+    int has_8042 = (probe > 0);
+
+    if (has_8042) {
+        /* Transmit 32 bytes × 8 bits via Caps-Lock LED toggle */
+        for (int b = 0; b < OO_NET_PKT_SIZE; b++) {
+            uint8_t byte = frame[b];
+            for (int bit = 7; bit >= 0; bit--) {
+                uint8_t led = (uint8_t)(((byte >> bit) & 1u) << 2); /* Caps bit */
+                ghost_led_write(led);
+                /* brief inter-bit delay (~1 µs at 1GHz) */
+                for (volatile int d = 0; d < 200; d++) {}
+            }
+        }
+    } else {
+        /* Loopback: inject into own RX queue */
+        ghost_pkt_enqueue_rx(e, pkt);
+    }
+
+    e->pkts_sent++;
+    e->tx_seq++;
+}
+
+int ghost_recv_packet(GhostEngine *e, OoNetPacket *out) {
+    if (!e || !out) return 0;
+    if (e->pkt_rx_len == 0) return 0;
+    uint8_t slot = e->pkt_rx_head % GHOST_PKT_RX_MAX;
+    *out = e->pkt_rx_queue[slot];
+    e->pkt_rx_head++;
+    e->pkt_rx_len--;
+    return 1;
+}
+
+void ghost_inject_frame(GhostEngine *e, const uint8_t frame[OO_NET_PKT_SIZE]) {
+    if (!e || !frame) return;
+    OoNetPacket pkt;
+    if (oo_net_pkt_from_bytes(&pkt, frame))
+        ghost_pkt_enqueue_rx(e, &pkt);
 }
