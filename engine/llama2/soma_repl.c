@@ -1684,6 +1684,140 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n");
             continue;
         }
+        /* ── Ghost engine ─────────────────────────────────────────────── */
+        if (my_strncmp(prompt, "/ghost_status", 13) == 0) {
+            static const char *gmode[] = { "off", "send", "recv" };
+            static const char *gchan[] = { "led", "pcspk" };
+            const char *gmn = gmode[g_ghost.mode < 3 ? g_ghost.mode : 0];
+            const char *gcn = gchan[g_ghost.channel < 2 ? g_ghost.channel : 0];
+            Print(L"\r\n[Ghost] mode=");
+            for (int i = 0; gmn[i]; i++) Print(L"%c", (CHAR16)(unsigned char)gmn[i]);
+            Print(L" channel=");
+            for (int i = 0; gcn[i]; i++) Print(L"%c", (CHAR16)(unsigned char)gcn[i]);
+            Print(L" sent=%u recv=%u ring_len=%u\r\n\r\n",
+                  (unsigned)g_ghost.tokens_sent,
+                  (unsigned)g_ghost.tokens_recv,
+                  (unsigned)g_ghost.ring_len);
+            continue;
+        }
+        if (my_strncmp(prompt, "/ghost_mode ", 12) == 0) {
+            const char *arg = prompt + 12;
+            if (my_strncmp(arg, "send", 4) == 0)      ghost_set_mode(&g_ghost, GHOST_MODE_SEND);
+            else if (my_strncmp(arg, "recv", 4) == 0) ghost_set_mode(&g_ghost, GHOST_MODE_RECV);
+            else                                       ghost_set_mode(&g_ghost, GHOST_MODE_OFF);
+            Print(L"\r\n[Ghost] mode set\r\n\r\n");
+            continue;
+        }
+        /* ── Morphion engine ──────────────────────────────────────────── */
+        if (my_strncmp(prompt, "/morphion_status", 16) == 0) {
+            /* Decode vendor string: EBX/EDX/ECX as 4 ascii chars each */
+            uint32_t vb = g_morphion.probe.vendor_ebx;
+            uint32_t vd = g_morphion.probe.vendor_edx;
+            uint32_t vc = g_morphion.probe.vendor_ecx;
+            char vendor[13];
+            vendor[0]  = (char)( vb        & 0xFF); vendor[1]  = (char)((vb >>  8) & 0xFF);
+            vendor[2]  = (char)((vb >> 16) & 0xFF); vendor[3]  = (char)((vb >> 24) & 0xFF);
+            vendor[4]  = (char)( vd        & 0xFF); vendor[5]  = (char)((vd >>  8) & 0xFF);
+            vendor[6]  = (char)((vd >> 16) & 0xFF); vendor[7]  = (char)((vd >> 24) & 0xFF);
+            vendor[8]  = (char)( vc        & 0xFF); vendor[9]  = (char)((vc >>  8) & 0xFF);
+            vendor[10] = (char)((vc >> 16) & 0xFF); vendor[11] = (char)((vc >> 24) & 0xFF);
+            vendor[12] = 0;
+            int avx2   = (int)((g_morphion.probe.features_ebx >> 5)  & 1);
+            int avx512 = (int)((g_morphion.probe.features_ebx >> 16) & 1);
+            Print(L"\r\n[Morphion] vendor=");
+            for (int i = 0; i < 12; i++) if (vendor[i] >= 0x20) Print(L"%c", (CHAR16)(unsigned char)vendor[i]);
+            Print(L" features_ebx=0x%08X  AVX2=%d AVX512F=%d  modules=%u\r\n\r\n",
+                  (unsigned)g_morphion.probe.features_ebx,
+                  avx2, avx512,
+                  (unsigned)g_morphion.module_count);
+            continue;
+        }
+        if (my_strncmp(prompt, "/morphion_probe", 15) == 0) {
+            morphion_set_mode(&g_morphion, MORPHION_MODE_PROBE);
+            morphion_probe(&g_morphion);
+            Print(L"\r\n[Morphion] probe complete — use /morphion_status\r\n\r\n");
+            continue;
+        }
+        /* ── Conscience engine ────────────────────────────────────────── */
+        if (my_strncmp(prompt, "/conscience_status", 18) == 0) {
+            static const char *pname[] = { "f32", "f16", "q8", "q4" };
+            ConscienceSample cs; conscience_sample(&g_conscience, &cs);
+            const char *prn = pname[g_conscience.current_precision < 4 ? g_conscience.current_precision : 0];
+            Print(L"\r\n[Conscience] mode=");
+            const char *cmn = conscience_mode_name_ascii(g_conscience.mode);
+            for (int i = 0; cmn[i]; i++) Print(L"%c", (CHAR16)(unsigned char)cmn[i]);
+            Print(L" precision=");
+            for (int i = 0; prn[i]; i++) Print(L"%c", (CHAR16)(unsigned char)prn[i]);
+            Print(L" samples=%u downgrades=%u stress=%u%%\r\n\r\n",
+                  (unsigned)g_conscience.samples_taken,
+                  (unsigned)g_conscience.downgrades_triggered,
+                  (unsigned)cs.stress);
+            continue;
+        }
+        if (my_strncmp(prompt, "/conscience_mode ", 17) == 0) {
+            const char *arg = prompt + 17;
+            if      (my_strncmp(arg, "act",   3) == 0) conscience_set_mode(&g_conscience, CONSCIENCE_MODE_ACT);
+            else if (my_strncmp(arg, "watch", 5) == 0) conscience_set_mode(&g_conscience, CONSCIENCE_MODE_WATCH);
+            else                                        conscience_set_mode(&g_conscience, CONSCIENCE_MODE_OFF);
+            Print(L"\r\n[Conscience] mode set\r\n\r\n");
+            continue;
+        }
+        /* ── Collectivion engine ──────────────────────────────────────── */
+        if (my_strncmp(prompt, "/collectivion_status", 20) == 0) {
+            Print(L"\r\n[Collectivion] mode=");
+            const char *colm = collectivion_mode_name_ascii(g_collectivion.mode);
+            for (int i = 0; colm[i]; i++) Print(L"%c", (CHAR16)(unsigned char)colm[i]);
+            Print(L" node_id=%u sent=%u recv=%u\r\n\r\n",
+                  (unsigned)g_collectivion.node_id,
+                  (unsigned)g_collectivion.broadcasts_sent,
+                  (unsigned)g_collectivion.broadcasts_recv);
+            continue;
+        }
+        if (my_strncmp(prompt, "/collectivion_mode ", 19) == 0) {
+            const char *arg = prompt + 19;
+            if      (my_strncmp(arg, "active",  6) == 0) collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_ACTIVE);
+            else if (my_strncmp(arg, "passive", 7) == 0) collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_PASSIVE);
+            else                                          collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_OFF);
+            Print(L"\r\n[Collectivion] mode set\r\n\r\n");
+            continue;
+        }
+        /* ── NeuralFS engine ──────────────────────────────────────────── */
+        if (my_strncmp(prompt, "/neuralfs_status", 16) == 0) {
+            Print(L"\r\n[NeuralFS] mode=");
+            const char *nfm = neuralfs_mode_name_ascii(g_neuralfs.mode);
+            for (int i = 0; nfm[i]; i++) Print(L"%c", (CHAR16)(unsigned char)nfm[i]);
+            Print(L" blobs=%u queries=%u\r\n\r\n",
+                  (unsigned)g_neuralfs.blobs_indexed,
+                  (unsigned)g_neuralfs.queries_done);
+            continue;
+        }
+        if (my_strncmp(prompt, "/neuralfs_query ", 16) == 0) {
+            const char *query = prompt + 16;
+            NeuralfsMatch matches[4];
+            uint32_t found = neuralfs_query(&g_neuralfs, query, matches, 4);
+            Print(L"\r\n[NeuralFS] query: ");
+            for (int i = 0; query[i]; i++) Print(L"%c", (CHAR16)(unsigned char)query[i]);
+            Print(L"\r\n");
+            if (found == 0) {
+                Print(L"  (no match)\r\n\r\n");
+            } else {
+                for (uint32_t i = 0; i < found; i++) {
+                    Print(L"  blob=%u score=%u\r\n",
+                          (unsigned)matches[i].blob_id,
+                          (unsigned)matches[i].score);
+                }
+                Print(L"\r\n");
+            }
+            continue;
+        }
+        /* ── Evolvion codegen ─────────────────────────────────────────── */
+        if (my_strncmp(prompt, "/evolvion_codegen", 17) == 0) {
+            evolvion_set_mode(&g_evolvion, EVOLVION_MODE_LIVE);
+            evolvion_record_need(&g_evolvion, EVOLVION_NEED_COMPUTE, "generate bare-metal C function stub for OO kernel extension");
+            Print(L"\r\n[Evolvion] codegen need recorded — run /ssm_infer to materialize\r\n\r\n");
+            continue;
+        }
+        /* ── Platform status dump ─────────────────────────────────────── */
         if (my_strncmp(prompt, "/session_score", 14) == 0) {
             int sc = soma_session_score(&g_soma_session, &g_soma_warden);
             char sbuf[128];

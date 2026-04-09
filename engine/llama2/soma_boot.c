@@ -162,6 +162,35 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // Opt-in via repl.cfg: oo_net=1 (and oo_enable=1)
     llmk_oo_net_tick_best_effort();
 
+    /* NeuralFS: index EFI root directory files at boot (best-effort) */
+    if (g_root && g_neuralfs.mode != NEURALFS_MODE_OFF) {
+        EFI_FILE_HANDLE dir = NULL;
+        EFI_STATUS nst = uefi_call_wrapper(g_root->Open, 5, g_root, &dir,
+                                           L"\\", EFI_FILE_MODE_READ, 0);
+        if (!EFI_ERROR(nst) && dir) {
+            UINT8 info_buf[512];
+            for (;;) {
+                UINTN buf_size = sizeof(info_buf);
+                EFI_STATUS rst = uefi_call_wrapper(dir->Read, 3, dir,
+                                                   &buf_size, info_buf);
+                if (EFI_ERROR(rst) || buf_size == 0) break;
+                EFI_FILE_INFO *fi = (EFI_FILE_INFO *)info_buf;
+                if (!(fi->Attribute & EFI_FILE_DIRECTORY)) {
+                    /* Use the 64-bit file size as blob "data" for indexing */
+                    neuralfs_index(&g_neuralfs,
+                                   (uint32_t)(fi->FileSize & 0xFFFFFFFFu),
+                                   fi->FileName,
+                                   (uint32_t)(buf_size));
+                }
+            }
+            uefi_call_wrapper(dir->Close, 1, dir);
+            if (g_boot_verbose) {
+                Print(L"[NeuralFS] indexed %d files\r\n\r\n",
+                      (int)g_neuralfs.blobs_indexed);
+            }
+        }
+    }
+
     // Best-effort enable AVX/AVX2 state before feature detection.
 #if !DJIBLAS_DISABLE_CPUID
     enable_avx_best_effort();
@@ -189,6 +218,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                   (int)cpu_features.has_fma);
             Print(L"[ATTN] SIMD path: %s\r\n\r\n", g_attn_use_avx2 ? L"AVX2" : L"SSE2");
         }
+    }
+
+    /* Morphion: confirm CPUID probe matches djiblas detection */
+    morphion_set_mode(&g_morphion, MORPHION_MODE_PROBE);
+    morphion_probe(&g_morphion);
+    if (g_boot_verbose) {
+        Print(L"[Morphion] vendor=0x%08X features_ebx=0x%08X (AVX2=%d AVX512=%d)\r\n\r\n",
+              (unsigned)g_morphion.probe.vendor_ebx,
+              (unsigned)g_morphion.probe.features_ebx,
+              (int)((g_morphion.probe.features_ebx >> 5) & 1),   /* AVX2 = bit 5 */
+              (int)((g_morphion.probe.features_ebx >> 16) & 1)); /* AVX512F = bit 16 */
     }
 
     llmk_boot_mark(L"cpu_detect");
@@ -7139,6 +7179,20 @@ snap_autoload_done:
             chronion_step(&g_chronion, 1);
             trophion_feed(&g_trophion, 1);
             limbion_trigger(&g_limbion, LIMBION_TRIGGER_GOOD_INFERENCE, 10);
+
+            /* Conscience thermal homeostasis — every 16 tokens */
+            if (g_conscience.mode == CONSCIENCE_MODE_ACT &&
+                (generated_count & 0xF) == 0) {
+                ConscienceSample csamp;
+                conscience_sample(&g_conscience, &csamp);
+                ConsciencePrecision prec = conscience_recommend_precision(&g_conscience, csamp.stress);
+                if (prec >= CONSCIENCE_PREC_Q8 && g_conscience.current_precision < prec) {
+                    g_conscience.current_precision = prec;
+                    g_conscience.downgrades_triggered++;
+                    /* Thermal pressure: raise temperature slightly to reduce compute */
+                    if (prec == CONSCIENCE_PREC_Q4) temperature = (temperature > 0.5f ? temperature : 0.5f) + 0.15f;
+                }
+            }
         }
 
         // Emit early-stop reason to serial for automated diagnosis.
