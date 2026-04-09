@@ -273,6 +273,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                                    (unsigned)(sizeof(Nfs2Store) >> 10));
     }
 
+    /* Phase H: UART bridge — init COM1 and announce boot */
+    soma_uart_init();
+    soma_uart_emit_boot(g_boot_verbose);
+    soma_uart_emit_entropy(g_quantum_rng.rdrand_available == 1,
+                           g_quantum_rng.seed_last);
+
     llmk_boot_mark(L"cpu_detect");
 
     // Best-effort graphics init (GOP). Optional: REPL still works without it.
@@ -7386,6 +7392,21 @@ stats_done:
                                      &g_soma_warden, &g_soma_dna,
                                      (unsigned int)g_metrics.total_decode_tokens);
                 g_oo_self_model.prefix_valid = 0; /* invalidate prefix cache */
+
+                /* Phase H: emit gen event over UART bridge */
+                soma_uart_emit_gen(
+                    (unsigned int)(g_metrics.total_decode_tokens / (generated_count > 0 ? generated_count : 1)),
+                    (unsigned int)generated_count,
+                    (unsigned int)g_oo_self_model.tokens_per_sec,
+                    0 /* prompt_hash placeholder */
+                );
+                /* Periodic heartbeat every 64 turns */
+                if ((g_metrics.total_decode_tokens & 63U) == 0) {
+                    soma_uart_emit_heartbeat(
+                        (unsigned int)g_metrics.total_decode_tokens,
+                        g_oo_self_model.free_weights_mb + g_oo_self_model.free_kv_mb
+                    );
+                }
             }
 
             llmk_autotune_apply_after_turn(
