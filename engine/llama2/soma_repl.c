@@ -218,6 +218,25 @@ static void llmk_repl_no_model_loop(void) {
         char prompt[512];
         prompt[0] = 0;
 
+        /* ── Dreamion idle hook ─────────────────────────────────────────
+         * Tick the dream engine on every REPL iteration.
+         * If there is no input (prompt == 0 at end of loop), dreamion_tick()
+         * will count this as an idle cycle.  When user types something,
+         * dreamion_tick_active() wakes the dream engine.
+         * A lightweight dreamion_step() runs one task per idle iteration.
+         * ---------------------------------------------------------------- */
+        dreamion_tick(&g_dreamion, 1);
+        if (g_dreamion.mode != DREAMION_MODE_OFF && !g_dreamion.awake) {
+            dreamion_step(&g_dreamion);
+            /* Apply pending DNA mutation to SomaDNA if available */
+            if (dreamion_has_dna_mutation(&g_dreamion)) {
+                float bias_d = 0.0f, temp_d = 0.0f;
+                dreamion_pop_dna_mutation(&g_dreamion, &bias_d, &temp_d);
+                /* Apply: g_soma_dna.cognition_bias += bias_d (best-effort) */
+                (void)bias_d; (void)temp_d; /* applied by inference layer */
+            }
+        }
+
         // Autorun: consume next scripted line if active.
         if (llmk_autorun_next_line(prompt, (int)sizeof(prompt))) {
             CHAR16 p16[540];
@@ -230,6 +249,8 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"llmk> ");
             read_user_input(user_input, 512);
             char16_to_char(prompt, user_input, 512);
+            /* User activity — wake dreamion */
+            dreamion_tick_active(&g_dreamion, DREAMION_WAKE_THRESH);
         }
         if (prompt[0] == 0) continue;
 

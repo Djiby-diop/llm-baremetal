@@ -3981,7 +3981,7 @@ snap_autoload_done:
                 Print(L"  neuralfs   %s idx=%d qry=%d\r\n", neuralfs_mode_name_ascii(g_neuralfs.mode), (int)g_neuralfs.blobs_indexed, (int)g_neuralfs.queries_done);
                 Print(L"  ghost      %s sent=%d recv=%d\r\n", ghost_mode_name_ascii(g_ghost.mode), (int)g_ghost.tokens_sent, (int)g_ghost.tokens_recv);
                 Print(L"  immunion   %s rec=%d react=%d\r\n", immunion_mode_name_ascii(g_immunion.mode), (int)g_immunion.patterns_recorded, (int)g_immunion.reactions_triggered);
-                Print(L"  dreamion   %s cycles=%lu tasks=%d\r\n", dreamion_mode_name_ascii(g_dreamion.mode), (unsigned long)g_dreamion.cycles_in_dream, (int)g_dreamion.tasks_completed);
+                Print(L"  dreamion   %s cycles=%lu synth=%d dna=%d\r\n", dreamion_mode_name_ascii(g_dreamion.mode), (unsigned long)g_dreamion.stats.total_dream_cycles, (int)g_dreamion.stats.synth_pairs_generated, (int)g_dreamion.stats.dna_mutations_suggested);
                 Print(L"  symbion    %s samples=%d\r\n", symbion_mode_name_ascii(g_symbion.mode), (int)g_symbion.samples_taken);
                 Print(L"  collectivion %s bcast=%d poll=%d\r\n", collectivion_mode_name_ascii(g_collectivion.mode), (int)g_collectivion.broadcasts_sent, (int)g_collectivion.broadcasts_recv);
                 Print(L"  metabion   %s tok_s=%lu samples=%d\r\n", metabion_mode_name_ascii(g_metabion.mode), (unsigned long)g_metabion.last.tokens_per_sec, (int)g_metabion.samples_count);
