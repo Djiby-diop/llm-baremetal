@@ -258,6 +258,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
 
+    /* Phase E: OO Self-Model — initialize introspection snapshot */
+    {
+        char *p = (char *)&g_oo_self_model;
+        for (int i = 0; i < (int)sizeof(OoSelfModel); i++) p[i] = 0;
+        if (g_boot_verbose) Print(L"[OO-SelfModel] ready\r\n\r\n");
+    }
+
+    /* Phase F: NeuralFS v2 — initialize RAM key-value store */
+    {
+        nfs2_init(&g_nfs2);
+        if (g_boot_verbose) Print(L"[NFS2] ready (%u slots, ~%u KB)\r\n\r\n",
+                                   (unsigned)NFS2_MAX_RECORDS,
+                                   (unsigned)(sizeof(Nfs2Store) >> 10));
+    }
+
     llmk_boot_mark(L"cpu_detect");
 
     // Best-effort graphics init (GOP). Optional: REPL still works without it.
@@ -7362,6 +7377,15 @@ stats_done:
                 ms.tokens_per_sec = ((uint64_t)m18_decode_tokens_delta * tsc_per_sec) / m18_decode_cycles_delta;
                 ms.cache_hit_milli = 0;
                 metabion_feed(&g_metabion, &ms);
+            }
+
+            /* Phase E: update OO self-model after each generation turn */
+            if (!g_capture_mode && !draw_mode) {
+                oo_self_model_update(&g_oo_self_model, &g_zones,
+                                     &g_conscience, &g_metabion,
+                                     &g_soma_warden, &g_soma_dna,
+                                     (unsigned int)g_metrics.total_decode_tokens);
+                g_oo_self_model.prefix_valid = 0; /* invalidate prefix cache */
             }
 
             llmk_autotune_apply_after_turn(

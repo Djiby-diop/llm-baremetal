@@ -103,6 +103,9 @@
 #include "../ssm/soma_spec.h"
 #include "../ssm/soma_swarm_net.h"
 #include "../ssm/oo_quantum_rng.h"
+#include "../ssm/oo_self_model.h"
+#include "../ssm/oo_neuralfs2.h"
+#include "../ssm/oo_shell.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);

@@ -2383,6 +2383,11 @@ static TrophionEngine   g_trophion;     /* compute hunger (idle→verbose, gorge
 static MirrorionEngine  g_mirrorion;    /* self-introspection Q/A → OO_MIRROR.JSONL */
 static ThanatosionEngine g_thanatosion; /* graceful death + DNA-preserving rebirth */
 
+/* Phase E: OO Self-Model — runtime introspection */
+static OoSelfModel g_oo_self_model;
+/* Phase F: NeuralFS v2 — persistent RAM key-value store */
+static Nfs2Store   g_nfs2;
+
 // Forward declarations (used by early config loaders)
 static EFI_STATUS llmk_open_read_file(EFI_FILE_HANDLE *out, const CHAR16 *name);
 static void llmk_cfg_trim(char **s);

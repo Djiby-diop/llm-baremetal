@@ -1974,7 +1974,75 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n");
             continue;
         }
-        /* ── Platform status dump ─────────────────────────────────────── */
+        /* /oo_self_model — OO introspection snapshot */
+        if (my_strncmp(prompt, "/oo_self_model", 14) == 0) {
+            oo_self_model_update(&g_oo_self_model, &g_zones,
+                                  &g_conscience, &g_metabion,
+                                  &g_soma_warden, &g_soma_dna,
+                                  (unsigned int)g_metrics.total_decode_tokens);
+            oo_self_model_to_prefix(&g_oo_self_model);
+            oo_self_model_print(&g_oo_self_model);
+            continue;
+        }
+        /* /nfs2_list — list all NeuralFS2 keys */
+        if (my_strncmp(prompt, "/nfs2_list", 10) == 0) {
+            _sh_cmd_ls(&g_oo_shell, &g_nfs2);
+            continue;
+        }
+        /* /nfs2_write <key> <val> — write to NFS2 */
+        if (my_strncmp(prompt, "/nfs2_write ", 12) == 0) {
+            const char *rest = prompt + 12;
+            while (*rest == ' ') rest++;
+            const char *val = _sh_skip_word(rest);
+            if (!*val) { Print(L"  usage: /nfs2_write <key> <value>\r\n"); continue; }
+            char key[NFS2_NAME_MAX]; int ki = 0;
+            while (rest[ki] && rest[ki] != ' ' && ki < NFS2_NAME_MAX-1) { key[ki] = rest[ki]; ki++; }
+            key[ki] = '\0';
+            int rc = nfs2_write(&g_nfs2, key, val);
+            Print(L"  nfs2_write %s: %d\r\n", rc == 0 ? L"OK" : L"ERR", rc);
+            continue;
+        }
+        /* /nfs2_read <key> — read from NFS2 */
+        if (my_strncmp(prompt, "/nfs2_read ", 11) == 0) {
+            const char *key = prompt + 11;
+            while (*key == ' ') key++;
+            const char *val = nfs2_read(&g_nfs2, key);
+            if (!val) { Print(L"  (not found)\r\n"); continue; }
+            Print(L"\r\n  ");
+            for (int k = 0; val[k]; k++) {
+                if (val[k] == '\n') Print(L"\r\n  ");
+                else Print(L"%c", (CHAR16)(unsigned char)val[k]);
+            }
+            Print(L"\r\n");
+            continue;
+        }
+        /* /nfs2_del <key> — delete from NFS2 */
+        if (my_strncmp(prompt, "/nfs2_del ", 10) == 0) {
+            const char *key = prompt + 10;
+            while (*key == ' ') key++;
+            int rc = nfs2_delete(&g_nfs2, key);
+            Print(L"  nfs2_del %s: %d\r\n", rc == 0 ? L"OK" : L"ERR", rc);
+            continue;
+        }
+        /* /shell — enter interactive OO shell */
+        if (my_strncmp(prompt, "/shell", 6) == 0) {
+            g_oo_shell.active = 1;
+            Print(L"\r\n[OO Shell] v1.0 — type 'help' for commands, 'exit' to return\r\n");
+            oo_self_model_update(&g_oo_self_model, &g_zones,
+                                  &g_conscience, &g_metabion,
+                                  &g_soma_warden, &g_soma_dna,
+                                  (unsigned int)g_metrics.total_decode_tokens);
+            while (g_oo_shell.active) {
+                oo_shell_prompt(&g_oo_shell);
+                char shell_line[OO_SHELL_LINE_MAX];
+                EFI_STATUS srl = llmk_read_line(shell_line, OO_SHELL_LINE_MAX);
+                if (EFI_ERROR(srl)) break;
+                Print(L"\r\n");
+                oo_shell_exec(&g_oo_shell, shell_line, &g_nfs2,
+                              &g_oo_self_model, &g_zones);
+            }
+            continue;
+        }
         if (my_strncmp(prompt, "/session_score", 14) == 0) {
             int sc = soma_session_score(&g_soma_session, &g_soma_warden);
             char sbuf[128];
