@@ -1,0 +1,61 @@
+name: OO Training Pipeline
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # nightly 03:00 UTC
+  push:
+    branches: [main]
+    paths:
+      - 'oo-model-repo/data/engine_training/**'
+      - 'oo-model-repo/scripts/**'
+  workflow_dispatch:       # manual trigger
+
+jobs:
+  export-and-push:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oo-model-repo
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install huggingface_hub
+
+      - name: Step 1 — Journal → domain JSONL
+        run: |
+          python scripts/journal_to_dataset.py \
+            --input  data/engine_training \
+            --output data/journal_export
+        continue-on-error: true   # journal may be absent on first run
+
+      - name: Step 2 — Merge + weight + dedup + split
+        run: |
+          python scripts/auto_export_training.py \
+            --journal-export data/journal_export \
+            --engine-data    data/engine_training \
+            --output         data/processed
+
+      - name: Step 3 — Push to HuggingFace
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python scripts/hf_push_dataset.py \
+            --repo  djibydiop/llm-baremetal-training \
+            --token "$HF_TOKEN"
+
+      - name: Upload processed artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oo-training-data-${{ github.run_number }}
+          path: |
+            oo-model-repo/data/processed/train.jsonl
+            oo-model-repo/data/processed/val.jsonl
+            oo-model-repo/data/processed/metadata.json
+          retention-days: 14
