@@ -25,11 +25,18 @@ typedef enum {
     GHOST_CHANNEL_PCSPK = 1,  /* PC speaker beeps */
 } GhostChannel;
 
+#define GHOST_RING_MAX 16  /* power of 2 — ring buffer for received tokens */
+
 typedef struct {
-    GhostMode mode;
+    GhostMode    mode;
     GhostChannel channel;
-    uint32_t tokens_sent;
-    uint32_t tokens_recv;
+    uint32_t     tokens_sent;
+    uint32_t     tokens_recv;
+    /* Receive ring buffer */
+    uint32_t     ring[GHOST_RING_MAX];
+    unsigned int ring_head;  /* read index */
+    unsigned int ring_tail;  /* write index */
+    unsigned int ring_len;   /* items available */
 } GhostEngine;
 
 void ghost_init(GhostEngine *e);

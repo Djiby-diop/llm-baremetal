@@ -17,11 +17,23 @@ void morphion_set_mode(MorphionEngine *e, MorphionMode mode) {
 
 void morphion_probe(MorphionEngine *e) {
     if (!e || e->mode == MORPHION_MODE_OFF) return;
-    e->probe.vendor_ebx = 0;
-    e->probe.vendor_ecx = 0;
-    e->probe.vendor_edx = 0;
-    e->probe.features_ebx = 0;
-    /* main binary fills probe via compatibilion / CPUID */
+    /* CPUID leaf 0: vendor string (EBX/EDX/ECX) */
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+    __asm__ volatile(
+        "cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "a"(0)
+    );
+    e->probe.vendor_ebx = ebx;
+    e->probe.vendor_ecx = ecx;
+    e->probe.vendor_edx = edx;
+    /* CPUID leaf 7 sub-leaf 0: extended features (EBX) */
+    __asm__ volatile(
+        "cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "a"(7), "c"(0)
+    );
+    e->probe.features_ebx = ebx;  /* bit 5=AVX2, bit 16=AVX512F, etc. */
 }
 
 uint32_t morphion_suggest_load_order(MorphionEngine *e, uint32_t *out, uint32_t cap) {

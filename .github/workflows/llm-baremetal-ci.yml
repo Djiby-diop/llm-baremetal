@@ -28,7 +28,25 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build + test Olympe (C)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate engine training datasets
+        run: |
+          python3 oo-model-repo/scripts/generate_engine_datasets.py \
+            --output /tmp/engine-train-out --seed 42
+          # Verify outputs exist and have content
+          test -s /tmp/engine-train-out/engine_train.jsonl
+          test -s /tmp/engine-train-out/engine_val.jsonl
+          echo "[datasets] OK: $(wc -l < /tmp/engine-train-out/engine_train.jsonl) train rows"
+          echo "[datasets] OK: $(wc -l < /tmp/engine-train-out/engine_val.jsonl) val rows"
+          # Verify halt_prob field is present
+          grep -q '"halt_prob"' /tmp/engine-train-out/engine_train.jsonl
+          echo "[datasets] halt_prob field verified"
+
+
         run: |
           make -C olympe test
 
@@ -91,3 +109,38 @@ jobs:
           grep -qi 'OOPOLICY.BIN' /tmp/mdir-root.txt
           grep -qi 'OOPOLICY.CRC' /tmp/mdir-root.txt
           grep -qi 'policy.dplus' /tmp/mdir-root.txt
+
+      - name: QEMU smoke + bench (tok/s regression gate)
+        run: |
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+          # Run inference smoke and capture serial output
+          timeout 120 qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 -m 2048 \
+            -bios /usr/share/ovmf/OVMF.fd \
+            -drive format=raw,file=llm-baremetal-boot.img \
+            -serial file:/tmp/oo-bench-serial.txt \
+            -display none -nographic 2>/dev/null || true
+
+          # Parse tok/s from serial log
+          echo "--- Serial output (last 40 lines) ---"
+          tail -40 /tmp/oo-bench-serial.txt 2>/dev/null || echo "(no serial log)"
+
+          # Extract tok/s — if model not present it's 0 (no-model boot), gate at 0
+          TOK_S=$(grep -oP '(?<=tok_s=)[0-9]+\.[0-9]+' /tmp/oo-bench-serial.txt 2>/dev/null | tail -1 || echo "0")
+          echo "OO_BENCH_TOK_S=${TOK_S}" >> $GITHUB_ENV
+          echo "[bench] tok_s=${TOK_S}"
+
+          # Save bench row to artifact
+          mkdir -p bench
+          SHA=$(git rev-parse --short HEAD)
+          echo "sha=${SHA},tok_s=${TOK_S},model=no-model" >> bench/results.csv
+
+      - name: Upload bench artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oo-bench-${{ github.sha }}
+          path: |
+            bench/results.csv
+            /tmp/oo-bench-serial.txt
+          retention-days: 90

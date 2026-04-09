@@ -1,0 +1,2 @@
+timestamp,git_sha,accel,mem_mb,mode,tokens,time_ms,tok_s,zone_total_mb,zone_free_mb,wall_sec
+2026-04-09T01:12:33,63d33fb,baseline,0,init,,,,,,0

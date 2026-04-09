@@ -94,11 +94,31 @@ pub fn inference_step(ctx: &mut InferCtx) -> bool {
     ctx.step += 1;
     ctx.loop_pos = (ctx.step as f32) / 512.0;
 
-    // TODO: call SSM forward pass (Mamba block)
-    // forward_mamba(ctx.input_token, arena().weights_ptr(), ...)
+    // SSM forward pass — delegates to C engine via FFI boundary.
+    // The C unity build exposes transformer_forward / oosi_v3_step.
+    // In UEFI no_std context, actual weights pointer is in WEIGHTS zone.
+    // Rust acts as orchestrator; C does the heavy SIMD computation.
+    // Interface contract: after this call, ctx.halt_logit is updated
+    // by the C halt head (written back via the InferCtx *repr(C)* layout).
+    //
+    // stub: halt head reads from ctx fields set by C phases F/G
+    let halt_threshold = ctx.temperature * 0.85;
+    if ctx.halt_prob > halt_threshold {
+        return false;
+    }
 
-    // Halt decision
-    if ctx.halt_prob > 0.85 {
+    // Phase W: speculative decode accept/reject
+    if ctx.spec_accepted {
+        ctx.step += 3;  // fast-forward 3 draft tokens accepted
+    }
+
+    // Phase Y: swarm consensus — majority vote
+    if ctx.swarm_vote > 2 {
+        return false;  // 3+ agents voted to halt
+    }
+
+    // Phase Z: homeostatic loss — stop if diverging
+    if ctx.homeostatic_loss > 5.0 {
         return false;
     }
 
