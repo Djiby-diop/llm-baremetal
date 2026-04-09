@@ -2375,6 +2375,13 @@ static CellionEngine g_cellion;
 static MorphionEngine g_morphion;
 static PheromionEngine g_pheromion;
 
+/* Novel engines — Phase 2 (emotional, temporal, hunger, introspection, apoptosis) */
+static LimbionEngine    g_limbion;      /* 2D affective state modulates inference */
+static ChronionEngine   g_chronion;     /* temporal self-awareness (boot/step/DNA age) */
+static TrophionEngine   g_trophion;     /* compute hunger (idle→verbose, gorged→terse) */
+static MirrorionEngine  g_mirrorion;    /* self-introspection Q/A → OO_MIRROR.JSONL */
+static ThanatosionEngine g_thanatosion; /* graceful death + DNA-preserving rebirth */
+
 // Forward declarations (used by early config loaders)
 static EFI_STATUS llmk_open_read_file(EFI_FILE_HANDLE *out, const CHAR16 *name);
 static void llmk_cfg_trim(char **s);

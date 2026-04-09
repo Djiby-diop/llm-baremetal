@@ -64,6 +64,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     cellion_init(&g_cellion);
     morphion_init(&g_morphion);
     pheromion_init(&g_pheromion);
+
+    /* Novel engines — Phase 2 */
+    limbion_init(&g_limbion);
+    chronion_init(&g_chronion, 0, 0);  /* boot_count + dna_generation filled after persist load */
+    trophion_init(&g_trophion);
+    mirrorion_init(&g_mirrorion);
+    thanatosion_init(&g_thanatosion, NULL);  /* g_root not yet open; rebind after volume open */
     compatibilion_set_platform(&g_compatibilion, COMPAT_PLAT_UEFI | COMPAT_PLAT_FAT32);
 
     // Initialize DjibMark tracing system
@@ -3986,7 +3993,31 @@ snap_autoload_done:
                 Print(L"  collectivion %s bcast=%d poll=%d\r\n", collectivion_mode_name_ascii(g_collectivion.mode), (int)g_collectivion.broadcasts_sent, (int)g_collectivion.broadcasts_recv);
                 Print(L"  metabion   %s tok_s=%lu samples=%d\r\n", metabion_mode_name_ascii(g_metabion.mode), (unsigned long)g_metabion.last.tokens_per_sec, (int)g_metabion.samples_count);
                 Print(L"  morphion   %s\r\n", morphion_mode_name_ascii(g_morphion.mode));
-                Print(L"  pheromion  %s top_path=%u\r\n\r\n", pheromion_mode_name_ascii(g_pheromion.mode), (unsigned)pheromion_top_path(&g_pheromion));
+                Print(L"  pheromion  %s top_path=%u\r\n", pheromion_mode_name_ascii(g_pheromion.mode), (unsigned)pheromion_top_path(&g_pheromion));
+                /* Novel engines */
+                {
+                    char lbuf[64]; limbion_format_context(&g_limbion, lbuf, sizeof(lbuf));
+                    Print(L"  limbion    %a\r\n", lbuf);
+                }
+                Print(L"  chronion   boot=%u steps=%lu tokens=%lu\r\n",
+                      (unsigned)g_chronion.boot_count,
+                      (unsigned long)g_chronion.steps_this_boot,
+                      (unsigned long)g_chronion.tokens_lifetime);
+                {
+                    const char *tstate[] = {"starved","hungry","satiated","gorged"};
+                    unsigned ts = (unsigned)g_trophion.state;
+                    Print(L"  trophion   %a hunger=%d\r\n",
+                          ts < 4 ? tstate[ts] : "?",
+                          (int)g_trophion.hunger_level);
+                }
+                Print(L"  mirrorion  q=%lu a=%lu pending=%d\r\n",
+                      (unsigned long)g_mirrorion.total_questions,
+                      (unsigned long)g_mirrorion.total_answers,
+                      (int)g_mirrorion.has_pending);
+                Print(L"  thanatosion deaths=%u rebirths=%u dying_p=%d\r\n\r\n",
+                      (unsigned)g_thanatosion.total_deaths,
+                      (unsigned)g_thanatosion.total_rebirths,
+                      (int)g_thanatosion.dying_pressure_steps);
                 llmk_oo_print_persistence_status_best_effort();
                 continue;
 
@@ -7104,6 +7135,10 @@ snap_autoload_done:
             } else {
                 transformer_forward(&state, &weights, &config, token, pos);
             }
+            /* Per-token engine hooks */
+            chronion_step(&g_chronion, 1);
+            trophion_feed(&g_trophion, 1);
+            limbion_trigger(&g_limbion, LIMBION_TRIGGER_GOOD_INFERENCE, 10);
         }
 
         // Emit early-stop reason to serial for automated diagnosis.

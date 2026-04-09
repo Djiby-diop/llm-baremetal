@@ -1594,7 +1594,6 @@ static void llmk_repl_no_model_loop(void) {
                   g_pheromion.mode == PHEROMION_MODE_OFF   ? L"off" :
                   g_pheromion.mode == PHEROMION_MODE_BOOST ? L"boost" : L"trace",
                   (unsigned)top);
-            // Show SomaMind-specific paths (domain=100-106, route=200-203)
             static const char *dnames[7] = {
                 "UNKNOWN","SYSTEM","POLICY","CHAT","CODE","MATH","CREATIVE"
             };
@@ -1618,9 +1617,71 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n");
             continue;
         }
-        if (my_strncmp(prompt, "/session_reset", 14) == 0) {
-            soma_session_init(&g_soma_session);
-            Print(L"\r\n[Session] Fitness counters reset.\r\n\r\n");
+        /* ---- Novel Engine Commands ---- */
+        if (my_strncmp(prompt, "/limbion_status", 15) == 0) {
+            char lbuf[128];
+            limbion_format_context(&g_limbion, lbuf, sizeof(lbuf));
+            Print(L"\r\n[Limbion] ");
+            for (int i = 0; lbuf[i]; i++) Print(L"%c", (CHAR16)(unsigned char)lbuf[i]);
+            Print(L"\r\n  valence=%d arousal=%d\r\n\r\n",
+                  (int)g_limbion.valence, (int)g_limbion.arousal);
+            continue;
+        }
+        if (my_strncmp(prompt, "/chronion_status", 16) == 0) {
+            Print(L"\r\n[Chronion] boot=%u steps_boot=%lu tokens_lifetime=%lu\r\n\r\n",
+                  (unsigned)g_chronion.boot_count,
+                  (unsigned long)g_chronion.steps_this_boot,
+                  (unsigned long)g_chronion.tokens_lifetime);
+            continue;
+        }
+        if (my_strncmp(prompt, "/trophion_status", 16) == 0) {
+            char tbuf[128];
+            trophion_format_context(&g_trophion, tbuf, sizeof(tbuf));
+            Print(L"\r\n[Trophion] ");
+            for (int i = 0; tbuf[i]; i++) Print(L"%c", (CHAR16)(unsigned char)tbuf[i]);
+            Print(L"\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/mirrorion_status", 17) == 0) {
+            Print(L"\r\n[Mirrorion] questions=%lu answers=%lu flushes=%u pending=%d\r\n",
+                  (unsigned long)g_mirrorion.total_questions,
+                  (unsigned long)g_mirrorion.total_answers,
+                  (unsigned)g_mirrorion.flush_count,
+                  (int)g_mirrorion.has_pending);
+            if (g_mirrorion.has_pending) {
+                Print(L"  pending_q: ");
+                for (int i = 0; g_mirrorion.pending_question[i]; i++)
+                    Print(L"%c", (CHAR16)(unsigned char)g_mirrorion.pending_question[i]);
+                Print(L"\r\n");
+            }
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/mirrorion_flush", 16) == 0) {
+            char mbuf[512];
+            int n = mirrorion_flush_jsonl(&g_mirrorion, mbuf, sizeof(mbuf));
+            Print(L"\r\n[Mirrorion] flushed %d bytes\r\n", n);
+            if (n > 0) {
+                for (int i = 0; i < n && mbuf[i]; i++)
+                    Print(L"%c", (CHAR16)(unsigned char)mbuf[i]);
+            }
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/thanatosion_status", 19) == 0) {
+            Print(L"\r\n[Thanatosion] deaths=%u rebirths=%u voluntary=%u dying_pressure=%d/%d\r\n",
+                  (unsigned)g_thanatosion.total_deaths,
+                  (unsigned)g_thanatosion.total_rebirths,
+                  (unsigned)g_thanatosion.voluntary_deaths,
+                  (int)g_thanatosion.dying_pressure_steps,
+                  (int)g_thanatosion.dying_pressure_limit);
+            if (g_thanatosion.last_death.cause_detail[0]) {
+                Print(L"  last_cause: ");
+                for (int i = 0; g_thanatosion.last_death.cause_detail[i]; i++)
+                    Print(L"%c", (CHAR16)(unsigned char)g_thanatosion.last_death.cause_detail[i]);
+                Print(L"\r\n");
+            }
+            Print(L"\r\n");
             continue;
         }
         if (my_strncmp(prompt, "/session_score", 14) == 0) {
