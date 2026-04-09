@@ -2362,6 +2362,7 @@ static OrchestrionEngine g_orchestrion;
 static CalibrionEngine g_calibrion;
 static CompatibilionEngine g_compatibilion;
 static EvolvionEngine g_evolvion;
+static OoDriverProbe  g_oo_driver_probe; /* OO Driver System — PCI enumeration */
 static SynaptionEngine g_synaption;
 static ConscienceEngine g_conscience;
 static NeuralfsEngine g_neuralfs;

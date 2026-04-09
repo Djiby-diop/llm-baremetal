@@ -1817,6 +1817,79 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n[Evolvion] codegen need recorded — run /ssm_infer to materialize\r\n\r\n");
             continue;
         }
+        /* ── OO Driver System ─────────────────────────────────────────── */
+        if (my_strncmp(prompt, "/oo_probe_pci", 13) == 0) {
+            oo_driver_probe_pci(&g_oo_driver_probe);
+            Print(L"\r\n[OO-Driver] PCI scan: %d device(s), %d unknown\r\n",
+                  (int)g_oo_driver_probe.device_count,
+                  (int)g_oo_driver_probe.unknown_count);
+            for (uint8_t _i = 0; _i < g_oo_driver_probe.device_count; _i++) {
+                OoPciDevice *_d = &g_oo_driver_probe.devices[_i];
+                const char *_vn = oo_pci_vendor_name(_d->vendor_id);
+                const char *_cn = oo_pci_class_name(_d->class_code, _d->subclass);
+                Print(L"  [%d] %02X:%02X  %04X:%04X  ",
+                      (int)_i, (unsigned)_d->bus, (unsigned)_d->dev,
+                      (unsigned)_d->vendor_id, (unsigned)_d->device_id);
+                for (int _k = 0; _vn[_k]; _k++) Print(L"%c", (CHAR16)(unsigned char)_vn[_k]);
+                Print(L"/");
+                for (int _k = 0; _cn[_k]; _k++) Print(L"%c", (CHAR16)(unsigned char)_cn[_k]);
+                Print(L"%s\r\n", _d->known ? L"" : L" [UNKNOWN - needs driver]");
+            }
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_driver_gen ", 15) == 0) {
+            /* Parse vid:did hex from argument, e.g. "8086:100E" */
+            const char *arg = prompt + 15;
+            uint16_t vid = 0, did = 0;
+            int got_colon = 0;
+            for (int _c = 0; arg[_c] && _c < 9; _c++) {
+                char ch = arg[_c];
+                if (ch == ':') { got_colon = 1; continue; }
+                uint8_t nibble = (ch >= '0' && ch <= '9') ? (uint8_t)(ch - '0') :
+                                 (ch >= 'A' && ch <= 'F') ? (uint8_t)(ch - 'A' + 10) :
+                                 (ch >= 'a' && ch <= 'f') ? (uint8_t)(ch - 'a' + 10) : 0xFF;
+                if (nibble == 0xFF) break;
+                if (!got_colon) vid = (uint16_t)((vid << 4) | nibble);
+                else            did = (uint16_t)((did << 4) | nibble);
+            }
+            const char *_cn = oo_pci_class_name(0xFF, 0xFF);
+            /* Find class from probe table */
+            for (uint8_t _i = 0; _i < g_oo_driver_probe.device_count; _i++) {
+                if (g_oo_driver_probe.devices[_i].vendor_id == vid &&
+                    g_oo_driver_probe.devices[_i].device_id == did) {
+                    _cn = oo_pci_class_name(g_oo_driver_probe.devices[_i].class_code,
+                                            g_oo_driver_probe.devices[_i].subclass);
+                    break;
+                }
+            }
+            evolvion_set_mode(&g_evolvion, EVOLVION_MODE_LIVE);
+            evolvion_build_driver_prompt(&g_evolvion, vid, did, _cn,
+                                         oo_pci_vendor_name(vid),
+                                         g_evolvion.codegen_buf,
+                                         EVOLVION_CODEGEN_BUF);
+            g_evolvion.drivers_generated++;
+            Print(L"\r\n[OO-Driver] prompt built. Use /oo_driver_status then /ssm_infer\r\n\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/oo_driver_status", 17) == 0) {
+            Print(L"\r\n[OO-Driver] evolvion mode=");
+            const char *_em = evolvion_mode_name_ascii(g_evolvion.mode);
+            for (int _k = 0; _em[_k]; _k++) Print(L"%c", (CHAR16)(unsigned char)_em[_k]);
+            Print(L" needs=%u attempts=%u drivers_gen=%u queue=%u\r\n",
+                  (unsigned)g_evolvion.needs_recorded,
+                  (unsigned)g_evolvion.codegen_attempts,
+                  (unsigned)g_evolvion.drivers_generated,
+                  (unsigned)g_evolvion.driver_need_count);
+            if (g_evolvion.codegen_buf[0]) {
+                Print(L"  prompt: ");
+                for (int _k = 0; g_evolvion.codegen_buf[_k]; _k++)
+                    Print(L"%c", (CHAR16)(unsigned char)g_evolvion.codegen_buf[_k]);
+                Print(L"\r\n");
+            }
+            Print(L"\r\n");
+            continue;
+        }
         /* ── Platform status dump ─────────────────────────────────────── */
         if (my_strncmp(prompt, "/session_score", 14) == 0) {
             int sc = soma_session_score(&g_soma_session, &g_soma_warden);

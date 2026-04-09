@@ -231,6 +231,22 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
               (int)((g_morphion.probe.features_ebx >> 16) & 1)); /* AVX512F = bit 16 */
     }
 
+    /* OO Driver System: enumerate PCI bus, queue unknown devices for codegen */
+    oo_driver_probe_init(&g_oo_driver_probe);
+    oo_driver_probe_pci(&g_oo_driver_probe);
+    if (g_boot_verbose) {
+        Print(L"[OO-Driver] %d PCI device(s) found, %d unknown\r\n\r\n",
+              (int)g_oo_driver_probe.device_count,
+              (int)g_oo_driver_probe.unknown_count);
+    }
+    /* Queue unknown PCI devices into evolvion for on-demand LLM codegen */
+    for (uint8_t _pci_i = 0; _pci_i < g_oo_driver_probe.device_count; _pci_i++) {
+        OoPciDevice *_pd = &g_oo_driver_probe.devices[_pci_i];
+        if (!_pd->known) {
+            evolvion_queue_driver(&g_evolvion, _pd->vendor_id, _pd->device_id);
+        }
+    }
+
     llmk_boot_mark(L"cpu_detect");
 
     // Best-effort graphics init (GOP). Optional: REPL still works without it.

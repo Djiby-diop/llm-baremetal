@@ -100,7 +100,9 @@ REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	oo-modules/immunion-engine/core/immunion.o \
 	oo-modules/symbion-engine/core/symbion.o \
 	oo-modules/metabion-engine/core/metabion.o \
-	oo-modules/pheromion-engine/core/pheromion.o
+	oo-modules/pheromion-engine/core/pheromion.o \
+	oo-modules/evolvion-engine/core/evolvion.o \
+	oo-modules/evolvion-engine/core/oo_driver_probe.o
 REPL_SO  = llama2_repl.so
 
 all: repl
@@ -221,6 +223,9 @@ oo-modules/morphion-engine/core/morphion.o: oo-modules/morphion-engine/core/morp
 
 oo-modules/pheromion-engine/core/pheromion.o: oo-modules/pheromion-engine/core/pheromion.c oo-modules/pheromion-engine/core/pheromion.h
 	$(CC) $(CFLAGS) -c oo-modules/pheromion-engine/core/pheromion.c -o oo-modules/pheromion-engine/core/pheromion.o
+
+oo-modules/evolvion-engine/core/oo_driver_probe.o: oo-modules/evolvion-engine/core/oo_driver_probe.c oo-modules/evolvion-engine/core/oo_driver_probe.h
+	$(CC) $(CFLAGS) -c oo-modules/evolvion-engine/core/oo_driver_probe.c -o oo-modules/evolvion-engine/core/oo_driver_probe.o
 
 $(REPL_SO): $(REPL_OBJS) | oo-subsystems
 	ld $(LDFLAGS) $(REPL_OBJS) \
