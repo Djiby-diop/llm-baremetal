@@ -27,6 +27,7 @@
 #include "../../core/llmk_sentinel.h"
 #include "../../core/llmk_zones.h"
 #include "../../oo-modules/immunion-engine/core/immunion.h"
+#include "oo_dplus_gate.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -89,6 +90,12 @@ typedef struct {
     // Phase P: Immunion integration
     int  last_immunion_reactions;   // reactions_triggered snapshot from last sync
     int  immunion_escalations;      // Times immunion triggered a pressure boost
+
+    // Phase I: D+ Live Gate
+    DPlusGateCtx dplus;             // Embedded D+ policy gate
+    int  dplus_tok_s;               // Last measured tok/s (passed in from boot loop)
+    int  dplus_resonance;           // Last resonance anomaly score 0-100
+    int  emergency_halt;            // 1 if EMERGENCY verdict received (halts generation)
 } SomaWardenCtx;
 
 // ============================================================
@@ -123,6 +130,17 @@ int soma_warden_immunion_sync(SomaWardenCtx *w,
 // Return a one-line ASCII status string (written into buf, max buflen).
 // e.g. "NONE thresh=0.85 viol=0 mem=1024MiB"
 int soma_warden_status_str(const SomaWardenCtx *w, char *buf, int buflen);
+
+// Phase I: Set per-turn D+ inputs (call before soma_warden_update).
+// tok_s     — tokens per second (integer; 0 if unknown)
+// resonance — behavioral anomaly score 0-100 (from OO resonance engine)
+void soma_warden_set_dplus_inputs(SomaWardenCtx *w, int tok_s, int resonance);
+
+// Phase I: Return one-line D+ status (for /dplus_status REPL command).
+int soma_warden_dplus_status_str(const SomaWardenCtx *w, char *buf, int buflen);
+
+// Phase I: Reset D+ gate (for /dplus_reset REPL command).
+void soma_warden_dplus_reset(SomaWardenCtx *w, SomaRouterCtx *router);
 
 #ifdef __cplusplus
 }

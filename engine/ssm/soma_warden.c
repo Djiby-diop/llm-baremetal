@@ -93,6 +93,11 @@ void soma_warden_init(SomaWardenCtx *w) {
     w->cortex_safety_floor     = 0;
     w->last_immunion_reactions = 0;
     w->immunion_escalations    = 0;
+    // Phase I: D+ gate
+    oo_dplus_gate_init(&w->dplus);
+    w->dplus_tok_s      = 0;
+    w->dplus_resonance  = 0;
+    w->emergency_halt   = 0;
 }
 
 // ─── soma_warden_update ──────────────────────────────────────────────────────
@@ -222,6 +227,37 @@ int soma_warden_update(SomaWardenCtx *w,
         //  by the god file, so this is a one-turn suppression only)
     }
 
+    // ── 6. D+ Live Gate evaluation ───────────────────────────────────────
+    {
+        int mem_mib = (int)(w->last_hot_free_mib);
+        DPlusVerdict dv = oo_dplus_gate_evaluate(
+            &w->dplus,
+            new_level,                  // pressure
+            w->last_sentinel_tripped,   // sentinel tripped
+            mem_mib,                    // free MiB
+            w->dplus_tok_s,             // tok/s
+            w->dplus_resonance,         // resonance score
+            turn
+        );
+
+        // D+ EMERGENCY: set halt flag + tighten router to near-zero
+        if (dv == DPLUS_EMERGENCY && !w->emergency_halt) {
+            w->emergency_halt = 1;
+            if (router) {
+                soma_router_set_threshold(router, 0.05f);
+                router->external_model_ready = 0;
+            }
+        }
+        // D+ QUARANTINE or above: block external model if not already
+        else if (dv >= DPLUS_QUARANTINE && router) {
+            router->external_model_ready = 0;
+        }
+        // D+ relief — clear emergency halt if verdict recovered
+        if (dv < DPLUS_FORBID && w->emergency_halt) {
+            w->emergency_halt = 0;
+        }
+    }
+
     return new_level;
 }
 
@@ -310,4 +346,39 @@ int soma_warden_status_str(const SomaWardenCtx *w, char *buf, int buflen) {
     }
     if (p < buflen) buf[p] = '\0';
     return p;
+}
+
+// ─── soma_warden_set_dplus_inputs ────────────────────────────────────────────
+
+void soma_warden_set_dplus_inputs(SomaWardenCtx *w, int tok_s, int resonance) {
+    if (!w) return;
+    w->dplus_tok_s     = tok_s;
+    w->dplus_resonance = resonance;
+}
+
+// ─── soma_warden_dplus_status_str ────────────────────────────────────────────
+
+int soma_warden_dplus_status_str(const SomaWardenCtx *w, char *buf, int buflen) {
+    if (!w || !buf || buflen < 4) return 0;
+    int n = oo_dplus_gate_status_str(&w->dplus, buf, buflen);
+    // Append emergency halt flag if set
+    if (w->emergency_halt && n < buflen - 16) {
+        n = w_puts(buf, n, buflen, " [EMERGENCY_HALT]");
+    }
+    if (n < buflen) buf[n] = '\0';
+    return n;
+}
+
+// ─── soma_warden_dplus_reset ─────────────────────────────────────────────────
+
+void soma_warden_dplus_reset(SomaWardenCtx *w, SomaRouterCtx *router) {
+    if (!w) return;
+    oo_dplus_gate_reset(&w->dplus);
+    w->emergency_halt = 0;
+    // Restore router threshold to NONE level
+    if (router) {
+        float thr = pressure_to_threshold(SOMA_PRESSURE_NONE);
+        w->applied_threshold = thr;
+        soma_router_set_threshold(router, thr);
+    }
 }

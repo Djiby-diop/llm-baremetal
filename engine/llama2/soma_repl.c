@@ -1482,6 +1482,24 @@ static void llmk_repl_no_model_loop(void) {
                   (unsigned long long)g_soma_warden.last_dt_cycles);
             continue;
         }
+        // Phase I: D+ Live Gate status / reset commands
+        if (my_strncmp(prompt, "/dplus_status", 13) == 0) {
+            char dbuf[256];
+            soma_warden_dplus_status_str(&g_soma_warden, dbuf, 256);
+            Print(L"\r\n[D+ Gate] ");
+            for (int di = 0; dbuf[di]; di++)
+                Print(L"%c", (CHAR16)(unsigned char)dbuf[di]);
+            Print(L"\r\n");
+            Print(L"  evaluations=%d  emergency_halt=%d\r\n\r\n",
+                  g_soma_warden.dplus.total_evaluations,
+                  g_soma_warden.emergency_halt);
+            continue;
+        }
+        if (my_strncmp(prompt, "/dplus_reset", 12) == 0) {
+            soma_warden_dplus_reset(&g_soma_warden, &g_soma_router);
+            Print(L"\r\n[D+] Gate reset. ALLOW restored. Emergency halt cleared.\r\n\r\n");
+            continue;
+        }
         // ─── Phase P: Immunion mode commands ─────────────────────────────────
         if (my_strncmp(prompt, "/immunion_mode", 14) == 0) {
             const char *arg = prompt + 14;
@@ -1817,232 +1835,7 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n[Evolvion] codegen need recorded — run /ssm_infer to materialize\r\n\r\n");
             continue;
         }
-        /* ── OO-NET Distributed OO ───────────────────────────────────── */
-        if (my_strncmp(prompt, "/oo_net_status", 14) == 0) {
-            Print(L"\r\n[OO-NET] node_id=%u  sent=%u recv=%u merges=%u  ghost_pkts_sent=%u recv=%u\r\n",
-                  (unsigned)g_collectivion.node_id,
-                  (unsigned)g_collectivion.broadcasts_sent,
-                  (unsigned)g_collectivion.broadcasts_recv,
-                  (unsigned)g_collectivion.dna_merges,
-                  (unsigned)g_ghost.pkts_sent,
-                  (unsigned)g_ghost.pkts_recv);
-            Print(L"  peers:");
-            int any = 0;
-            for (int _i = 0; _i < COLLECTIVION_PEER_MAX; _i++) {
-                if (g_collectivion.peers[_i].node_id != 0xFFFFFFFFU) {
-                    Print(L" [node=%u seq=%u dna=0x%08X]",
-                          (unsigned)g_collectivion.peers[_i].node_id,
-                          (unsigned)g_collectivion.peers[_i].last_seen_seq,
-                          (unsigned)g_collectivion.peers[_i].dna_hash);
-                    any = 1;
-                }
-            }
-            if (!any) Print(L" (none yet)");
-            Print(L"\r\n\r\n");
-            continue;
-        }
-        if (my_strncmp(prompt, "/oo_net_hello", 13) == 0) {
-            collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_ACTIVE);
-            ghost_set_mode(&g_ghost, GHOST_MODE_SEND);
-            collectivion_send_hello(&g_collectivion, &g_ghost);
-            Print(L"\r\n[OO-NET] HELLO broadcast (node_id=%u)\r\n\r\n",
-                  (unsigned)g_collectivion.node_id);
-            continue;
-        }
-        if (my_strncmp(prompt, "/oo_net_send ", 13) == 0) {
-            const char *txt = prompt + 13;
-            collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_ACTIVE);
-            ghost_set_mode(&g_ghost, GHOST_MODE_SEND);
-            collectivion_send_text(&g_collectivion, &g_ghost, txt);
-            Print(L"\r\n[OO-NET] TEXT sent: ");
-            for (int _k = 0; txt[_k]; _k++) Print(L"%c", (CHAR16)(unsigned char)txt[_k]);
-            Print(L"\r\n\r\n");
-            continue;
-        }
-        if (my_strncmp(prompt, "/oo_net_sync_dna", 16) == 0) {
-            collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_ACTIVE);
-            ghost_set_mode(&g_ghost, GHOST_MODE_SEND);
-            uint32_t dh = soma_dna_hash(&g_soma_dna);
-            collectivion_sync_dna(&g_collectivion, &g_ghost,
-                                  dh, 0.0f, 0.0f);
-            Print(L"\r\n[OO-NET] DNA_SYNC broadcast (hash=0x%08X)\r\n\r\n",
-                  (unsigned)dh);
-            continue;
-        }
-        if (my_strncmp(prompt, "/oo_net_recv", 12) == 0) {
-            ghost_set_mode(&g_ghost, GHOST_MODE_RECV);
-            float dt = 0.f, dp = 0.f;
-            int n = collectivion_recv_all(&g_collectivion, &g_ghost, &dt, &dp);
-            if (n == 0) {
-                Print(L"\r\n[OO-NET] no packets received\r\n\r\n");
-            } else {
-                Print(L"\r\n[OO-NET] %d packet(s) processed", n);
-                if (g_collectivion.dna_merges > 0)
-                    Print(L" | DNA delta: temp=%d.%02d topp=%d.%02d",
-                          (int)dt, (int)(dt*100)%100,
-                          (int)dp, (int)(dp*100)%100);
-                Print(L"\r\n\r\n");
-            }
-            continue;
-        }
-        if (my_strncmp(prompt, "/oo_probe_pci", 13) == 0) {
-            oo_driver_probe_pci(&g_oo_driver_probe);
-            Print(L"\r\n[OO-Driver] PCI scan: %d device(s), %d unknown\r\n",
-                  (int)g_oo_driver_probe.device_count,
-                  (int)g_oo_driver_probe.unknown_count);
-            for (uint8_t _i = 0; _i < g_oo_driver_probe.device_count; _i++) {
-                OoPciDevice *_d = &g_oo_driver_probe.devices[_i];
-                const char *_vn = oo_pci_vendor_name(_d->vendor_id);
-                const char *_cn = oo_pci_class_name(_d->class_code, _d->subclass);
-                Print(L"  [%d] %02X:%02X  %04X:%04X  ",
-                      (int)_i, (unsigned)_d->bus, (unsigned)_d->dev,
-                      (unsigned)_d->vendor_id, (unsigned)_d->device_id);
-                for (int _k = 0; _vn[_k]; _k++) Print(L"%c", (CHAR16)(unsigned char)_vn[_k]);
-                Print(L"/");
-                for (int _k = 0; _cn[_k]; _k++) Print(L"%c", (CHAR16)(unsigned char)_cn[_k]);
-                Print(L"%s\r\n", _d->known ? L"" : L" [UNKNOWN - needs driver]");
-            }
-            Print(L"\r\n");
-            continue;
-        }
-        if (my_strncmp(prompt, "/oo_driver_gen ", 15) == 0) {
-            /* Parse vid:did hex from argument, e.g. "8086:100E" */
-            const char *arg = prompt + 15;
-            uint16_t vid = 0, did = 0;
-            int got_colon = 0;
-            for (int _c = 0; arg[_c] && _c < 9; _c++) {
-                char ch = arg[_c];
-                if (ch == ':') { got_colon = 1; continue; }
-                uint8_t nibble = (ch >= '0' && ch <= '9') ? (uint8_t)(ch - '0') :
-                                 (ch >= 'A' && ch <= 'F') ? (uint8_t)(ch - 'A' + 10) :
-                                 (ch >= 'a' && ch <= 'f') ? (uint8_t)(ch - 'a' + 10) : 0xFF;
-                if (nibble == 0xFF) break;
-                if (!got_colon) vid = (uint16_t)((vid << 4) | nibble);
-                else            did = (uint16_t)((did << 4) | nibble);
-            }
-            const char *_cn = oo_pci_class_name(0xFF, 0xFF);
-            /* Find class from probe table */
-            for (uint8_t _i = 0; _i < g_oo_driver_probe.device_count; _i++) {
-                if (g_oo_driver_probe.devices[_i].vendor_id == vid &&
-                    g_oo_driver_probe.devices[_i].device_id == did) {
-                    _cn = oo_pci_class_name(g_oo_driver_probe.devices[_i].class_code,
-                                            g_oo_driver_probe.devices[_i].subclass);
-                    break;
-                }
-            }
-            evolvion_set_mode(&g_evolvion, EVOLVION_MODE_LIVE);
-            evolvion_build_driver_prompt(&g_evolvion, vid, did, _cn,
-                                         oo_pci_vendor_name(vid),
-                                         g_evolvion.codegen_buf,
-                                         EVOLVION_CODEGEN_BUF);
-            g_evolvion.drivers_generated++;
-            Print(L"\r\n[OO-Driver] prompt built. Use /oo_driver_status then /ssm_infer\r\n\r\n");
-            continue;
-        }
-        if (my_strncmp(prompt, "/oo_driver_status", 17) == 0) {
-            Print(L"\r\n[OO-Driver] evolvion mode=");
-            const char *_em = evolvion_mode_name_ascii(g_evolvion.mode);
-            for (int _k = 0; _em[_k]; _k++) Print(L"%c", (CHAR16)(unsigned char)_em[_k]);
-            Print(L" needs=%u attempts=%u drivers_gen=%u queue=%u\r\n",
-                  (unsigned)g_evolvion.needs_recorded,
-                  (unsigned)g_evolvion.codegen_attempts,
-                  (unsigned)g_evolvion.drivers_generated,
-                  (unsigned)g_evolvion.driver_need_count);
-            if (g_evolvion.codegen_buf[0]) {
-                Print(L"  prompt: ");
-                for (int _k = 0; g_evolvion.codegen_buf[_k]; _k++)
-                    Print(L"%c", (CHAR16)(unsigned char)g_evolvion.codegen_buf[_k]);
-                Print(L"\r\n");
-            }
-            Print(L"\r\n");
-            continue;
-        }
-        /* /oo_entropy_status — quantum RNG diagnostics */
-        if (my_strncmp(prompt, "/oo_entropy_status", 18) == 0) {
-            Print(L"\r\n[OO-Entropy] Quantum RNG status\r\n");
-            Print(L"  rdrand_available : %s\r\n",
-                  g_quantum_rng.rdrand_available == 1 ? L"YES (hardware TRNG)" :
-                  g_quantum_rng.rdrand_available == -1 ? L"NO  (RDTSC fallback)" : L"not yet probed");
-            Print(L"  rdrand_ok        : %u\r\n", (unsigned)g_quantum_rng.rdrand_ok);
-            Print(L"  rdrand_fail      : %u\r\n", (unsigned)g_quantum_rng.rdrand_fail);
-            Print(L"  rdtsc_mix_count  : %u  (per-token jitter injections)\r\n",
-                  (unsigned)g_quantum_rng.rdtsc_mix_count);
-            Print(L"  quantum_seeds    : %u  (full re-seeds from hardware)\r\n",
-                  (unsigned)g_quantum_rng.quantum_seeds);
-            Print(L"  seed_last        : 0x%08X\r\n", (unsigned)g_quantum_rng.seed_last);
-            Print(L"  tip: /seed 0     - re-seed from hardware entropy now\r\n");
-            Print(L"\r\n");
-            continue;
-        }
-        /* /oo_self_model — OO introspection snapshot */
-        if (my_strncmp(prompt, "/oo_self_model", 14) == 0) {
-            oo_self_model_update(&g_oo_self_model, &g_zones,
-                                  &g_conscience, &g_metabion,
-                                  &g_soma_warden, &g_soma_dna,
-                                  (unsigned int)g_metrics.total_decode_tokens);
-            oo_self_model_to_prefix(&g_oo_self_model);
-            oo_self_model_print(&g_oo_self_model);
-            continue;
-        }
-        /* /nfs2_list — list all NeuralFS2 keys */
-        if (my_strncmp(prompt, "/nfs2_list", 10) == 0) {
-            _sh_cmd_ls(&g_oo_shell, &g_nfs2);
-            continue;
-        }
-        /* /nfs2_write <key> <val> — write to NFS2 */
-        if (my_strncmp(prompt, "/nfs2_write ", 12) == 0) {
-            const char *rest = prompt + 12;
-            while (*rest == ' ') rest++;
-            const char *val = _sh_skip_word(rest);
-            if (!*val) { Print(L"  usage: /nfs2_write <key> <value>\r\n"); continue; }
-            char key[NFS2_NAME_MAX]; int ki = 0;
-            while (rest[ki] && rest[ki] != ' ' && ki < NFS2_NAME_MAX-1) { key[ki] = rest[ki]; ki++; }
-            key[ki] = '\0';
-            int rc = nfs2_write(&g_nfs2, key, val);
-            Print(L"  nfs2_write %s: %d\r\n", rc == 0 ? L"OK" : L"ERR", rc);
-            continue;
-        }
-        /* /nfs2_read <key> — read from NFS2 */
-        if (my_strncmp(prompt, "/nfs2_read ", 11) == 0) {
-            const char *key = prompt + 11;
-            while (*key == ' ') key++;
-            const char *val = nfs2_read(&g_nfs2, key);
-            if (!val) { Print(L"  (not found)\r\n"); continue; }
-            Print(L"\r\n  ");
-            for (int k = 0; val[k]; k++) {
-                if (val[k] == '\n') Print(L"\r\n  ");
-                else Print(L"%c", (CHAR16)(unsigned char)val[k]);
-            }
-            Print(L"\r\n");
-            continue;
-        }
-        /* /nfs2_del <key> — delete from NFS2 */
-        if (my_strncmp(prompt, "/nfs2_del ", 10) == 0) {
-            const char *key = prompt + 10;
-            while (*key == ' ') key++;
-            int rc = nfs2_delete(&g_nfs2, key);
-            Print(L"  nfs2_del %s: %d\r\n", rc == 0 ? L"OK" : L"ERR", rc);
-            continue;
-        }
-        /* /shell — enter interactive OO shell */
-        if (my_strncmp(prompt, "/shell", 6) == 0) {
-            g_oo_shell.active = 1;
-            Print(L"\r\n[OO Shell] v1.0 — type 'help' for commands, 'exit' to return\r\n");
-            oo_self_model_update(&g_oo_self_model, &g_zones,
-                                  &g_conscience, &g_metabion,
-                                  &g_soma_warden, &g_soma_dna,
-                                  (unsigned int)g_metrics.total_decode_tokens);
-            while (g_oo_shell.active) {
-                oo_shell_prompt(&g_oo_shell);
-                char shell_line[OO_SHELL_LINE_MAX];
-                EFI_STATUS srl = llmk_read_line(shell_line, OO_SHELL_LINE_MAX);
-                if (EFI_ERROR(srl)) break;
-                Print(L"\r\n");
-                oo_shell_exec(&g_oo_shell, shell_line, &g_nfs2,
-                              &g_oo_self_model, &g_zones);
-            }
-            continue;
-        }
+        /* ── Platform status dump ─────────────────────────────────────── */
         if (my_strncmp(prompt, "/session_score", 14) == 0) {
             int sc = soma_session_score(&g_soma_session, &g_soma_warden);
             char sbuf[128];
@@ -3908,6 +3701,12 @@ static void llmk_repl_no_model_loop(void) {
                                 for (int wi = 0; wbuf[wi]; wi++)
                                     Print(L"%c", (CHAR16)(unsigned char)wbuf[wi]);
                                 Print(L"\r\n");
+                            }
+                            // Phase I: D+ gate — check EMERGENCY halt flag
+                            if (g_soma_warden.emergency_halt) {
+                                Print(L"\r\n[D+] EMERGENCY halt — generation suspended. Use /dplus_reset to resume.\r\n\r\n");
+                                soma_uart_emit_error("dplus_emergency_halt");
+                                continue;
                             }
                         }
                         // Phase N: session fitness record
