@@ -247,6 +247,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
 
+    /* Phase D: Hardware entropy — seed the sampler RNG from RDRAND+RDTSC at boot */
+    {
+        unsigned int hw_seed = oo_quantum_seed();
+        set_seed(hw_seed);
+        if (g_boot_verbose) {
+            Print(L"[OO-Entropy] RDRAND=%s seed=0x%08X mix_ready\r\n\r\n",
+                  g_quantum_rng.rdrand_available == 1 ? L"yes" : L"no",
+                  (unsigned int)hw_seed);
+        }
+    }
+
     llmk_boot_mark(L"cpu_detect");
 
     // Best-effort graphics init (GOP). Optional: REPL still works without it.

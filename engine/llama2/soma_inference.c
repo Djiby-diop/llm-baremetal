@@ -4579,9 +4579,14 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
 static unsigned int g_sample_seed = 1234567;
 
 static void set_seed(unsigned int seed) {
-    // Avoid a zero seed getting stuck in some LCGs.
-    if (seed == 0) seed = 1;
-    g_sample_seed = seed;
+    if (seed == 0) {
+        // /seed 0 = "randomize from hardware entropy"
+        g_sample_seed = oo_quantum_seed();
+    } else {
+        // Mix user seed with one RDTSC jitter sample for extra uniqueness
+        g_sample_seed = seed ^ oo_rdtsc_jitter_u32();
+        if (g_sample_seed == 0) g_sample_seed = seed ? seed : 1;
+    }
 }
 
 static unsigned long long rdtsc(void) {
@@ -4643,6 +4648,12 @@ static void calibrate_tsc_once(void) {
 
 static float randf(void) {
     g_sample_seed = g_sample_seed * 1664525 + 1013904223;
+    // Every 8 calls: inject one RDTSC jitter byte into the seed.
+    // Cost: ~5 cycles / 8 tokens = negligible. Breaks LCG predictability.
+    static unsigned int randf_call_count = 0;
+    if ((++randf_call_count & 7U) == 0) {
+        g_sample_seed = oo_quantum_mix(g_sample_seed);
+    }
     return (float)(g_sample_seed >> 8) / 16777216.0f;
 }
 

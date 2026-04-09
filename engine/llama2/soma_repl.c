@@ -1957,6 +1957,23 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n");
             continue;
         }
+        /* /oo_entropy_status — quantum RNG diagnostics */
+        if (my_strncmp(prompt, "/oo_entropy_status", 18) == 0) {
+            Print(L"\r\n[OO-Entropy] Quantum RNG status\r\n");
+            Print(L"  rdrand_available : %s\r\n",
+                  g_quantum_rng.rdrand_available == 1 ? L"YES (hardware TRNG)" :
+                  g_quantum_rng.rdrand_available == -1 ? L"NO  (RDTSC fallback)" : L"not yet probed");
+            Print(L"  rdrand_ok        : %u\r\n", (unsigned)g_quantum_rng.rdrand_ok);
+            Print(L"  rdrand_fail      : %u\r\n", (unsigned)g_quantum_rng.rdrand_fail);
+            Print(L"  rdtsc_mix_count  : %u  (per-token jitter injections)\r\n",
+                  (unsigned)g_quantum_rng.rdtsc_mix_count);
+            Print(L"  quantum_seeds    : %u  (full re-seeds from hardware)\r\n",
+                  (unsigned)g_quantum_rng.quantum_seeds);
+            Print(L"  seed_last        : 0x%08X\r\n", (unsigned)g_quantum_rng.seed_last);
+            Print(L"  tip: /seed 0     - re-seed from hardware entropy now\r\n");
+            Print(L"\r\n");
+            continue;
+        }
         /* ── Platform status dump ─────────────────────────────────────── */
         if (my_strncmp(prompt, "/session_score", 14) == 0) {
             int sc = soma_session_score(&g_soma_session, &g_soma_warden);

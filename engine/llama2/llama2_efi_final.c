@@ -102,6 +102,7 @@
 #include "../ssm/soma_dna_sampler.h"
 #include "../ssm/soma_spec.h"
 #include "../ssm/soma_swarm_net.h"
+#include "../ssm/oo_quantum_rng.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
