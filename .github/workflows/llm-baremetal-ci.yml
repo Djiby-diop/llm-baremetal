@@ -136,7 +136,7 @@ jobs:
           echo "sha=${SHA},tok_s=${TOK_S},model=no-model" >> bench/results.csv
 
       - name: Upload bench artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: oo-bench-${{ github.sha }}
