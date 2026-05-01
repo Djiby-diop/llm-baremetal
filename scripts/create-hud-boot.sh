@@ -26,25 +26,25 @@ echo "  OO HUD v2 Boot Image Builder"
 echo "=================================================="
 echo ""
 
-# ── Step 1: Build oo_hud_v2.efi ────────────────────────────────────────────────
-echo "[1/5] Building oo_hud_v2.efi..."
+# ── Step 1: Build oo_hud_v3.efi ────────────────────────────────────────────────
+echo "[1/5] Building oo_hud_v3.efi..."
 if [ ! -d "$DISPLAY_DIR" ]; then
     echo "ERROR: desktop_display not found at: $DISPLAY_DIR"
     exit 1
 fi
 (cd "$DISPLAY_DIR" && make clean 2>/dev/null || true && make)
-HUD_EFI="$DISPLAY_DIR/oo_hud_v2.efi"
+HUD_EFI="$DISPLAY_DIR/oo_hud_v3.efi"
 if [ ! -f "$HUD_EFI" ]; then
-    echo "ERROR: Build failed — oo_hud_v2.efi not found"
+    echo "ERROR: Build failed — oo_hud_v3.efi not found"
     exit 1
 fi
 HUD_SIZE=$(stat -c %s "$HUD_EFI")
-echo "  [OK] oo_hud_v2.efi built: $((HUD_SIZE / 1024)) KB"
+echo "  [OK] oo_hud_v3.efi built: $((HUD_SIZE / 1024)) KB"
 
 # Also copy to artifacts/efi/ for reference
 mkdir -p "$REPO_ROOT/artifacts/efi"
-cp "$HUD_EFI" "$REPO_ROOT/artifacts/efi/oo_hud_v2.efi"
-echo "  [OK] Copied to artifacts/efi/oo_hud_v2.efi"
+cp "$HUD_EFI" "$REPO_ROOT/artifacts/efi/oo_hud_v3.efi"
+echo "  [OK] Copied to artifacts/efi/oo_hud_v3.efi"
 
 # ── Step 2: Create blank image ─────────────────────────────────────────────────
 echo ""
