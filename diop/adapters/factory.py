@@ -13,6 +13,7 @@ ADAPTERS = {
     "swarm": SwarmGenerationAdapter,
     "native": NativeGenerationAdapter,
     "trained": FastTrainedModelAdapter,
+    "llama_cpp": "LlamaCppAdapter",  # lazy-loaded to avoid subprocess import at startup
 }
 
 
@@ -31,4 +32,10 @@ def build_adapter(name: str = "mock") -> BaseGenerationAdapter:
         if ":" in normalized:
             model_name = normalized.split(":", 1)[1]
         return FastTrainedModelAdapter(model_name=model_name)
+    if normalized.startswith("llama_cpp"):
+        from .llama_cpp import LlamaCppAdapter
+        model_path = ""
+        if ":" in normalized:
+            model_path = normalized.split(":", 1)[1]
+        return LlamaCppAdapter(model_path=model_path)
     raise ValueError(f"Unsupported DIOP adapter '{name}'")
