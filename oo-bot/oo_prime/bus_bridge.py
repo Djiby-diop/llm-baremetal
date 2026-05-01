@@ -199,6 +199,10 @@ class BotBusState:
     swarm_node_state: str = "UNKNOWN" # OoNodeState name from bare-metal
     swarm_quorum_degraded: bool = False
     last_swarm_event_ts: int = 0
+    # Phase T: DIOP state tracking
+    diop_worker: str = "none"         # last active DIOP worker
+    diop_last_kind: str = "none"      # last DiopsEvent kind
+    diop_last_ts: int = 0             # epoch-s of last diops_event
 
 
 # ── Reactor ───────────────────────────────────────────────────────────────────
@@ -238,6 +242,10 @@ def react_to_messages(
             # Phase R: react to swarm node state changes from oo-host SwarmCoordinator
             swarm_logs = _handle_swarm_event(state, msg)
             logs.extend(swarm_logs)
+        elif msg.kind == "diops_event":
+            # Phase T: react to DIOP gateway worker events
+            diops_logs = _handle_diops_event(state, msg)
+            logs.extend(diops_logs)
     return logs
 
 
@@ -323,6 +331,62 @@ def _handle_swarm_event(state: BotBusState, msg: BusMessage) -> list[str]:
                 f"[swarm] ✅ node {state.swarm_node_id} recovered to {node_state} — "
                 "apply_mode restored to safe"
             )
+
+    return logs
+
+
+def _handle_diops_event(state: BotBusState, msg: BusMessage) -> list[str]:
+    """
+    Phase T: Handle diops_event messages from the DIOP bridge (diop_bridge.rs).
+
+    Payload format (space-separated key=value):
+      worker=<W> kind=<K> status=<S> summary=<TEXT>
+      where K ∈ {health, runtime, worker_result, warden_alert, sleep_learning}
+
+    Reactions:
+      warden_alert / status=quarantine  → escalate to observe mode + emit warden_alert
+      gateway offline                   → log only, don't change mode
+      worker_result from baremetal      → log as uart_event for kernel context
+    """
+    logs: list[str] = []
+    payload = msg.payload
+
+    worker  = _kv(payload, "worker")  or "unknown"
+    kind    = _kv(payload, "kind")    or "unknown"
+    status  = _kv(payload, "status")  or "unknown"
+
+    # summary: everything after "summary="
+    summary_key = "summary="
+    summary_idx = payload.find(summary_key)
+    summary = payload[summary_idx + len(summary_key):] if summary_idx != -1 else ""
+
+    state.diop_worker    = worker
+    state.diop_last_kind = kind
+    state.diop_last_ts   = msg.ts_epoch_s
+
+    logs.append(
+        f"[diops] event from {msg.from_id}: "
+        f"worker={worker} kind={kind} status={status}"
+    )
+
+    if kind == "warden_alert" or status == "quarantine":
+        # DIOP warden raised an alert → conservative mode
+        if state.apply_mode == "safe":
+            state.apply_mode = "observe"
+            logs.append(
+                f"[diops] ⚠️  DIOP warden alert (worker={worker}) — "
+                "apply_mode demoted to observe"
+            )
+
+    elif kind == "health" and status == "offline":
+        logs.append("[diops] 🔌 DIOP gateway offline — waiting for reconnect")
+
+    elif kind == "health" and status == "online":
+        logs.append(f"[diops] ✅ DIOP gateway online — {summary}")
+
+    elif kind == "worker_result" and worker == "baremetal":
+        # Bare-metal worker produced code — log as uart_event for kernel context
+        logs.append(f"[diops] 📦 baremetal worker result: {summary[:100]}")
 
     return logs
 
