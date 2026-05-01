@@ -1,4 +1,4 @@
-"""bus_bridge.py — OO-Bot Bus Bridge (Phase M)
+"""bus_bridge.py — OO-Bot Bus Bridge (Phase M + Phase R)
 
 Connects oo_prime to the oo-host file bus so the Governor can send
 directives and oo-bot can publish its cycle reports back.
@@ -16,11 +16,13 @@ Message kinds handled (inbound, from Governor):
   goal_sync "goal=resume_all"             → resume apply_mode=safe
   goal_sync "goal=resume_critical"        → resume apply_mode=observe
   heartbeat                               → record Governor heartbeat
+  swarm_event                             → react to swarm node state changes (Phase R)
 
 Message kinds emitted (outbound):
   heartbeat   → periodic alive signal from oo-bot
   goal_sync   → after each cycle: "cycle_done actions=N accepted=N"
   uart_event  → forwarded oo-bot decisions as structured events
+  swarm_alert → when swarm degradation requires bot-level escalation (Phase R)
 """
 
 from __future__ import annotations
@@ -192,6 +194,11 @@ class BotBusState:
     consecutive_ok: int = 0
     cycles_done: int = 0
     cycles_suspended: int = 0
+    # Phase R: swarm state tracking
+    swarm_node_id: int = -1           # -1 = unknown
+    swarm_node_state: str = "UNKNOWN" # OoNodeState name from bare-metal
+    swarm_quorum_degraded: bool = False
+    last_swarm_event_ts: int = 0
 
 
 # ── Reactor ───────────────────────────────────────────────────────────────────
@@ -227,6 +234,96 @@ def react_to_messages(
                     logs.append("[bus] ✅  oo-bot RESUMED by Governor")
         elif msg.kind == "heartbeat":
             state.last_heartbeat_ts = msg.ts_epoch_s
+        elif msg.kind == "swarm_event":
+            # Phase R: react to swarm node state changes from oo-host SwarmCoordinator
+            swarm_logs = _handle_swarm_event(state, msg)
+            logs.extend(swarm_logs)
+    return logs
+
+
+def _handle_swarm_event(state: BotBusState, msg: BusMessage) -> list[str]:
+    """
+    Phase R: Handle swarm_event messages from oo-host SwarmCoordinator.
+
+    Payload format (space-separated key=value):
+      node_id=<int> node_state=<ACTIVE|DEGRADED|ISOLATED|SYNCING>
+      quorum_degraded=<true|false> status_flags=<hex>
+
+    Reactions:
+      DEGRADED   → switch apply_mode to observe (conservative)
+      ISOLATED   → emit swarm_alert directive to Governor; reduce to dry_run
+      EMERGENCY  → treat same as emergency_halt: suspend cycles
+      quorum_degraded=true → escalate to Governor with goal=emergency_halt
+    """
+    logs: list[str] = []
+    payload = msg.payload
+
+    node_id_s = _kv(payload, "node_id")
+    node_state = _kv(payload, "node_state") or "UNKNOWN"
+    quorum_degraded = (_kv(payload, "quorum_degraded") or "false").lower() == "true"
+    status_flags_s = _kv(payload, "status_flags") or "0x00"
+
+    try:
+        status_flags = int(status_flags_s, 16)
+    except ValueError:
+        status_flags = 0
+
+    flag_degraded = bool(status_flags & 0x01)
+    flag_emergency = bool(status_flags & 0x02)
+    flag_isolated = bool(status_flags & 0x04)
+
+    if node_id_s is not None:
+        try:
+            state.swarm_node_id = int(node_id_s)
+        except ValueError:
+            pass
+
+    prev_swarm_state = state.swarm_node_state
+    state.swarm_node_state = node_state
+    state.swarm_quorum_degraded = quorum_degraded
+    state.last_swarm_event_ts = msg.ts_epoch_s
+
+    logs.append(
+        f"[swarm] event from {msg.from_id}: "
+        f"node_id={state.swarm_node_id} state={node_state} "
+        f"flags=0x{status_flags:02X} quorum_degraded={quorum_degraded}"
+    )
+
+    if flag_emergency or (quorum_degraded and flag_degraded):
+        # Quorum emergency: suspend all cycles (same as Governor emergency_halt)
+        state.suspended = True
+        state.dry_run = True
+        state.apply_mode = "off"
+        logs.append(
+            "[swarm] 🚨 SWARM EMERGENCY — oo-bot suspended "
+            f"(quorum_degraded={quorum_degraded} emergency_flag={flag_emergency})"
+        )
+    elif flag_isolated or node_state == "ISOLATED":
+        # Node isolated: enter dry_run mode, wait for reconnect
+        state.dry_run = True
+        state.apply_mode = "observe"
+        logs.append(
+            f"[swarm] ⚠️  node {state.swarm_node_id} ISOLATED — "
+            "oo-bot entering dry_run/observe mode"
+        )
+    elif flag_degraded or node_state == "DEGRADED":
+        # Degraded: switch to observe (conservative, no auto-apply)
+        if state.apply_mode == "safe":
+            state.apply_mode = "observe"
+            logs.append(
+                f"[swarm] ⚡ node {state.swarm_node_id} DEGRADED — "
+                "apply_mode demoted to observe"
+            )
+    elif node_state in ("ACTIVE", "SYNCING") and prev_swarm_state in ("DEGRADED", "ISOLATED"):
+        # Recovery: restore safe mode if we were degraded/isolated
+        if not state.suspended:
+            state.apply_mode = "safe"
+            state.dry_run = False
+            logs.append(
+                f"[swarm] ✅ node {state.swarm_node_id} recovered to {node_state} — "
+                "apply_mode restored to safe"
+            )
+
     return logs
 
 
@@ -272,6 +369,7 @@ def emit_cycle_report(
 
 def render_bus_status(state: BotBusState) -> str:
     suspended_str = "YES ⚠️" if state.suspended else "no"
+    swarm_degraded_str = "YES ⚠️" if state.swarm_quorum_degraded else "no"
     return (
         f"  agent_id         : {state.agent_id}\n"
         f"  gov_mode         : {state.gov_mode}\n"
@@ -281,7 +379,33 @@ def render_bus_status(state: BotBusState) -> str:
         f"  cycles_done      : {state.cycles_done}\n"
         f"  last_directive   : {state.last_directive_ts}\n"
         f"  last_heartbeat   : {state.last_heartbeat_ts}\n"
+        f"  swarm_node_id    : {state.swarm_node_id}\n"
+        f"  swarm_node_state : {state.swarm_node_state}\n"
+        f"  swarm_quorum_deg : {swarm_degraded_str}\n"
+        f"  last_swarm_event : {state.last_swarm_event_ts}\n"
     )
+
+
+def emit_swarm_alert(
+    bus: BusPaths,
+    state: BotBusState,
+    alert_kind: str,
+    node_state: str,
+) -> None:
+    """Phase R: emit a swarm_alert to Governor when swarm degradation detected."""
+    msg = BusMessage.new(
+        from_id=state.agent_id,
+        to="governor",
+        kind="swarm_alert",
+        payload=(
+            f"alert={alert_kind} "
+            f"node_id={state.swarm_node_id} "
+            f"node_state={node_state} "
+            f"quorum_degraded={state.swarm_quorum_degraded} "
+            f"apply_mode={state.apply_mode}"
+        ),
+    )
+    send(bus, msg)
 
 
 # ── Event loop ────────────────────────────────────────────────────────────────
