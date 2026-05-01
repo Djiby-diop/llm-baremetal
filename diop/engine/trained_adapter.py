@@ -1,21 +1,33 @@
 from __future__ import annotations
 
 """
-DIOP Native Model — Trained Model Inference Adapter (v2)
+DIOP Native Model — Trained Model Inference Adapter (v3)
 =========================================================
-Uses PyTorch directly for inference when diop_model.pt is available.
-Falls back to the C FFI bridge, then to the rule-based mock.
+Inference path priority:
+  A': LlamaCpp GGUF  — fastest path when a .gguf exists + llama-cli available
+  A:  PyTorch .pt    — local model checkpoint
+  B:  C FFI .bin     — bare-metal binary bridge
+  C:  Rule-based     — always available fallback
 
 No external runtime, no HTTP, no network.
 """
 
 import json
+import shutil
 import struct
 from pathlib import Path
 
 from ..adapters.base import BaseGenerationAdapter, GenerationRequest, GenerationResponse
 
-_MODEL_DIR = Path(__file__).resolve().parent / "model"
+_MODEL_DIR  = Path(__file__).resolve().parent / "model"
+_DIOP_ROOT  = Path(__file__).resolve().parent.parent          # diop/
+_DJIB_ROOT  = _DIOP_ROOT.parent / "djib"                      # djib/
+
+# WinGet llama-cli (Windows) — mirrors diop/adapters/llama_cpp.py
+_WINGET_LLAMA = Path(
+    r"C:\Users\djibi\AppData\Local\Microsoft\WinGet\Packages"
+    r"\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama-cli.EXE"
+)
 
 try:
     import torch
@@ -28,6 +40,44 @@ try:
     HAS_NUMPY = True
 except ImportError:
     HAS_NUMPY = False
+
+
+def _find_gguf_for_model(model_name: str) -> Path | None:
+    """
+    Locate a .gguf file for the given model name.
+    Search order:
+      1. diop/models/<model_name>.gguf
+      2. djib/models/<model_name>.gguf
+      3. djib/models/djibion.gguf  (universal fallback)
+      4. djib/models/*.gguf        (first found)
+    """
+    search_dirs = [
+        _DIOP_ROOT / "models",
+        _DJIB_ROOT / "models",
+    ]
+    # Exact name match first
+    for d in search_dirs:
+        p = d / f"{model_name}.gguf"
+        if p.exists():
+            return p
+    # Djibion universal fallback
+    djibion = _DJIB_ROOT / "models" / "djibion.gguf"
+    if djibion.exists():
+        return djibion
+    # Any .gguf in djib/models/
+    djib_models = _DJIB_ROOT / "models"
+    if djib_models.is_dir():
+        for p in djib_models.glob("*.gguf"):
+            return p
+    return None
+
+
+def _llama_cli_available() -> str | None:
+    """Return path to llama-cli binary, or None if not found."""
+    if _WINGET_LLAMA.exists():
+        return str(_WINGET_LLAMA)
+    found = shutil.which("llama-cli") or shutil.which("llama-cli.exe")
+    return found
 
 
 class TrainedModelAdapter(BaseGenerationAdapter):
@@ -50,6 +100,15 @@ class TrainedModelAdapter(BaseGenerationAdapter):
         if not cfg_path.exists():
             cfg_path = _MODEL_DIR / "model_config.json"
 
+        # --- Path A': LlamaCpp GGUF inference (fastest, no Python deps) ---
+        gguf_path = _find_gguf_for_model(self.model_name)
+        llama_bin = _llama_cli_available()
+        if gguf_path and llama_bin:
+            try:
+                return self._infer_llama_cpp(request, gguf_path, llama_bin)
+            except Exception as e:
+                print(f"[Trained:{self.model_name}] LlamaCpp failed: {e} — trying PyTorch")
+
         # --- Path A: PyTorch inference ---
         if HAS_TORCH and pt_path.exists() and cfg_path.exists():
             return self._infer_torch(request, pt_path, cfg_path)
@@ -69,6 +128,58 @@ class TrainedModelAdapter(BaseGenerationAdapter):
             "  -> Using rule-based fallback."
         )
         return self._rule_fallback(request)
+
+    # ------------------------------------------------------------------
+    # Path A' — LlamaCpp GGUF inference (fastest path)
+    # ------------------------------------------------------------------
+
+    def _infer_llama_cpp(
+        self, request: GenerationRequest, gguf_path: Path, llama_bin: str
+    ) -> GenerationResponse:
+        import subprocess, time
+        from ..adapters.llama_cpp import _build_prompt as _llama_build_prompt
+
+        print(f"\n[DIOP Native] LlamaCpp inference: {gguf_path.name} via {Path(llama_bin).name}")
+        prompt = _llama_build_prompt(request)
+        cmd = [
+            llama_bin,
+            "--model",            str(gguf_path),
+            "--ctx-size",         "2048",
+            "--n-predict",        "512",
+            "--temp",             "0.7",
+            "--top-p",            "0.9",
+            "--chatml",
+            "--no-display-prompt",
+            "--prompt",           prompt,
+            "--log-disable",
+        ]
+        t0 = time.monotonic()
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+            encoding="utf-8", errors="replace",
+        )
+        elapsed = time.monotonic() - t0
+
+        output = result.stdout.strip()
+        marker = "<|im_start|>assistant\n"
+        idx = output.rfind(marker)
+        if idx != -1:
+            output = output[idx + len(marker):].strip()
+        output = output.removesuffix("<|im_end|>").strip()
+
+        content = self._parse_output(output)
+        return GenerationResponse(
+            summary=content.get("summary", output[:200]) if output else "[empty response]",
+            artifacts=content.get("artifacts", []),
+            risks=content.get("risks", []) + ([] if result.returncode == 0 else [f"exit_code={result.returncode}"]),
+            recommendations=content.get("recommendations", []),
+            metadata={
+                "provider":  "diop-llama-cpp",
+                "model":     str(gguf_path),
+                "elapsed_s": round(elapsed, 2),
+                "exit_code": result.returncode,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Path A — PyTorch direct inference

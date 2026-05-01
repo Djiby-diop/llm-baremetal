@@ -39,8 +39,17 @@ from .base import BaseGenerationAdapter, GenerationRequest, GenerationResponse
 
 _DJIB_ROOT = Path(__file__).parent.parent.parent / "djib" / "llama.cpp"
 
+# WinGet-installed llama.cpp on Windows
+_WINGET_LLAMA = Path(
+    r"C:\Users\djibi\AppData\Local\Microsoft\WinGet\Packages"
+    r"\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama-cli.EXE"
+)
+
 def _find_llama_cli() -> Path | None:
-    """Find llama-cli binary: djib/llama.cpp build first, then PATH."""
+    """Find llama-cli binary: WinGet → djib/llama.cpp build → PATH."""
+    # WinGet install takes priority on Windows (pre-built, no compilation needed)
+    if _WINGET_LLAMA.exists():
+        return _WINGET_LLAMA
     candidates = [
         _DJIB_ROOT / "build" / "bin" / "llama-cli",
         _DJIB_ROOT / "build" / "bin" / "llama-cli.exe",
