@@ -168,6 +168,25 @@ static void oo_decode_fields(OoBridgeConfig *cfg) {
             oo_strncpy_safe(cfg->journal_path, v, OO_BRIDGE_VAL_LEN);
         else if (oo_strcmp(k, "oo_kv_path") == 0)
             oo_strncpy_safe(cfg->kv_path, v, OO_BRIDGE_VAL_LEN);
+        else if (oo_strcmp(k, "llm.model_path") == 0) {
+            oo_strncpy_safe(cfg->model_path, v, OO_BRIDGE_VAL_LEN);
+            /* Auto-detect version from extension */
+            int vlen = oo_strlen(v);
+            if (vlen >= 6 &&
+                (v[vlen-6]=='.' || v[vlen-6]=='O') &&
+                v[vlen-5]=='O' && v[vlen-4]=='S' &&
+                v[vlen-3]=='I' && v[vlen-2]=='3' )
+                cfg->model_version = 3;
+            else if (vlen >= 5 && v[vlen-5]=='.' &&
+                     v[vlen-4]=='o' && v[vlen-3]=='o' &&
+                     v[vlen-2]=='s' && v[vlen-1]=='i' )
+                cfg->model_version = 2;
+            else if (vlen >= 6 && v[vlen-6]=='.' &&
+                     v[vlen-5]=='o' && v[vlen-4]=='o' &&
+                     v[vlen-3]=='s' && v[vlen-2]=='i' &&
+                     v[vlen-1]=='3' )
+                cfg->model_version = 3;
+        }
         else if (oo_strcmp(k, "llm.max_tokens") == 0)
             cfg->max_tokens = (int)oo_parse_ulong(v);
         else if (oo_strcmp(k, "llm.temperature") == 0)
@@ -272,6 +291,8 @@ void oo_bridge_print(const OoBridgeConfig *cfg) {
     if (cfg->top_k       > 0)   printf("[oo_bridge] override top_k=%d\n",        cfg->top_k);
     printf("[oo_bridge] journal_path=%s\n", cfg->journal_path);
     printf("[oo_bridge] kv_path=%s\n",      cfg->kv_path);
+    if (cfg->model_path[0])
+        printf("[oo_bridge] model=%s (v%d)\n", cfg->model_path, cfg->model_version);
 #endif
 }
 

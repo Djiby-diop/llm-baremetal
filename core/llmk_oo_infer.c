@@ -11,6 +11,8 @@
 
 #include "llmk_oo_infer.h"
 #include "../engine/ssm/bpe_tokenizer.h"
+#include "../engine/ssm/oosi_v3_loader.h"
+#include "../engine/ssm/oosi_v3_infer.h"
 
 // Freestanding NULL
 #ifndef NULL
@@ -23,6 +25,10 @@
 
 OosiGenCtx g_oosi_ctx;
 int        g_oosi_ready = 0;
+
+// ── OOSI v3 global context ──────────────────────────────────────────────────
+static OosiV3GenCtx g_v3_ctx;
+static int          g_v3_ready = 0;  // 1 = v3 initialized, use v3 path
 
 // BPE tokenizer (loaded from tokenizer.bin during boot)
 static BpeTokenizer  g_bpe;
@@ -113,6 +119,41 @@ SsmStatus llmk_oo_infer_init(
     if (s != SSM_OK) return s;
 
     g_oosi_ready = 1;
+    return SSM_OK;
+}
+
+// ============================================================
+// llmk_oo_infer_init_v3 — OOSI v3 self-contained format
+// ============================================================
+
+SsmStatus llmk_oo_infer_init_v3(
+    const OosiV3Weights *w,
+    ssm_f32 *scratch,
+    ssm_f32 *logits,
+    ssm_f32 *h_state,
+    ssm_f32 *conv_buf,
+    int     *conv_pos,
+    ssm_f32 *halt_h1,
+    ssm_f32 *halt_h2,
+    ssm_f32 *halt_out,
+    float    halt_threshold,
+    float    temperature,
+    float    top_p,
+    uint32_t seed,
+    int      max_tokens
+) {
+    if (!w) return SSM_ERR_BADCONFIG;
+
+    SsmStatus s = oosi_v3_gen_ctx_init(
+        &g_v3_ctx, w,
+        scratch, logits, h_state, conv_buf, conv_pos,
+        halt_h1, halt_h2, halt_out,
+        halt_threshold, temperature, top_p, seed, max_tokens
+    );
+    if (s != SSM_OK) return s;
+
+    g_v3_ready   = 1;
+    g_oosi_ready = 1;  // unified ready flag for llmk_oo_infer_is_ready()
     return SSM_OK;
 }
 
@@ -215,10 +256,43 @@ int llmk_oo_infer_think(
     out->halted_naturally = 0;
     out->text[0]          = '\0';
 
-    // Reset recurrent state
+    // ── OOSI v3 path ────────────────────────────────────────
+    if (g_v3_ready) {
+        oosi_v3_gen_ctx_reset(&g_v3_ctx);
+
+        _ThinkCallbackCtx cb_ctx = {
+            .out            = out,
+            .tok            = g_bpe_ready ? &g_bpe : NULL,
+            .text_pos       = 0,
+            .final_loop_set = 0,
+        };
+
+        // v3 uses OosiV3HaltResult — same fields as OosiHaltResult,
+        // so we wrap with a thin adapter callback
+        typedef struct { _ThinkCallbackCtx *inner; } _V3AdaptCtx;
+        _V3AdaptCtx adapt = { &cb_ctx };
+
+        void v3_cb_adapter(int tid, const OosiV3HaltResult *rv, void *ud) {
+            _V3AdaptCtx *a = (_V3AdaptCtx *)ud;
+            // Cast v3 result to v2-compatible struct (same binary layout)
+            OosiHaltResult rv2;
+            rv2.halt_prob = rv->halt_prob;
+            rv2.halted    = rv->halted;
+            rv2.loop      = rv->loop;
+            _think_cb(tid, &rv2, a->inner);
+        }
+
+        int n = oosi_v3_generate(
+            &g_v3_ctx,
+            prompt_tokens, prompt_len,
+            v3_cb_adapter, &adapt
+        );
+        return n;
+    }
+
+    // ── OOSI v2 path (legacy) ────────────────────────────────
     oosi_gen_ctx_reset(&g_oosi_ctx);
 
-    // Build callback context
     _ThinkCallbackCtx cb_ctx = {
         .out          = out,
         .tok          = g_bpe_ready ? &g_bpe : NULL,
@@ -226,7 +300,6 @@ int llmk_oo_infer_think(
         .final_loop_set = 0,
     };
 
-    // Run generation
     int n = oosi_generate(
         &g_oosi_ctx,
         prompt_tokens, prompt_len,
