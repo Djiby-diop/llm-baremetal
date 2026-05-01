@@ -201,9 +201,7 @@ static int llmk_ascii_streq(const char *a, const char *b) {
 }
 
 static void llmk_mind_store_attach_format(LlmkModelFormat fmt) {
-    const char *fmt_s = "unknown";
-    if (fmt == LLMK_MODEL_FMT_GGUF) fmt_s = "gguf";
-    else if (fmt == LLMK_MODEL_FMT_BIN) fmt_s = "bin";
+    const char *fmt_s = llmk_model_format_ascii(fmt);
     llmk_copy_ascii_bounded(g_mind_runtime_state.attach_format,
                             (int)sizeof(g_mind_runtime_state.attach_format),
                             fmt_s);
@@ -211,10 +209,14 @@ static void llmk_mind_store_attach_format(LlmkModelFormat fmt) {
 
 static void llmk_mind_mark_attach_active(LlmkModelFormat fmt) {
     g_mind_runtime_state.attach_active = g_mind_runtime_state.attach_requested ? 1 : 0;
+    const char *kind = (fmt == LLMK_MODEL_FMT_GGUF)  ? "attach-gguf"  :
+                       (fmt == LLMK_MODEL_FMT_BIN)   ? "attach-bin"   :
+                       (fmt == LLMK_MODEL_FMT_OOSI3) ? "attach-oosi3" :
+                       (fmt == LLMK_MODEL_FMT_OOSI2) ? "attach-oosi2" :
+                                                        "attach-model";
     llmk_copy_ascii_bounded(g_mind_runtime_state.attach_kind,
                             (int)sizeof(g_mind_runtime_state.attach_kind),
-                            (fmt == LLMK_MODEL_FMT_GGUF) ? "attach-gguf" :
-                            (fmt == LLMK_MODEL_FMT_BIN) ? "attach-bin" : "attach-model");
+                            kind);
     llmk_mind_store_attach_format(fmt);
     llmk_mind_set_attach_validation("validated");
 }
@@ -1787,13 +1789,19 @@ static LlmkModelFormat llmk_detect_model_format(EFI_FILE_HANDLE f) {
     EFI_STATUS st = llmk_peek_magic4(f, m);
     if (EFI_ERROR(st)) return LLMK_MODEL_FMT_UNKNOWN;
     if (m[0] == 'G' && m[1] == 'G' && m[2] == 'U' && m[3] == 'F') return LLMK_MODEL_FMT_GGUF;
+    // OOSI v3: magic "OOS3" = 0x4F4F5333
+    if (m[0] == 'O' && m[1] == 'O' && m[2] == 'S' && m[3] == '3') return LLMK_MODEL_FMT_OOSI3;
+    // OOSI v2: magic "OOSS" = 0x4F4F5353
+    if (m[0] == 'O' && m[1] == 'O' && m[2] == 'S' && m[3] == 'S') return LLMK_MODEL_FMT_OOSI2;
     // .bin (llama2.c weights) does not have a magic; treat as BIN by default.
     return LLMK_MODEL_FMT_BIN;
 }
 
 static const char *llmk_model_format_ascii(LlmkModelFormat fmt) {
-    if (fmt == LLMK_MODEL_FMT_GGUF) return "gguf";
-    if (fmt == LLMK_MODEL_FMT_BIN) return "bin";
+    if (fmt == LLMK_MODEL_FMT_GGUF)  return "gguf";
+    if (fmt == LLMK_MODEL_FMT_BIN)   return "bin";
+    if (fmt == LLMK_MODEL_FMT_OOSI3) return "oosi3";
+    if (fmt == LLMK_MODEL_FMT_OOSI2) return "oosi2";
     return "unknown";
 }
 

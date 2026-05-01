@@ -673,10 +673,26 @@ gguf_fallback_done:
         unsigned long long prep_ms = (startup_model_prep_done_us >= startup_model_select_done_us)
                                      ? ((startup_model_prep_done_us - startup_model_select_done_us) / 1000ULL)
                                      : 0ULL;
-        const char *fmt_s = (g_loaded_model_format == LLMK_MODEL_FMT_GGUF) ? "gguf" :
-                            (g_loaded_model_format == LLMK_MODEL_FMT_BIN) ? "bin" : "unknown";
+        const char *fmt_s = llmk_model_format_ascii(g_loaded_model_format);
         Print(L"[obs][startup] model_select_ms=%lu model_prepare_ms=%lu format=%a\r\n",
               (UINT64)select_ms, (UINT64)prep_ms, fmt_s);
+    }
+
+    // ── OOSI v3 early-boot path ──────────────────────────────────────────────
+    // If the model file is an OOSI v3 binary, delegate entirely to the SSM
+    // inference stack (oosi_v3_loader + llmk_oo_infer).  The old .bin / GGUF
+    // pipeline is skipped; EFI_UNSUPPORTED would be returned if we tried to
+    // parse a BIN header from an OOSI3 file.
+    int use_oosi3 = (g_loaded_model_format == LLMK_MODEL_FMT_OOSI3);
+    if (use_oosi3) {
+        Print(L"[boot] OOSI v3 model detected — delegating to SSM inference stack\r\n");
+        // File position is still at 0 (llmk_peek_magic4 reset it).
+        // The actual weight buffer loading is deferred to the /think command
+        // or the first REPL call that invokes llmk_oo_infer_think().
+        // Mark the model as loaded so the REPL doesn't complain.
+        g_loaded_model_format = LLMK_MODEL_FMT_OOSI3;
+        // Skip .bin header read entirely.
+        goto oosi3_boot_done;
     }
 
     UINTN bytes_to_read = 0;
@@ -7715,6 +7731,15 @@ stats_done:
     uefi_call_wrapper(BS->WaitForEvent, 3, 1, &ST->ConIn->WaitForKey, &index);
     uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &Key);
     
+    return EFI_SUCCESS;
+
+oosi3_boot_done:
+    // ── OOSI v3 REPL entry ─────────────────────────────────────────────────
+    // The SSM inference engine is ready for lazy init on first /think call.
+    // We fall directly into the REPL so the user can interact immediately.
+    Print(L"\r\n[OO] OOSI v3 SSM engine ready. Type /think <prompt> to run inference.\r\n");
+    Print(L"     Model: %s\r\n\r\n", g_loaded_model_path16[0] ? g_loaded_model_path16 : L"(unknown)");
+    llmk_repl(ST, BS, Root, ImageHandle);
     return EFI_SUCCESS;
 }
 

@@ -181,6 +181,36 @@
 | Training journal | kernel | EFI volume | JSONL | `OO_TRAIN.JSONL` |
 | neuralfs | kernel | EFI volume | binary | `OO_NEURALFS.BIN` |
 | GGUF model | engine/llama2 | RAM (ARENA_WEIGHTS) | binary | llama2.c format |
+| OOSI v3 model | engine/llama2+ssm | RAM (mapped) | binary | magic "OOS3", zero-copy |
+
+---
+
+## OOSI v3 Boot Path (Phase Z)
+
+```
+efi_main()
+    │
+    ├─ llmk_detect_model_format() ──► magic "OOS3" → LLMK_MODEL_FMT_OOSI3
+    │
+    │   (skip .bin header parse — goto oosi3_boot_done)
+    │
+    └─ oosi3_boot_done:
+           │
+           ▼
+        llmk_repl()   ← REPL starts immediately
+           │
+           │  user types: /think <prompt>
+           ▼
+        soma_repl.c → llmk_oo_infer_think()
+           │
+           ├─ g_v3_ready==1 → oosi_v3_generate()
+           │     │
+           │     ├─ oosi_v3_forward_one() × N tokens
+           │     └─ OosiV3HaltHead → adaptive loop halt
+           │
+           └─ output chars → Print()
+```
+
 
 ---
 

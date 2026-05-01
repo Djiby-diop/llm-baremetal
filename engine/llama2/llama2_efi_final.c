@@ -117,6 +117,8 @@ typedef enum {
     LLMK_MODEL_FMT_UNKNOWN = 0,
     LLMK_MODEL_FMT_BIN = 1,
     LLMK_MODEL_FMT_GGUF = 2,
+    LLMK_MODEL_FMT_OOSI3 = 3,  // OOSI v3: self-contained Mamba+HaltHead, magic "OOS3"
+    LLMK_MODEL_FMT_OOSI2 = 4,  // OOSI v2: legacy OOSS magic
 } LlmkModelFormat;
 
 static LlmkModelFormat g_loaded_model_format = LLMK_MODEL_FMT_UNKNOWN;
