@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-04-09T17:58:05.543124+00:00",
-  "total_samples": 312,
+  "generated_at": "2026-05-01T00:34:17.304797+00:00",
+  "total_samples": 331,
   "shuffle": true,
   "seed": 42,
   "datasets": {
@@ -41,23 +41,23 @@
       "default_domain": "CODE"
     },
     "swarm_coordination.jsonl": {
-      "raw_count": 7,
+      "raw_count": 26,
       "weight": 1,
-      "weighted_count": 7,
+      "weighted_count": 26,
       "default_domain": "OO_META"
     }
   },
   "domain_distribution": {
-    "OO_META": 196,
+    "OO_META": 212,
+    "SELF": 24,
+    "CODE": 13,
     "REASONING": 15,
     "MATH": 57,
-    "SWARM": 7,
-    "SELF": 24,
-    "CODE": 13
+    "SWARM": 10
   },
   "halt_prob_stats": {
-    "count": 312,
-    "mean": 0.1368,
+    "count": 331,
+    "mean": 0.1376,
     "min": 0.01,
     "max": 0.9
   }
