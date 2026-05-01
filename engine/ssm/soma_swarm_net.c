@@ -1,8 +1,12 @@
 /* soma_swarm_net.c — Phase Y: Distributed Swarm Consensus Implementation */
 
 #include "soma_swarm_net.h"
+#ifdef UEFI_BUILD
 #include <efi.h>
 #include <efilib.h>
+#else
+#include "efi_compat.h"
+#endif
 
 /* ── CRC32 (bare-metal, no stdlib) ──────────────────────────────────────────── */
 

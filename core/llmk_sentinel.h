@@ -1,8 +1,12 @@
 #ifndef LLMK_SENTINEL_H
 #define LLMK_SENTINEL_H
 
+#ifdef UEFI_BUILD
 #include <efi.h>
 #include <efilib.h>
+#else
+#include "../engine/ssm/efi_compat.h"
+#endif
 
 #include "llmk_zones.h"
 #include "llmk_log.h"

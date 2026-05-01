@@ -17,9 +17,13 @@
 #include "soma_memory.h"
 
 // EFI forward declaration — included by the god file before this header
-#ifndef EFI_FILE_PROTOCOL
+#ifndef EFI_FILE_PROTOCOL_STUB
+#ifdef UEFI_BUILD
 #include <efi.h>
 #include <efilib.h>
+#else
+#include "efi_compat.h"
+#endif
 #endif
 
 #ifdef __cplusplus

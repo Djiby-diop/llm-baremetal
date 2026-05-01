@@ -16,9 +16,13 @@
 
 #include "soma_dna.h"
 
-#ifndef EFI_FILE_PROTOCOL
+#ifndef EFI_FILE_PROTOCOL_STUB
+#ifdef UEFI_BUILD
 #include <efi.h>
 #include <efilib.h>
+#else
+#include "efi_compat.h"
+#endif
 #endif
 
 #ifdef __cplusplus

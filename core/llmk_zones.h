@@ -1,8 +1,12 @@
 #ifndef LLMK_ZONES_H
 #define LLMK_ZONES_H
 
+#ifdef UEFI_BUILD
 #include <efi.h>
 #include <efilib.h>
+#else
+#include "../engine/ssm/efi_compat.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
