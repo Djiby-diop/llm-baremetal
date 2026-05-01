@@ -203,6 +203,9 @@ class BotBusState:
     diop_worker: str = "none"         # last active DIOP worker
     diop_last_kind: str = "none"      # last DiopsEvent kind
     diop_last_ts: int = 0             # epoch-s of last diops_event
+    # Phase X: DIOP trained-model tracking
+    diop_model_count: int = 0               # number of trained models available
+    diop_last_infer_summary: str = ""       # last inference_result summary
 
 
 # ── Reactor ───────────────────────────────────────────────────────────────────
@@ -246,6 +249,12 @@ def react_to_messages(
             # Phase T: react to DIOP gateway worker events
             diops_logs = _handle_diops_event(state, msg)
             logs.extend(diops_logs)
+        elif msg.kind == "inference_result":
+            # Phase X: DIOP trained-model inference result
+            logs.extend(_handle_inference_result(state, msg))
+        elif msg.kind == "diops_model_status":
+            # Phase X: DIOP trained-model registry broadcast
+            logs.extend(_handle_diops_model_status(state, msg))
     return logs
 
 
@@ -388,6 +397,61 @@ def _handle_diops_event(state: BotBusState, msg: BusMessage) -> list[str]:
         # Bare-metal worker produced code — log as uart_event for kernel context
         logs.append(f"[diops] 📦 baremetal worker result: {summary[:100]}")
 
+    elif kind == "worker_result":
+        # Generic worker result — record for later cycles
+        logs.append(f"[diops] 💡 worker result ({worker}): {summary[:120]}")
+        state.diop_last_infer_summary = summary[:200]
+
+    return logs
+
+
+def _handle_inference_result(state: BotBusState, msg: BusMessage) -> list[str]:
+    """
+    Phase X: Handle inference_result messages emitted by diop_model.rs.
+
+    Payload: "model=<M> goal=<G> status=ok|err summary=<TEXT>"
+    """
+    logs: list[str] = []
+    payload = msg.payload
+
+    model   = _kv(payload, "model")  or "unknown"
+    goal    = _kv(payload, "goal")   or ""
+    status  = _kv(payload, "status") or "unknown"
+
+    summary_idx = payload.find("summary=")
+    summary = payload[summary_idx + 8:] if summary_idx != -1 else ""
+
+    state.diop_worker             = model
+    state.diop_last_kind          = "inference_result"
+    state.diop_last_ts            = msg.ts_epoch_s
+    state.diop_last_infer_summary = summary[:200]
+    state.diop_model_count        = state.diop_model_count + 1
+
+    logs.append(
+        f"[diops-model] inference_result: model={model} goal={goal[:40]} "
+        f"status={status} summary={summary[:80]}"
+    )
+
+    if status == "err":
+        logs.append(f"[diops-model] ⚠️  inference error from {model} — no mode change")
+
+    return logs
+
+
+def _handle_diops_model_status(state: BotBusState, msg: BusMessage) -> list[str]:
+    """
+    Phase X: Handle diops_model_status broadcasts from diop_model.rs.
+
+    Payload: "models=name1(pt=yes,...)|name2(...) count=N"
+    """
+    logs: list[str] = []
+    count_s = _kv(msg.payload, "count") or "0"
+    try:
+        n = int(count_s)
+    except ValueError:
+        n = 0
+    state.diop_model_count = n
+    logs.append(f"[diops-model] registry: {n} trained model(s) available")
     return logs
 
 
@@ -447,6 +511,10 @@ def render_bus_status(state: BotBusState) -> str:
         f"  swarm_node_state : {state.swarm_node_state}\n"
         f"  swarm_quorum_deg : {swarm_degraded_str}\n"
         f"  last_swarm_event : {state.last_swarm_event_ts}\n"
+        f"  diop_worker      : {state.diop_worker}\n"
+        f"  diop_last_kind   : {state.diop_last_kind}\n"
+        f"  diop_model_count : {state.diop_model_count}\n"
+        f"  diop_last_infer  : {state.diop_last_infer_summary[:60]}\n"
     )
 
 
