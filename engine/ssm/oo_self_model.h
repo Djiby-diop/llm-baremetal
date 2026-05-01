@@ -19,8 +19,8 @@
 #pragma once
 
 #include "../../core/llmk_zones.h"
-#include "../ssm/conscience.h"
-#include "../ssm/metabion.h"
+#include "conscience-engine/core/conscience.h"
+#include "metabion-engine/core/metabion.h"
 #include "../ssm/soma_warden.h"
 #include "../ssm/soma_dna.h"
 #include "oo_quantum_rng.h"
@@ -90,7 +90,7 @@ static inline void oo_self_model_update(
     const LlmkZones         *zones,
     const ConscienceEngine  *conscience,
     const MetabionEngine    *metabion,
-    const SomaWarden        *warden,
+    const SomaWardenCtx     *warden,
     const SomaDNA           *dna,
     unsigned int             total_tokens_gen)
 {
@@ -192,8 +192,14 @@ static inline void oo_self_model_print(const OoSelfModel *sm) {
           sm->rdrand_ok ? L"hw" : L"sw", sm->quantum_seeds);
     Print(L"  Prefix       : ");
     if (sm->prefix_valid) {
-        for (int i = 0; sm->prefix[i]; i++)
-            Print(L"%c", (CHAR16)(unsigned char)sm->prefix[i]);
+        CHAR16 wbuf[256]; // SAFE: bounded buffer for self-model prefix display (prefix is max 256 bytes)
+        int i = 0;
+        while (sm->prefix[i] && i < 255) {
+            wbuf[i] = (CHAR16)(unsigned char)sm->prefix[i];
+            i++;
+        }
+        wbuf[i] = 0;
+        Print(L"%s", wbuf);
     } else {
         Print(L"(call oo_self_model_to_prefix first)");
     }

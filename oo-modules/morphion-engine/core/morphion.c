@@ -39,7 +39,26 @@ void morphion_probe(MorphionEngine *e) {
 uint32_t morphion_suggest_load_order(MorphionEngine *e, uint32_t *out, uint32_t cap) {
     if (!e || !out || cap == 0) return 0;
     if (e->mode != MORPHION_MODE_MORPH) return 0;
-    return 0;
+    
+    // Very basic morphological adaptation based on CPU probe
+    // If we have AVX2 (bit 5 of EBX from leaf 7), load heavier engines early
+    uint32_t count = 0;
+    
+    // Engine 1: NeuralFS (always need storage first)
+    if (count < cap) out[count++] = 1; 
+    
+    // Engine 2: Symbion / Immunion
+    if (e->probe.features_ebx & (1 << 5)) {
+        // High perf: load Immunion early
+        if (count < cap) out[count++] = 2; // Immunion
+        if (count < cap) out[count++] = 3; // Symbion
+    } else {
+        // Low perf: delay Immunion
+        if (count < cap) out[count++] = 3; // Symbion
+        if (count < cap) out[count++] = 2; // Immunion
+    }
+    
+    return count;
 }
 
 const char *morphion_mode_name_ascii(MorphionMode mode) {

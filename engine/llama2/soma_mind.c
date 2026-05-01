@@ -2381,7 +2381,107 @@ static LimbionEngine    g_limbion;      /* 2D affective state modulates inferenc
 static ChronionEngine   g_chronion;     /* temporal self-awareness (boot/step/DNA age) */
 static TrophionEngine   g_trophion;     /* compute hunger (idle→verbose, gorged→terse) */
 static MirrorionEngine  g_mirrorion;    /* self-introspection Q/A → OO_MIRROR.JSONL */
-static ThanatosionEngine g_thanatosion; /* graceful death + DNA-preserving rebirth */
+typedef struct {
+    int active_role; // 0=none, 1=core, 2=warden, 3=architect
+    int external_learning_active;
+    UINT64 experiences_collected;
+} DiopIntelligenceCluster;
+
+static DiopIntelligenceCluster g_diop_cluster;
+
+extern EFI_STATUS llmk_open_binary_file_append(EFI_FILE_HANDLE *out_file, const CHAR16 *path);
+extern EFI_STATUS llmk_file_write_bytes(EFI_FILE_HANDLE f, const void *buf, UINTN count);
+
+void llmk_diop_experience_capture(const char *prompt, const char *response, int score) {
+    if (g_diopion.mode == DIOPION_MODE_OFF) return;
+    
+    g_diop_cluster.experiences_collected++;
+    
+    // Build JSONL payload
+    // Format: {"prompt": "...", "response": "...", "score": X}
+    char jsonl[1024];
+    jsonl[0] = 0;
+    
+    // Very rudimentary JSON encoding for bare-metal
+    int p = 0;
+    const char *pfx = "{\"prompt\": \"";
+    for (int i = 0; pfx[i] && p < (int)sizeof(jsonl) - 1; i++) jsonl[p++] = pfx[i];
+    
+    if (prompt) {
+        for (int i = 0; prompt[i] && p < (int)sizeof(jsonl) - 1; i++) {
+            char c = prompt[i];
+            if (c == '"' || c == '\\' || c == '\n' || c == '\r') c = '_'; // Sanitize
+            jsonl[p++] = c;
+        }
+    }
+    
+    const char *mid = "\", \"response\": \"";
+    for (int i = 0; mid[i] && p < (int)sizeof(jsonl) - 1; i++) jsonl[p++] = mid[i];
+    
+    if (response) {
+        for (int i = 0; response[i] && p < (int)sizeof(jsonl) - 1; i++) {
+            char c = response[i];
+            if (c == '"' || c == '\\' || c == '\n' || c == '\r') c = '_'; // Sanitize
+            jsonl[p++] = c;
+        }
+    }
+    
+    const char *sfx = "\", \"score\": ";
+    for (int i = 0; sfx[i] && p < (int)sizeof(jsonl) - 1; i++) jsonl[p++] = sfx[i];
+    
+    // Append score (integer)
+    char num[32];
+    int score_abs = score < 0 ? -score : score;
+    int np = 0;
+    if (score_abs == 0) {
+        num[np++] = '0';
+    } else {
+        while (score_abs > 0 && np < 31) {
+            num[np++] = '0' + (score_abs % 10);
+            score_abs /= 10;
+        }
+        if (score < 0 && np < 31) num[np++] = '-';
+    }
+    for (int i = np - 1; i >= 0 && p < (int)sizeof(jsonl) - 1; i--) {
+        jsonl[p++] = num[i];
+    }
+    
+    if (p < (int)sizeof(jsonl) - 2) {
+        jsonl[p++] = '}';
+        jsonl[p++] = '\n';
+    }
+    jsonl[p] = 0;
+    
+    // Write to persistent storage
+    EFI_FILE_HANDLE f = NULL;
+    EFI_STATUS st = llmk_open_binary_file_append(&f, L"DIOP_EXP.JSONL");
+    if (!EFI_ERROR(st) && f) {
+        llmk_file_write_bytes(f, jsonl, (UINTN)p);
+        uefi_call_wrapper(f->Flush, 1, f);
+        uefi_call_wrapper(f->Close, 1, f);
+    }
+    
+    if (g_diop_cluster.experiences_collected % 5 == 0) {
+        Print(L"[DIOP] Experience Cluster: %llu experiences indexed.\r\n", g_diop_cluster.experiences_collected);
+    }
+}
+
+// Mandatory Orchestrator: chooses the model based on prompt complexity
+int llmk_diop_orchestrate_select_model(const char *prompt) {
+    if (g_diopion.mode != DIOPION_MODE_AUTONOMOUS) return 0; // Default to Core
+    
+    // Simple heuristic: if prompt contains "security" or "audit", use Warden
+    if (llmk_ascii_strstr(prompt, "security") || llmk_ascii_strstr(prompt, "audit")) {
+        return 2; // Warden
+    }
+    
+    // If prompt contains "design" or "plan", use Architect
+    if (llmk_ascii_strstr(prompt, "design") || llmk_ascii_strstr(prompt, "plan")) {
+        return 3; // Architect
+    }
+    
+    return 1; // Core
+}
 
 /* Phase E: OO Self-Model — runtime introspection */
 static OoSelfModel g_oo_self_model;

@@ -1,0 +1,1220 @@
+{
+  "schema": "oo-prime-report-v1",
+  "generated_at": "2026-04-09T13:25:57.054749+00:00",
+  "health_trend": {
+    "cycles": 1,
+    "avg_observed_score": 0.425,
+    "min_observed_score": 0.35,
+    "max_observed_score": 0.95,
+    "per_cycle": [
+      {
+        "cycle": 1,
+        "module_count": 42,
+        "avg_score": 0.425,
+        "min_score": 0.35,
+        "max_score": 0.95
+      }
+    ]
+  },
+  "cycles": [
+    {
+      "cycle_index": 1,
+      "started_at": "2026-04-09T13:25:56.964517+00:00",
+      "ended_at": "2026-04-09T13:25:57.052614+00:00",
+      "root": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal",
+      "observed_modules": [
+        {
+          "name": "calibrion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\calibrion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "cellion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\cellion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "chronion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\chronion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "collectivion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\collectivion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "compatibilion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\compatibilion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "conscience-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\conscience-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "diagnostion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\diagnostion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "diopion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\diopion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "djibion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\djibion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "dreamion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\dreamion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "evolvion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\evolvion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "ghost-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\ghost-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "immunion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\immunion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "limbion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\limbion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "memorion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\memorion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "metabion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\metabion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "mirrorion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\mirrorion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "morphion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\morphion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "neuralfs-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\neuralfs-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-bot",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-bot",
+          "has_readme": true,
+          "has_tests": true,
+          "has_policy": false,
+          "score": 0.95,
+          "signals": [
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-bus",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-bus",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-crypto",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-crypto",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-dplus",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-dplus",
+          "has_readme": true,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.65,
+          "signals": [
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-guard",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-guard",
+          "has_readme": true,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.65,
+          "signals": [
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-hal",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-hal",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-ipc",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-ipc",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-kernel-rust",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-kernel-rust",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-lab",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-lab",
+          "has_readme": true,
+          "has_tests": true,
+          "has_policy": false,
+          "score": 0.95,
+          "signals": [
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-metadriver",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-metadriver",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-model-repo",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-model-repo",
+          "has_readme": true,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.65,
+          "signals": [
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-modules",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-modules",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-multicore",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-multicore",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-net",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-net",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-sim",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-sim",
+          "has_readme": true,
+          "has_tests": true,
+          "has_policy": false,
+          "score": 0.95,
+          "signals": [
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "oo-storage",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-storage",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "orchestrion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\orchestrion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "OS-G (Operating System Genesis)",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\OS-G (Operating System Genesis)",
+          "has_readme": true,
+          "has_tests": false,
+          "has_policy": true,
+          "score": 0.8,
+          "signals": [
+            "missing_tests"
+          ]
+        },
+        {
+          "name": "pheromion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\pheromion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "symbion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\symbion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "synaption-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\synaption-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "thanatosion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\thanatosion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        },
+        {
+          "name": "trophion-engine",
+          "path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\trophion-engine",
+          "has_readme": false,
+          "has_tests": false,
+          "has_policy": false,
+          "score": 0.35,
+          "signals": [
+            "missing_readme",
+            "missing_tests",
+            "missing_local_policy"
+          ]
+        }
+      ],
+      "accepted_decisions": [],
+      "blocked_decisions": [
+        {
+          "action": "stabilize_module",
+          "target": "calibrion-engine",
+          "reason": "requires simulation approval: action=stabilize_module; run with --simulate-ok after simulation",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.048543+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\calibrion-engine"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "oo-storage",
+          "reason": "requires simulation approval: action=stabilize_module; run with --simulate-ok after simulation",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.049041+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-storage"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "synaption-engine",
+          "reason": "requires simulation approval: action=stabilize_module; run with --simulate-ok after simulation",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.049093+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\synaption-engine"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "thanatosion-engine",
+          "reason": "requires simulation approval: action=stabilize_module; run with --simulate-ok after simulation",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.049106+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\thanatosion-engine"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "trophion-engine",
+          "reason": "requires simulation approval: action=stabilize_module; run with --simulate-ok after simulation",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.049122+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\trophion-engine"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "cellion-engine",
+          "reason": "requires simulation approval: action=stabilize_module; run with --simulate-ok after simulation",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.048584+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\cellion-engine"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "chronion-engine",
+          "reason": "requires simulation approval: action=stabilize_module; run with --simulate-ok after simulation",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.048608+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\chronion-engine"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "collectivion-engine",
+          "reason": "requires simulation approval: action=stabilize_module; run with --simulate-ok after simulation",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.048627+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\collectivion-engine"
+          }
+        }
+      ],
+      "deferred_decisions": [
+        {
+          "action": "stabilize_module",
+          "target": "oo-kernel-rust",
+          "reason": "deferred by target cooldown: target=oo-kernel-rust gap=1 cooldown=1",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.048973+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-kernel-rust"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "oo-metadriver",
+          "reason": "deferred by target cooldown: target=oo-metadriver gap=1 cooldown=1",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.048986+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-metadriver"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "oo-modules",
+          "reason": "deferred by target cooldown: target=oo-modules gap=1 cooldown=1",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.048999+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-modules"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "oo-multicore",
+          "reason": "deferred by target cooldown: target=oo-multicore gap=1 cooldown=1",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.049013+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-multicore"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "oo-net",
+          "reason": "deferred by target cooldown: target=oo-net gap=1 cooldown=1",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.049028+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-net"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "orchestrion-engine",
+          "reason": "deferred by target cooldown: target=orchestrion-engine gap=1 cooldown=1",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.049054+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\orchestrion-engine"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "pheromion-engine",
+          "reason": "deferred by target cooldown: target=pheromion-engine gap=1 cooldown=1",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.049067+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\pheromion-engine"
+          }
+        },
+        {
+          "action": "stabilize_module",
+          "target": "symbion-engine",
+          "reason": "deferred by target cooldown: target=symbion-engine gap=1 cooldown=1",
+          "severity": "high",
+          "created_at": "2026-04-09T13:25:57.049080+00:00",
+          "metadata": {
+            "score": 0.35,
+            "signals": [
+              "missing_readme",
+              "missing_tests",
+              "missing_local_policy"
+            ],
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\symbion-engine"
+          }
+        },
+        {
+          "action": "propose_module_doc_patch",
+          "target": "oo-kernel-rust",
+          "reason": "deferred by target cooldown: target=oo-kernel-rust gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.048980+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-kernel-rust"
+          }
+        },
+        {
+          "action": "propose_module_test_scaffold",
+          "target": "oo-kernel-rust",
+          "reason": "deferred by target cooldown: target=oo-kernel-rust gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.048975+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-kernel-rust"
+          }
+        },
+        {
+          "action": "propose_test_scaffold",
+          "target": "oo-kernel-rust",
+          "reason": "deferred by target cooldown: target=oo-kernel-rust gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.048978+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-kernel-rust"
+          }
+        },
+        {
+          "action": "propose_module_doc_patch",
+          "target": "oo-metadriver",
+          "reason": "deferred by target cooldown: target=oo-metadriver gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.048993+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-metadriver"
+          }
+        },
+        {
+          "action": "propose_module_test_scaffold",
+          "target": "oo-metadriver",
+          "reason": "deferred by target cooldown: target=oo-metadriver gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.048988+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-metadriver"
+          }
+        },
+        {
+          "action": "propose_test_scaffold",
+          "target": "oo-metadriver",
+          "reason": "deferred by target cooldown: target=oo-metadriver gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.048991+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-metadriver"
+          }
+        },
+        {
+          "action": "propose_module_doc_patch",
+          "target": "oo-modules",
+          "reason": "deferred by target cooldown: target=oo-modules gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049006+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-modules"
+          }
+        },
+        {
+          "action": "propose_module_test_scaffold",
+          "target": "oo-modules",
+          "reason": "deferred by target cooldown: target=oo-modules gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049001+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-modules"
+          }
+        },
+        {
+          "action": "propose_test_scaffold",
+          "target": "oo-modules",
+          "reason": "deferred by target cooldown: target=oo-modules gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049004+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-modules"
+          }
+        },
+        {
+          "action": "propose_module_doc_patch",
+          "target": "oo-multicore",
+          "reason": "deferred by target cooldown: target=oo-multicore gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049020+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-multicore"
+          }
+        },
+        {
+          "action": "propose_module_test_scaffold",
+          "target": "oo-multicore",
+          "reason": "deferred by target cooldown: target=oo-multicore gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049015+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-multicore"
+          }
+        },
+        {
+          "action": "propose_test_scaffold",
+          "target": "oo-multicore",
+          "reason": "deferred by target cooldown: target=oo-multicore gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049017+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-multicore"
+          }
+        },
+        {
+          "action": "propose_module_doc_patch",
+          "target": "oo-net",
+          "reason": "deferred by target cooldown: target=oo-net gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049036+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-net"
+          }
+        },
+        {
+          "action": "propose_module_test_scaffold",
+          "target": "oo-net",
+          "reason": "deferred by target cooldown: target=oo-net gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049031+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-net"
+          }
+        },
+        {
+          "action": "propose_test_scaffold",
+          "target": "oo-net",
+          "reason": "deferred by target cooldown: target=oo-net gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049033+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-net"
+          }
+        },
+        {
+          "action": "propose_module_doc_patch",
+          "target": "orchestrion-engine",
+          "reason": "deferred by target cooldown: target=orchestrion-engine gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049061+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\orchestrion-engine"
+          }
+        },
+        {
+          "action": "propose_module_test_scaffold",
+          "target": "orchestrion-engine",
+          "reason": "deferred by target cooldown: target=orchestrion-engine gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049056+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\orchestrion-engine"
+          }
+        },
+        {
+          "action": "propose_test_scaffold",
+          "target": "orchestrion-engine",
+          "reason": "deferred by target cooldown: target=orchestrion-engine gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049059+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\orchestrion-engine"
+          }
+        },
+        {
+          "action": "propose_module_doc_patch",
+          "target": "pheromion-engine",
+          "reason": "deferred by target cooldown: target=pheromion-engine gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049074+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\pheromion-engine"
+          }
+        },
+        {
+          "action": "propose_module_test_scaffold",
+          "target": "pheromion-engine",
+          "reason": "deferred by target cooldown: target=pheromion-engine gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049070+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\pheromion-engine"
+          }
+        },
+        {
+          "action": "propose_test_scaffold",
+          "target": "pheromion-engine",
+          "reason": "deferred by target cooldown: target=pheromion-engine gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049072+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\pheromion-engine"
+          }
+        },
+        {
+          "action": "propose_module_doc_patch",
+          "target": "symbion-engine",
+          "reason": "deferred by target cooldown: target=symbion-engine gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049087+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\symbion-engine"
+          }
+        },
+        {
+          "action": "propose_module_test_scaffold",
+          "target": "symbion-engine",
+          "reason": "deferred by target cooldown: target=symbion-engine gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049082+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\symbion-engine"
+          }
+        },
+        {
+          "action": "propose_test_scaffold",
+          "target": "symbion-engine",
+          "reason": "deferred by target cooldown: target=symbion-engine gap=1 cooldown=1",
+          "severity": "medium",
+          "created_at": "2026-04-09T13:25:57.049085+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\symbion-engine"
+          }
+        },
+        {
+          "action": "propose_docs",
+          "target": "oo-kernel-rust",
+          "reason": "deferred by target cooldown: target=oo-kernel-rust gap=1 cooldown=1",
+          "severity": "low",
+          "created_at": "2026-04-09T13:25:57.048983+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-kernel-rust"
+          }
+        },
+        {
+          "action": "propose_docs",
+          "target": "oo-metadriver",
+          "reason": "deferred by target cooldown: target=oo-metadriver gap=1 cooldown=1",
+          "severity": "low",
+          "created_at": "2026-04-09T13:25:57.048996+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-metadriver"
+          }
+        },
+        {
+          "action": "propose_docs",
+          "target": "oo-modules",
+          "reason": "deferred by target cooldown: target=oo-modules gap=1 cooldown=1",
+          "severity": "low",
+          "created_at": "2026-04-09T13:25:57.049009+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-modules"
+          }
+        },
+        {
+          "action": "propose_docs",
+          "target": "oo-multicore",
+          "reason": "deferred by target cooldown: target=oo-multicore gap=1 cooldown=1",
+          "severity": "low",
+          "created_at": "2026-04-09T13:25:57.049024+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-multicore"
+          }
+        },
+        {
+          "action": "propose_docs",
+          "target": "oo-net",
+          "reason": "deferred by target cooldown: target=oo-net gap=1 cooldown=1",
+          "severity": "low",
+          "created_at": "2026-04-09T13:25:57.049038+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-net"
+          }
+        },
+        {
+          "action": "propose_docs",
+          "target": "orchestrion-engine",
+          "reason": "deferred by target cooldown: target=orchestrion-engine gap=1 cooldown=1",
+          "severity": "low",
+          "created_at": "2026-04-09T13:25:57.049064+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\orchestrion-engine"
+          }
+        },
+        {
+          "action": "propose_docs",
+          "target": "pheromion-engine",
+          "reason": "deferred by target cooldown: target=pheromion-engine gap=1 cooldown=1",
+          "severity": "low",
+          "created_at": "2026-04-09T13:25:57.049077+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\pheromion-engine"
+          }
+        },
+        {
+          "action": "propose_docs",
+          "target": "symbion-engine",
+          "reason": "deferred by target cooldown: target=symbion-engine gap=1 cooldown=1",
+          "severity": "low",
+          "created_at": "2026-04-09T13:25:57.049089+00:00",
+          "metadata": {
+            "module_path": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\symbion-engine"
+          }
+        }
+      ],
+      "deferred_summary": {
+        "total": 40,
+        "by_rule": {
+          "target_cooldown": 40
+        },
+        "top_actions": [
+          {
+            "action": "stabilize_module",
+            "count": 8
+          },
+          {
+            "action": "propose_module_doc_patch",
+            "count": 8
+          },
+          {
+            "action": "propose_module_test_scaffold",
+            "count": 8
+          },
+          {
+            "action": "propose_test_scaffold",
+            "count": 8
+          },
+          {
+            "action": "propose_docs",
+            "count": 8
+          }
+        ],
+        "top_targets": [
+          {
+            "target": "oo-kernel-rust",
+            "count": 5
+          },
+          {
+            "target": "oo-metadriver",
+            "count": 5
+          },
+          {
+            "target": "oo-modules",
+            "count": 5
+          },
+          {
+            "target": "oo-multicore",
+            "count": 5
+          },
+          {
+            "target": "oo-net",
+            "count": 5
+          }
+        ]
+      },
+      "simulation_gate": {
+        "approved": false,
+        "source": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-sim\\reports\\oo-prime-sim-ok.json",
+        "reason": "simulation proof is too old; max_age_minutes=60 generated_at=2026-04-09T11:31:55.030766+00:00"
+      },
+      "applied_count": 0,
+      "skipped_apply_count": 0,
+      "apply_delta": {
+        "created": 0,
+        "updated": 0,
+        "noop": 0
+      },
+      "risk_budget": {
+        "max": 10,
+        "used": 0,
+        "blocked": 0
+      },
+      "state_summary": {
+        "cycles_run": 17,
+        "tracked_actions": 3,
+        "tracked_targets": 37,
+        "decision_memory_entries": 37,
+        "target_memory_entries": 37,
+        "history_entries": 17
+      }
+    }
+  ]
+}

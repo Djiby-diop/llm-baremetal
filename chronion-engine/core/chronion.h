@@ -7,6 +7,8 @@
 #ifndef CHRONION_H
 #define CHRONION_H
 
+#include <stdint.h>
+
 #define CHRONION_MAX_PHASE_STAMPS  32
 #define CHRONION_MAX_BOOT_HISTORY   8
 
@@ -18,6 +20,8 @@ typedef struct {
     unsigned int dna_generation;
     unsigned int idle_steps;
     unsigned int phase_bits;
+    uint64_t     last_tsc;       /* Last physical time stamp */
+    uint64_t     msec_elapsed;   /* Total wall time since boot */
 } ChronionEpoch;
 
 typedef struct {

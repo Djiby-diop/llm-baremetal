@@ -8,6 +8,7 @@
  */
 
 #include <stdint.h>
+#include <oo_proto.h>
 #include "../ghost-engine/core/ghost.h"
 #include "../ghost-engine/core/oo_net_packet.h"
 
@@ -18,10 +19,23 @@ extern "C" {
 #define COLLECTIVION_PEER_MAX 8
 
 typedef enum {
-    COLLECTIVION_MODE_OFF     = 0,
-    COLLECTIVION_MODE_PASSIVE = 1,  /* receive only */
-    COLLECTIVION_MODE_ACTIVE  = 2,  /* send and receive */
+    COLLECTIVION_MODE_OFF = 0,
+    COLLECTIVION_MODE_PULSE = 1,
+    COLLECTIVION_MODE_RECOVERY = 2,
+    COLLECTIVION_MODE_TELEPATHY = 3, /* Cognitive Sync Mode */
 } CollectivionMode;
+
+typedef enum {
+    COLLECT_SYNC_LOCAL = 0,
+    COLLECT_SYNC_REMOTE = 1,
+} CollectivionSyncType;
+
+typedef struct {
+    uint32_t object_id;
+    char     name[32];
+    float    priority;
+    float    success_rate;
+} CollectivionThoughtPacket;
 
 typedef struct {
     uint32_t node_id;
@@ -66,7 +80,42 @@ void collectivion_send_text(CollectivionEngine *e, GhostEngine *ghost,
 int collectivion_recv_all(CollectivionEngine *e, GhostEngine *ghost,
                           float *delta_temp, float *delta_topp);
 
+/* ── Proto-Bridge: Official OOMessage operations ────────────────── */
+
+/* Wrap and send an official OOMessage via Ghost */
+void collectivion_send_msg(CollectivionEngine *e, GhostEngine *ghost,
+                           OOEvent kind, const void *payload, uint32_t plen);
+
+/* Specialized emitter for vital signals (Heartbeat/Thermic) */
+void collectivion_emit_vital(CollectivionEngine *e, GhostEngine *ghost,
+                             uint8_t severity, const char *reason);
+
 const char *collectivion_mode_name_ascii(CollectivionMode mode);
+
+/* --- Telepathic Operations (V1 Mutation) --- */
+
+/* 
+ * Broadcast a cognitive object to all peers over the network.
+ * Returns 1 if broadcast was successful, 0 otherwise.
+ */
+int collectivion_broadcast_thought(
+    CollectivionEngine *e,
+    GhostEngine *ghost,
+    uint32_t obj_id,
+    const char *name,
+    float priority,
+    float success_rate
+);
+
+/*
+ * Process an incoming thought packet and prepare it for SomaMind injection.
+ */
+int collectivion_receive_thought(
+    CollectivionEngine *e,
+    const void *payload,
+    uint32_t plen,
+    CollectivionThoughtPacket *out
+);
 
 #ifdef __cplusplus
 }

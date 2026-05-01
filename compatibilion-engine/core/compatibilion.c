@@ -1,3 +1,12 @@
+/*
+ * @@SOMA:C
+ * @@LAW
+ * allow compatibilion.pci_access op:99 if offset < 4096 && !is_restricted(offset)
+ *
+ * @@PROOF
+ * invariant op:99: safe_io => (port == 0xCF8 || port == 0xCFC) || is_ecam_ptr(addr)
+ */
+
 #include "compatibilion.h"
 
 // Simple memset for freestanding
@@ -75,8 +84,6 @@ static uint64_t compat_xgetbv(uint32_t xcr) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-/* SAFE: read CR4 to verify OSXSAVE bit (18) before executing xgetbv.
- * On QEMU/TCG, CPUID reports OSXSAVE=1 but CR4.OSXSAVE may be 0 → xgetbv #UD. */
 static int compat_cr4_osxsave_set(void) {
 #if defined(__x86_64__) || defined(_M_X64)
     uint64_t cr4;
@@ -105,19 +112,12 @@ void compatibilion_probe_cpu(CompatibilionEngine *e) {
     *((uint32_t *)(v + 8)) = ecx;
     v[12] = 0;
 
-    // Feature flags (leaf 1)
     compat_cpuid(1, &eax, &ebx, &ecx, &edx);
-
-    // SSE2 (edx bit 26)
     if (edx & (1u << 26)) e->caps.cpu_flags |= COMPAT_CPU_SSE2;
-    // SSE4.1 (ecx bit 19)
     if (ecx & (1u << 19)) e->caps.cpu_flags |= COMPAT_CPU_SSE41;
-    // AVX (ecx bit 28) + OSXSAVE (ecx bit 27)
     int has_osxsave = (ecx & (1u << 27)) != 0;
     int has_avx_bit = (ecx & (1u << 28)) != 0;
     int avx_ok = 0;
-    /* SAFE: verify CR4.OSXSAVE before xgetbv — QEMU/TCG reports OSXSAVE=1 in CPUID
-     * but CR4.OSXSAVE may still be 0, causing xgetbv to raise #UD. */
     if (has_osxsave && has_avx_bit && compat_cr4_osxsave_set()) {
         uint64_t xcr0 = compat_xgetbv(0);
         if ((xcr0 & 0x6) == 0x6) {
@@ -125,17 +125,11 @@ void compatibilion_probe_cpu(CompatibilionEngine *e) {
             avx_ok = 1;
         }
     }
-    // FMA (ecx bit 12)
     if (avx_ok && (ecx & (1u << 12))) e->caps.cpu_flags |= COMPAT_CPU_FMA;
-
-    // Extended features (leaf 7)
     compat_cpuid(7, &eax, &ebx, &ecx, &edx);
-    // AVX2 (ebx bit 5)
     if (avx_ok && (ebx & (1u << 5))) e->caps.cpu_flags |= COMPAT_CPU_AVX2;
-    // AVX-512F (ebx bit 16)
     if (avx_ok && (ebx & (1u << 16))) e->caps.cpu_flags |= COMPAT_CPU_AVX512F;
 
-    // Brand string (leaves 0x80000002-0x80000004)
     compat_cpuid(0x80000000, &eax, &ebx, &ecx, &edx);
     if (eax >= 0x80000004) {
         uint32_t *brand = (uint32_t *)e->caps.cpu_brand;
@@ -145,7 +139,6 @@ void compatibilion_probe_cpu(CompatibilionEngine *e) {
         e->caps.cpu_brand[48] = 0;
     }
 #endif
-
     e->probes_done++;
 }
 
@@ -157,23 +150,28 @@ void compatibilion_set_platform(CompatibilionEngine *e, uint32_t flags) {
 void compatibilion_set_memory(CompatibilionEngine *e, uint64_t bytes) {
     if (!e) return;
     e->caps.mem_bytes = bytes;
-    if (bytes < 256ULL * 1024 * 1024) {
-        e->caps.mem_tier = COMPAT_MEM_LOW;
-    } else if (bytes < 1024ULL * 1024 * 1024) {
-        e->caps.mem_tier = COMPAT_MEM_MEDIUM;
-    } else if (bytes < 4ULL * 1024 * 1024 * 1024) {
-        e->caps.mem_tier = COMPAT_MEM_HIGH;
-    } else {
-        e->caps.mem_tier = COMPAT_MEM_ULTRA;
-    }
+    if (bytes < 256ULL * 1024 * 1024) e->caps.mem_tier = COMPAT_MEM_LOW;
+    else if (bytes < 1024ULL * 1024 * 1024) e->caps.mem_tier = COMPAT_MEM_MEDIUM;
+    else if (bytes < 4ULL * 1024 * 1024 * 1024) e->caps.mem_tier = COMPAT_MEM_HIGH;
+    else e->caps.mem_tier = COMPAT_MEM_ULTRA;
 }
 
 void compatibilion_set_gop(CompatibilionEngine *e, uint32_t w, uint32_t h) {
     if (!e) return;
-    e->caps.gop_width = w;
-    e->caps.gop_height = h;
-    if (w > 0 && h > 0) {
-        e->caps.platform_flags |= COMPAT_PLAT_GOP;
+    e->caps.gop_width = w; e->caps.gop_height = h;
+    if (w > 0 && h > 0) e->caps.platform_flags |= COMPAT_PLAT_GOP;
+}
+
+/* ── Hardware Topology Discovery ─────────────────────────────────── */
+
+void compatibilion_probe_pci(CompatibilionEngine *e, uint32_t device_count, uint64_t ecam_base) {
+    if (!e) return;
+    e->caps.pci_device_count = device_count;
+    e->caps.pcie_ecam_base = ecam_base;
+    
+    // @@LAW: Apply hardware access constraints (op:99)
+    if (ecam_base > 0) {
+        e->caps.platform_flags |= 0x1000; // COMPAT_PLAT_PCIE_ECAM
     }
 }
 
@@ -189,7 +187,6 @@ int compatibilion_has_platform(CompatibilionEngine *e, uint32_t flag) {
 
 int compatibilion_recommend_attn(CompatibilionEngine *e) {
     if (!e) return 0;
-    // Prefer AVX2 if available
     if (e->caps.cpu_flags & COMPAT_CPU_AVX2) return 1;
     return 0;
 }

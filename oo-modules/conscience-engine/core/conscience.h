@@ -29,6 +29,7 @@ typedef enum {
 
 typedef struct {
     uint32_t temp_raw;    /* platform-specific (e.g. MSR) */
+    uint32_t temp_celsius;
     uint32_t power_raw;   /* best-effort */
     uint8_t  stress;      /* 0..100 */
 } ConscienceSample;
@@ -36,6 +37,7 @@ typedef struct {
 typedef struct {
     ConscienceMode mode;
     ConsciencePrecision current_precision;
+    ConscienceSample last;
     uint32_t samples_taken;
     uint32_t downgrades_triggered;
 } ConscienceEngine;

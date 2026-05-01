@@ -1,3 +1,12 @@
+/*
+ * @@SOMA:C
+ * @@LAW
+ * allow calibrion.scale op:42 if delta_temp < 100 && temp <= 2000
+ *
+ * @@PROOF
+ * invariant op:42: stability => abs(new_temp - old_temp) < safety_margin
+ */
+
 #include "calibrion.h"
 
 void calibrion_init(CalibrionEngine *e) {
@@ -5,18 +14,18 @@ void calibrion_init(CalibrionEngine *e) {
     e->mode = CALIBRION_MODE_OFF;
     e->strategy = CALIBRION_STRATEGY_NONE;
 
-    // Default bounds
+    // Default bounds (Milli-units for fixed-point stability)
     e->bounds.temp_min_milli = 100;    // 0.1
-    e->bounds.temp_max_milli = 1500;   // 1.5
+    e->bounds.temp_max_milli = 2000;   // 2.0 (Higher bound for extreme recovery)
     e->bounds.top_k_min = 1;
     e->bounds.top_k_max = 100;
-    e->bounds.top_p_min_milli = 800;   // 0.8
-    e->bounds.top_p_max_milli = 990;   // 0.99
+    e->bounds.top_p_min_milli = 500;   // 0.5
+    e->bounds.top_p_max_milli = 1000;  // 1.0
 
     calibrion_reset_stats(e);
 
-    // Default recommendation: middle of range
-    e->rec_temp_milli = 700;   // 0.7
+    // Default recommendation: Stable baseline
+    e->rec_temp_milli = 800;   // 0.8
     e->rec_top_k = 40;
     e->rec_top_p_milli = 900;  // 0.9
 
@@ -76,59 +85,53 @@ void calibrion_feed(CalibrionEngine *e, uint32_t tokens_generated, uint32_t repe
     e->stats.total_tokens += tokens_generated;
     e->stats.total_repeats += repeats;
 
-    // Rolling average entropy
+    // 64-bit precision for long-term average stability
+    uint64_t current_avg = e->stats.avg_entropy_milli;
     if (e->stats.samples == 1) {
         e->stats.avg_entropy_milli = entropy_milli;
     } else {
-        // Simple exponential moving average (alpha ~ 0.2)
-        e->stats.avg_entropy_milli = (e->stats.avg_entropy_milli * 4 + entropy_milli) / 5;
+        // EMA with higher precision accumulation
+        e->stats.avg_entropy_milli = (uint32_t)((current_avg * 7 + (uint64_t)entropy_milli) / 8);
     }
 
-    // Length classification (target: 20-60 tokens)
-    if (tokens_generated < 20) e->stats.short_responses++;
-    else if (tokens_generated > 60) e->stats.long_responses++;
+    // Length classification (target: 32-128 tokens for complex reasoning)
+    if (tokens_generated < 32) e->stats.short_responses++;
+    else if (tokens_generated > 128) e->stats.long_responses++;
 
     // Update recommendation based on strategy
     if (e->mode == CALIBRION_MODE_ENFORCE) {
         uint32_t new_temp = e->rec_temp_milli;
         uint32_t new_top_k = e->rec_top_k;
+        uint32_t old_temp = e->rec_temp_milli;
 
         switch (e->strategy) {
             case CALIBRION_STRATEGY_ENTROPY:
-                // Low entropy -> increase temp; high entropy -> decrease temp
-                if (e->stats.avg_entropy_milli < 500) {
-                    new_temp += 50;
-                } else if (e->stats.avg_entropy_milli > 1500) {
-                    if (new_temp > 100) new_temp -= 50;
+                if (e->stats.avg_entropy_milli < 400) new_temp += 40;
+                else if (e->stats.avg_entropy_milli > 1600) {
+                    if (new_temp > 200) new_temp -= 40;
                 }
                 break;
 
             case CALIBRION_STRATEGY_LENGTH:
-                // Too short -> increase temp/top_k; too long -> decrease
                 if (e->stats.short_responses > e->stats.long_responses) {
-                    new_temp += 30;
-                    new_top_k += 5;
+                    new_temp += 25;
+                    new_top_k += 2;
                 } else if (e->stats.long_responses > e->stats.short_responses) {
-                    if (new_temp > 100) new_temp -= 30;
-                    if (new_top_k > 5) new_top_k -= 5;
+                    if (new_temp > 200) new_temp -= 25;
+                    if (new_top_k > 10) new_top_k -= 2;
                 }
                 break;
 
             case CALIBRION_STRATEGY_QUALITY:
-                // High repeats -> increase temp/top_k
-                if (repeats > 3) {
-                    new_temp += 100;
-                    new_top_k += 10;
+                if (repeats > 2) {
+                    new_temp += 120; // Aggressive heat to break repetition loops
+                    new_top_k += 15;
                 }
                 break;
 
             case CALIBRION_STRATEGY_HYBRID:
-                // Combine signals
-                if (e->stats.avg_entropy_milli < 500 || repeats > 2) {
-                    new_temp += 50;
-                }
-                if (e->stats.short_responses > e->stats.samples / 2) {
-                    new_top_k += 5;
+                if (e->stats.avg_entropy_milli < 450 || repeats > 1) {
+                    new_temp += 60;
                 }
                 break;
 
@@ -136,7 +139,13 @@ void calibrion_feed(CalibrionEngine *e, uint32_t tokens_generated, uint32_t repe
                 break;
         }
 
-        // Clamp to bounds
+        // @@LAW: Apply delta-limit for stability (op:42)
+        uint32_t delta = (new_temp > old_temp) ? (new_temp - old_temp) : (old_temp - new_temp);
+        if (delta > 100) {
+            new_temp = (new_temp > old_temp) ? (old_temp + 100) : (old_temp - 100);
+        }
+
+        // Final Clamp to bounds
         if (new_temp < e->bounds.temp_min_milli) new_temp = e->bounds.temp_min_milli;
         if (new_temp > e->bounds.temp_max_milli) new_temp = e->bounds.temp_max_milli;
         if (new_top_k < e->bounds.top_k_min) new_top_k = e->bounds.top_k_min;

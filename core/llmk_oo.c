@@ -1,5 +1,10 @@
 #include "llmk_oo.h"
 #include "llmk_oo_infer.h"
+#include "engine/ssm/core/soma_mind.h"
+#include "engine/ssm/core/soma_dream.h"
+#include "oo-modules/cellion-engine/core/cellion.h"
+#include "oo-modules/collectivion-engine/core/collectivion.h"
+#include "oo-modules/ghost-engine/core/ghost.h"
 
 // ============================================================================
 // LLM-OO (Organism-Oriented) minimal runtime
@@ -16,6 +21,12 @@
 static LlmkOoEntity g_oo_entities[LLMK_OO_MAX_ENTITIES];
 static int g_oo_next_id = 1;
 static LlmkOoOnStep g_on_step = NULL;
+
+static SomaMindCtx g_soma_mind;
+static SomaRouterCtx g_soma_router;
+static SomaLogicCtx g_soma_logic;
+static CellionEngine g_cellion;
+static int g_soma_mind_ready = 0;
 
 static void llmk_oo_copy_ascii(char *dst, int dst_cap, const char *src);
 
@@ -449,24 +460,21 @@ static void llmk_oo_step_index(int idx) {
     if (e->energy <= 0) e->status = LLMK_OO_DONE;
     else e->status = LLMK_OO_IDLE;
 
-    // ── OO Inference hook ──────────────────────────────────────────────────
-    // If the OOSI engine is ready and the entity has a goal, run one
-    // "think" step: tokenize the goal, generate with adaptive halting,
-    // then append the decoded output to entity notes.
-    // This makes each energy-tick a reasoning iteration.
-    if (llmk_oo_infer_is_ready() && e->goal[0] != '\0') {
-        // Tokenize goal (static buffer: 256 token IDs max)
-        int prompt_tokens[256];
-        int prompt_len = llmk_oo_infer_tokenize(e->goal, prompt_tokens, 256);
-        if (prompt_len > 0) {
-            OoThinkResult think_result;
-            int n = llmk_oo_infer_think(prompt_tokens, prompt_len, &think_result);
-            if (n > 0 && think_result.text[0] != '\0') {
-                // Append inference output to notes (guarded by existing notes capacity)
-                // llmk_oo_note truncates safely if over 1024 bytes
-                llmk_oo_note(e->id, think_result.text);
-            }
-        }
+    // ── SomaMind V1 Integration: Object-Centric Cognition ───────────────
+    // If the new SomaMind engine is ready, we bridge this entity to a
+    // cognitive object. This transitions from simple text generation
+    // to a persistent, stateful thought process.
+    if (g_soma_mind_ready && e->goal[0] != '\0') {
+        // Try to find or spawn the SomaMindObject for this entity
+        // For V1, we use entity->id as a hint for the spawn name
+        char obj_name[SOMA_MIND_NAME_LEN];
+        ascii_to_char16_local((CHAR16*)obj_name, e->goal, SOMA_MIND_NAME_LEN/2); // crude bridge
+        
+        // Pulse the mind
+        soma_mind_pulse(&g_soma_mind);
+        
+        // Bridge result: if SomaMind produced text/action, we'd sync it here.
+        // In V1 Foundation, it simply advances the latent state.
     }
     // ───────────────────────────────────────────────────────────────────────
 
@@ -496,6 +504,16 @@ void llmk_oo_init(void) {
     }
     g_oo_next_id = 1;
     g_on_step = NULL;
+
+    // Initialize SomaMind V2: Dual Engine (Solar/Lunar)
+    soma_router_init(&g_soma_router);
+    soma_logic_init(&g_soma_logic);
+    cellion_init(&g_cellion);
+    soma_dream_init();
+    
+    // Bridge it to the global contexts
+    soma_mind_init(&g_soma_mind, &g_soma_router, (OosiV3GenCtx*)&g_oosi_ctx, &g_soma_logic, &g_cellion);
+    g_soma_mind_ready = 1;
 }
 
 void llmk_oo_set_on_step(LlmkOoOnStep cb) {
@@ -1384,4 +1402,32 @@ int llmk_oo_import(const char *in, int in_len) {
 
     if (max_id >= (UINT32)g_oo_next_id) g_oo_next_id = (int)(max_id + 1U);
     return imported;
+}
+
+void llmk_oo_print_mind_stats(void) {
+    if (!g_soma_mind_ready) {
+        Print(L"SomaMind not ready.\r\n");
+        return;
+    }
+    Print(L"\r\n[SomaMind V3 Diagnostics]\r\n");
+    Print(L"  Pulses: %ld  LearningRate: %d/1000  WeightAdj: %d/1000\r\n", 
+          (long)g_soma_mind.total_pulses, 
+          (int)(g_soma_mind.plasticity.learning_rate * 1000),
+          (int)(g_soma_mind.plasticity.weight_adj * 1000));
+          
+    Print(L"  Objects:\r\n");
+    for (int i = 0; i < SOMA_MIND_OBJECT_MAX; i++) {
+        if (g_soma_mind.objects[i].state != SOMA_OBJ_FREE) {
+            SomaMindObject *obj = &g_soma_mind.objects[i];
+            CHAR16 name16[32];
+            ascii_to_char16_local(name16, obj->name, 32);
+            Print(L"    ID:%d [%s] State:%d Prio:%d Cost:%d/100\r\n", 
+                  obj->id, name16, obj->state, (int)obj->priority, (int)(obj->cost_estimate * 100));
+        }
+    }
+}
+
+void llmk_oo_telemetry(int temp, int pressure) {
+    if (!g_soma_mind_ready) return;
+    soma_mind_update_telemetry(&g_soma_mind, (float)temp, (float)pressure / 100.0f);
 }

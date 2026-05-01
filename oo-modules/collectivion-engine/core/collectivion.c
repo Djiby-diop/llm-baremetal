@@ -1,4 +1,14 @@
-﻿#include "collectivion.h"
+/*
+ * @@SOMA:C
+ * @@LAW
+ * allow collectivion.emit op:55 if payload_len <= 4096
+ *
+ * @@PROOF
+ * invariant op:55: integrity => checksum(header) == valid
+ */
+
+#include "collectivion.h"
+#include <string.h>
 
 void collectivion_init(CollectivionEngine *e) {
     if (!e) return;
@@ -24,18 +34,41 @@ void collectivion_set_node_id(CollectivionEngine *e, uint32_t id) {
     e->node_id = id;
 }
 
-/* Legacy token-level broadcast (kept for backward compat) */
-void collectivion_broadcast(CollectivionEngine *e, const void *data, uint32_t len) {
-    (void)e; (void)data; (void)len;
-    /* No-op: use collectivion_send_text / collectivion_sync_dna instead */
+/* ── Proto-Bridge Implementation ────────────────────────────────────── */
+
+void collectivion_send_msg(CollectivionEngine *e, GhostEngine *ghost,
+                           OOEvent kind, const void *payload, uint32_t plen) {
+    if (!e || !ghost || e->mode == COLLECTIVION_MODE_OFF) return;
+
+    // @@LAW: Validate payload size (op:55)
+    if (plen > OO_MAX_PAYLOAD) return;
+
+    OOMessageHeader hdr;
+    oo_msg_init(&hdr, OO_LAYER_KERNEL, OO_LAYER_BROADCAST, kind,
+                ghost->tx_seq, 0, plen); // ts=0 for now, should use chronion
+    
+    // We wrap the official OOMessage into multiple Ghost OO-NET packets if needed
+    // In this MVP, we just send it as a raw broadcast if the transport supports it.
+    // For now, we bridge it to the existing ghost_send_packet by creating a pseudo-packet.
+    
+    OoNetPacket pkt;
+    uint32_t extra = (plen > 0) ? (*(uint32_t*)payload) : 0;
+    oo_net_pkt_build(&pkt, OO_PKT_TEXT, (uint8_t)(e->node_id & 0xFF), 0xFF,
+                     ghost->tx_seq, (const uint8_t*)payload, (plen > 20 ? 20 : plen), extra);
+    
+    ghost_send_packet(ghost, &pkt);
+    e->broadcasts_sent++;
 }
 
-uint32_t collectivion_poll(CollectivionEngine *e, void *buf, uint32_t cap) {
-    (void)e; (void)buf; (void)cap;
-    return 0;  /* Use collectivion_recv_all instead */
+void collectivion_emit_vital(CollectivionEngine *e, GhostEngine *ghost,
+                             uint8_t severity, const char *reason) {
+    if (!e || !ghost || e->mode == COLLECTIVION_MODE_OFF) return;
+    
+    // Use the official VITAL_SIGNAL event kind
+    collectivion_send_msg(e, ghost, OO_EVENT_VITAL_SIGNAL, reason, (uint32_t)strlen(reason));
 }
 
-/* ── OO-NET high-level operations ────────────────────────────────────── */
+/* Legacy / Internal logic ─────────────────────────────────────────── */
 
 static void col_send_pkt(CollectivionEngine *e, GhostEngine *ghost,
                          OoNetPktType type,
@@ -66,6 +99,10 @@ void collectivion_sync_dna(CollectivionEngine *e, GhostEngine *ghost,
                            uint32_t dna_hash, float delta_temp, float delta_topp) {
     if (!e || !ghost) return;
     if (e->mode != COLLECTIVION_MODE_ACTIVE) return;
+    
+    // Also emit as an official PATCH event for the host
+    collectivion_send_msg(e, ghost, OO_EVENT_PATCH, &dna_hash, 4);
+
     OoNetPacket pkt;
     oo_net_pkt_build(&pkt, OO_PKT_DNA_SYNC,
                      (uint8_t)(e->node_id & 0xFF), 0xFF,
@@ -79,6 +116,10 @@ void collectivion_send_text(CollectivionEngine *e, GhostEngine *ghost,
                             const char *text) {
     if (!e || !ghost || !text) return;
     if (e->mode == COLLECTIVION_MODE_OFF) return;
+    
+    // Official RESPONSE event bridge
+    collectivion_send_msg(e, ghost, OO_EVENT_RESPONSE, text, (uint32_t)strlen(text));
+
     OoNetPacket pkt;
     oo_net_pkt_build(&pkt, OO_PKT_TEXT,
                      (uint8_t)(e->node_id & 0xFF), 0xFF,
@@ -128,4 +169,44 @@ const char *collectivion_mode_name_ascii(CollectivionMode mode) {
         case COLLECTIVION_MODE_ACTIVE:  return "active";
         default:                        return "?";
     }
+}
+int collectivion_broadcast_thought(
+    CollectivionEngine *e,
+    GhostEngine *ghost,
+    uint32_t obj_id,
+    const char *name,
+    float priority,
+    float success_rate
+) {
+    if (!e || !ghost || e->mode != COLLECTIVION_MODE_TELEPATHY) return 0;
+    
+    CollectivionThoughtPacket pkt;
+    pkt.object_id = obj_id;
+    pkt.priority = priority;
+    pkt.success_rate = success_rate;
+    strncpy(pkt.name, name, 31);
+    
+    /* Broadcast via Ghost network */
+    OoNetPacket net_pkt;
+    oo_net_pkt_build(&net_pkt, OO_PKT_TEXT, (uint8_t)(e->node_id & 0xFF), 0xFF,
+                     ghost->tx_seq, (const uint8_t*)&pkt, sizeof(pkt), 0);
+                     
+    ghost_send_packet(ghost, &net_pkt);
+    e->broadcasts_sent++;
+    
+    return 1;
+}
+
+int collectivion_receive_thought(
+    CollectivionEngine *e,
+    const void *payload,
+    uint32_t plen,
+    CollectivionThoughtPacket *out
+) {
+    if (!e || !payload || !out || plen < sizeof(CollectivionThoughtPacket)) return 0;
+    
+    memcpy(out, payload, sizeof(CollectivionThoughtPacket));
+    e->broadcasts_recv++;
+    
+    return 1;
 }

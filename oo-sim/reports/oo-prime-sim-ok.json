@@ -1,0 +1,13 @@
+{
+  "status": "ok",
+  "generated_at": "2026-04-09T11:31:55.030766+00:00",
+  "scenario": "C:\\Users\\djibi\\OneDrive\\Bureau\\baremetal\\llm-baremetal\\oo-sim\\scenarios\\oo-prime-gate.json",
+  "mode": "normal",
+  "engine": "oo-sim.exe",
+  "reason": "simulation run succeeded",
+  "exit_code": 0,
+  "required_stdout": "final summary",
+  "required_log": "tick=",
+  "stdout_tail": "  - urgent_fix    class=recovery     done=1  remaining_energy=0  deadline=4\n  - long_term     class=experimental  done=1  remaining_energy=0  deadline=20\n\nfinal summary at time 20 (mode=NORMAL, pressure=0%):\n  - baseline      class=normal       done=1  remaining_energy=0  deadline=8\n  - urgent_fix    class=recovery     done=1  remaining_energy=0  deadline=4\n  - long_term     class=experimental  done=1  remaining_energy=0  deadline=20\n\nfinal summary at time 14 (mode=NORMAL, pressure=0%):\n  - baseline      class=normal       done=1  remaining_energy=0  deadline=8\n  - urgent_fix    class=recovery     done=1  remaining_energy=0  deadline=4\n  - long_term     class=experimental  done=1  remaining_energy=0  deadline=20",
+  "stderr_tail": ""
+}

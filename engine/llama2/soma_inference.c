@@ -5285,9 +5285,14 @@ static int llmk_ascii_has_dotdot(const char *s) {
 
 static void llmk_print_ascii(const char *s) {
     if (!s) return;
-    for (const char *p = s; *p; p++) {
-        Print(L"%c", (CHAR16)(unsigned char)(*p));
+    CHAR16 wbuf[256]; // SAFE: bounded temporary buffer for ASCII-to-UTF16 conversion for UEFI Print
+    int i = 0;
+    while (s[i] && i < 255) {
+        wbuf[i] = (CHAR16)(unsigned char)s[i];
+        i++;
     }
+    wbuf[i] = 0;
+    Print(L"%s", wbuf);
 }
 
 static int llmk_parse_optional_prefix(const char *prompt, int cmd_len, char *out, int out_cap) {

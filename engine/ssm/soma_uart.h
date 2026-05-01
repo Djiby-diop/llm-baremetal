@@ -37,6 +37,7 @@
 #define SOMA_UART_DLL         (SOMA_UART_PORT + 0)  // Divisor Latch Low  (DLAB=1)
 #define SOMA_UART_DLH         (SOMA_UART_PORT + 1)  // Divisor Latch High (DLAB=1)
 
+#define SOMA_UART_LSR_DR      0x01U    // Data Ready
 #define SOMA_UART_LSR_THRE    0x20U    // Transmit Holding Register Empty
 #define SOMA_UART_BAUD_115200 1U       // divisor = 115200 / 115200
 
@@ -126,6 +127,25 @@ static inline void soma_uart_putc(char c) {
         __asm__ __volatile__("" ::: "memory");
     }
     _uart_outb(SOMA_UART_THR, (unsigned char)c);
+}
+
+// ============================================================
+// soma_uart_has_data — check if data is available to read
+// ============================================================
+static inline int soma_uart_has_data(void) {
+    if (!g_soma_uart_enable) return 0;
+    return (_uart_inb(SOMA_UART_LSR) & SOMA_UART_LSR_DR);
+}
+
+// ============================================================
+// soma_uart_getc — receive one byte (busy-wait)
+// ============================================================
+static inline char soma_uart_getc(void) {
+    if (!g_soma_uart_enable) return 0;
+    while (!soma_uart_has_data()) {
+        __asm__ __volatile__("pause");
+    }
+    return (char)_uart_inb(SOMA_UART_PORT);
 }
 
 // ============================================================

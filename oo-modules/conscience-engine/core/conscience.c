@@ -34,10 +34,13 @@ void conscience_sample(ConscienceEngine *e, ConscienceSample *out) {
     uint32_t stress = (delta > 4000ULL) ? 100u :
                       (uint32_t)((delta * 100ULL) / 4000ULL);
     out->temp_raw  = (uint32_t)(delta & 0xFFFFu);  /* raw jitter for logging */
+    out->temp_celsius = 40u + (stress / 2u);      /* Proxy: 40C base + stress-dependent rise */
     out->power_raw = 0;
     out->stress    = stress;
-    if (e->mode != CONSCIENCE_MODE_OFF)
+    if (e->mode != CONSCIENCE_MODE_OFF) {
         e->samples_taken++;
+        e->last = *out;
+    }
 }
 
 ConsciencePrecision conscience_recommend_precision(const ConscienceEngine *e, uint32_t stress) {

@@ -37,7 +37,7 @@ $args = @(
     "-m", "4096M",
     "-drive", "if=pflash,format=raw,readonly=on,file=$OVMF",
     "-drive", "format=raw,file=$IMG",
-    "-serial", "file:$LOG",
+    "-serial", "tcp:127.0.0.1:4444,server,nowait",
     "-nographic",
     "-no-reboot"
 )

@@ -1,0 +1,8 @@
+{
+  "name": "oo-prime-gate",
+  "description": "Scenario used by oo-bot to validate simulation gate before governance cycles.",
+  "mode": "normal",
+  "required_stdout": "final summary",
+  "required_log": "tick=",
+  "proof": "reports/oo-prime-sim-ok.json"
+}

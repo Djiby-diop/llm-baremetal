@@ -20,11 +20,27 @@ void conscience_set_mode(ConscienceEngine *e, ConscienceMode mode) {
 
 void conscience_sample(ConscienceEngine *e, ConscienceSample *out) {
     if (!e || !out) return;
-    out->temp_raw = 0;
+    /* UEFI has no standard thermal API. Use RDTSC jitter as stress proxy:
+     * measure two consecutive RDTSC reads — high jitter = thermal throttling. */
+    unsigned long long t0, t1;
+    __asm__ volatile("rdtsc" : "=A"(t0));
+    /* 256 lightweight iterations to amplify jitter signal */
+    volatile unsigned int sink = 0;
+    for (int i = 0; i < 256; i++) sink += (unsigned int)i;
+    __asm__ volatile("rdtsc" : "=A"(t1));
+    (void)sink;
+    unsigned long long delta = t1 - t0;
+    /* Normalize: ~200 cycles = idle, ~4000 cycles = heavy throttle */
+    uint32_t stress = (delta > 4000ULL) ? 100u :
+                      (uint32_t)((delta * 100ULL) / 4000ULL);
+    out->temp_raw  = (uint32_t)(delta & 0xFFFFu);  /* raw jitter for logging */
+    out->temp_celsius = 40u + (stress / 2u);      /* Proxy: 40C base + stress-dependent rise */
     out->power_raw = 0;
-    out->stress = 0;
-    if (e->mode != CONSCIENCE_MODE_OFF)
+    out->stress    = stress;
+    if (e->mode != CONSCIENCE_MODE_OFF) {
         e->samples_taken++;
+        e->last = *out;
+    }
 }
 
 ConsciencePrecision conscience_recommend_precision(const ConscienceEngine *e, uint32_t stress) {

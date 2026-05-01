@@ -1,0 +1,723 @@
+{
+  "schema": "oo-prime-state-v1",
+  "cycles_run": 17,
+  "action_stats": {
+    "stabilize_module": {
+      "accepted": 4,
+      "blocked": 108,
+      "skipped": 11
+    },
+    "propose_docs": {
+      "recorded": 7
+    },
+    "propose_system_action_plan": {
+      "noop": 5,
+      "updated": 1
+    }
+  },
+  "target_stats": {
+    "calibrion-engine": {
+      "accepted": 2,
+      "skipped": 6,
+      "blocked": 3
+    },
+    "cellion-engine": {
+      "accepted": 2,
+      "blocked": 4
+    },
+    "chronion-engine": {
+      "blocked": 4
+    },
+    "collectivion-engine": {
+      "blocked": 4
+    },
+    "compatibilion-engine": {
+      "blocked": 3
+    },
+    "conscience-engine": {
+      "blocked": 3
+    },
+    "diagnostion-engine": {
+      "blocked": 3
+    },
+    "diopion-engine": {
+      "blocked": 3
+    },
+    "djibion-engine": {
+      "blocked": 3
+    },
+    "dreamion-engine": {
+      "blocked": 3
+    },
+    "evolvion-engine": {
+      "blocked": 3
+    },
+    "ghost-engine": {
+      "blocked": 3
+    },
+    "immunion-engine": {
+      "blocked": 3
+    },
+    "limbion-engine": {
+      "blocked": 3
+    },
+    "OS-G (Operating System Genesis)": {
+      "recorded": 7
+    },
+    "SYSTEM": {
+      "noop": 5,
+      "updated": 1
+    },
+    "memorion-engine": {
+      "blocked": 3
+    },
+    "metabion-engine": {
+      "blocked": 3
+    },
+    "mirrorion-engine": {
+      "blocked": 3
+    },
+    "morphion-engine": {
+      "blocked": 3
+    },
+    "neuralfs-engine": {
+      "blocked": 3
+    },
+    "oo-bus": {
+      "blocked": 3
+    },
+    "oo-crypto": {
+      "blocked": 3
+    },
+    "oo-hal": {
+      "blocked": 3
+    },
+    "oo-ipc": {
+      "blocked": 3
+    },
+    "oo-kernel-rust": {
+      "blocked": 3
+    },
+    "oo-metadriver": {
+      "blocked": 3
+    },
+    "oo-modules": {
+      "blocked": 3
+    },
+    "oo-multicore": {
+      "blocked": 3
+    },
+    "oo-net": {
+      "blocked": 3
+    },
+    "oo-storage": {
+      "skipped": 3,
+      "blocked": 3
+    },
+    "orchestrion-engine": {
+      "skipped": 2,
+      "blocked": 3
+    },
+    "pheromion-engine": {
+      "blocked": 3
+    },
+    "symbion-engine": {
+      "blocked": 3
+    },
+    "synaption-engine": {
+      "blocked": 3
+    },
+    "thanatosion-engine": {
+      "blocked": 3
+    },
+    "trophion-engine": {
+      "blocked": 3
+    }
+  },
+  "target_memory": {
+    "OS-G (Operating System Genesis)": {
+      "last_cycle": 14,
+      "last_action": "propose_docs",
+      "repeat_count": 1
+    },
+    "SYSTEM": {
+      "last_cycle": 14,
+      "last_action": "propose_system_action_plan",
+      "repeat_count": 1
+    },
+    "calibrion-engine": {
+      "last_cycle": 17,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "oo-kernel-rust": {
+      "last_cycle": 16,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "oo-metadriver": {
+      "last_cycle": 16,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "oo-modules": {
+      "last_cycle": 16,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "oo-multicore": {
+      "last_cycle": 16,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "oo-net": {
+      "last_cycle": 16,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "oo-storage": {
+      "last_cycle": 17,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "orchestrion-engine": {
+      "last_cycle": 16,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "pheromion-engine": {
+      "last_cycle": 16,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "symbion-engine": {
+      "last_cycle": 16,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "synaption-engine": {
+      "last_cycle": 17,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "thanatosion-engine": {
+      "last_cycle": 17,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "trophion-engine": {
+      "last_cycle": 17,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "cellion-engine": {
+      "last_cycle": 17,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "chronion-engine": {
+      "last_cycle": 17,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "collectivion-engine": {
+      "last_cycle": 17,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "compatibilion-engine": {
+      "last_cycle": 12,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "conscience-engine": {
+      "last_cycle": 12,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "diagnostion-engine": {
+      "last_cycle": 13,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "diopion-engine": {
+      "last_cycle": 13,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "djibion-engine": {
+      "last_cycle": 13,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "dreamion-engine": {
+      "last_cycle": 13,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "evolvion-engine": {
+      "last_cycle": 13,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "ghost-engine": {
+      "last_cycle": 14,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "immunion-engine": {
+      "last_cycle": 14,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "limbion-engine": {
+      "last_cycle": 14,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "memorion-engine": {
+      "last_cycle": 14,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "metabion-engine": {
+      "last_cycle": 14,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "mirrorion-engine": {
+      "last_cycle": 14,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "morphion-engine": {
+      "last_cycle": 15,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "neuralfs-engine": {
+      "last_cycle": 15,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "oo-bus": {
+      "last_cycle": 15,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "oo-crypto": {
+      "last_cycle": 15,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "oo-hal": {
+      "last_cycle": 15,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    },
+    "oo-ipc": {
+      "last_cycle": 15,
+      "last_action": "stabilize_module",
+      "repeat_count": 1
+    }
+  },
+  "decision_memory": {
+    "propose_docs::OS-G (Operating System Genesis)": {
+      "action": "propose_docs",
+      "target": "OS-G (Operating System Genesis)",
+      "last_cycle": 14,
+      "last_status": "recorded",
+      "repeat_count": 1
+    },
+    "propose_system_action_plan::SYSTEM": {
+      "action": "propose_system_action_plan",
+      "target": "SYSTEM",
+      "last_cycle": 14,
+      "last_status": "noop",
+      "repeat_count": 1
+    },
+    "stabilize_module::calibrion-engine": {
+      "action": "stabilize_module",
+      "target": "calibrion-engine",
+      "last_cycle": 17,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::oo-kernel-rust": {
+      "action": "stabilize_module",
+      "target": "oo-kernel-rust",
+      "last_cycle": 16,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::oo-metadriver": {
+      "action": "stabilize_module",
+      "target": "oo-metadriver",
+      "last_cycle": 16,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::oo-modules": {
+      "action": "stabilize_module",
+      "target": "oo-modules",
+      "last_cycle": 16,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::oo-multicore": {
+      "action": "stabilize_module",
+      "target": "oo-multicore",
+      "last_cycle": 16,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::oo-net": {
+      "action": "stabilize_module",
+      "target": "oo-net",
+      "last_cycle": 16,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::oo-storage": {
+      "action": "stabilize_module",
+      "target": "oo-storage",
+      "last_cycle": 17,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::orchestrion-engine": {
+      "action": "stabilize_module",
+      "target": "orchestrion-engine",
+      "last_cycle": 16,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::pheromion-engine": {
+      "action": "stabilize_module",
+      "target": "pheromion-engine",
+      "last_cycle": 16,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::symbion-engine": {
+      "action": "stabilize_module",
+      "target": "symbion-engine",
+      "last_cycle": 16,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::synaption-engine": {
+      "action": "stabilize_module",
+      "target": "synaption-engine",
+      "last_cycle": 17,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::thanatosion-engine": {
+      "action": "stabilize_module",
+      "target": "thanatosion-engine",
+      "last_cycle": 17,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::trophion-engine": {
+      "action": "stabilize_module",
+      "target": "trophion-engine",
+      "last_cycle": 17,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::cellion-engine": {
+      "action": "stabilize_module",
+      "target": "cellion-engine",
+      "last_cycle": 17,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::chronion-engine": {
+      "action": "stabilize_module",
+      "target": "chronion-engine",
+      "last_cycle": 17,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::collectivion-engine": {
+      "action": "stabilize_module",
+      "target": "collectivion-engine",
+      "last_cycle": 17,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::compatibilion-engine": {
+      "action": "stabilize_module",
+      "target": "compatibilion-engine",
+      "last_cycle": 12,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::conscience-engine": {
+      "action": "stabilize_module",
+      "target": "conscience-engine",
+      "last_cycle": 12,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::diagnostion-engine": {
+      "action": "stabilize_module",
+      "target": "diagnostion-engine",
+      "last_cycle": 13,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::diopion-engine": {
+      "action": "stabilize_module",
+      "target": "diopion-engine",
+      "last_cycle": 13,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::djibion-engine": {
+      "action": "stabilize_module",
+      "target": "djibion-engine",
+      "last_cycle": 13,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::dreamion-engine": {
+      "action": "stabilize_module",
+      "target": "dreamion-engine",
+      "last_cycle": 13,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::evolvion-engine": {
+      "action": "stabilize_module",
+      "target": "evolvion-engine",
+      "last_cycle": 13,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::ghost-engine": {
+      "action": "stabilize_module",
+      "target": "ghost-engine",
+      "last_cycle": 14,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::immunion-engine": {
+      "action": "stabilize_module",
+      "target": "immunion-engine",
+      "last_cycle": 14,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::limbion-engine": {
+      "action": "stabilize_module",
+      "target": "limbion-engine",
+      "last_cycle": 14,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::memorion-engine": {
+      "action": "stabilize_module",
+      "target": "memorion-engine",
+      "last_cycle": 14,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::metabion-engine": {
+      "action": "stabilize_module",
+      "target": "metabion-engine",
+      "last_cycle": 14,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::mirrorion-engine": {
+      "action": "stabilize_module",
+      "target": "mirrorion-engine",
+      "last_cycle": 14,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::morphion-engine": {
+      "action": "stabilize_module",
+      "target": "morphion-engine",
+      "last_cycle": 15,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::neuralfs-engine": {
+      "action": "stabilize_module",
+      "target": "neuralfs-engine",
+      "last_cycle": 15,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::oo-bus": {
+      "action": "stabilize_module",
+      "target": "oo-bus",
+      "last_cycle": 15,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::oo-crypto": {
+      "action": "stabilize_module",
+      "target": "oo-crypto",
+      "last_cycle": 15,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::oo-hal": {
+      "action": "stabilize_module",
+      "target": "oo-hal",
+      "last_cycle": 15,
+      "last_status": "blocked",
+      "repeat_count": 1
+    },
+    "stabilize_module::oo-ipc": {
+      "action": "stabilize_module",
+      "target": "oo-ipc",
+      "last_cycle": 15,
+      "last_status": "blocked",
+      "repeat_count": 1
+    }
+  },
+  "history": [
+    {
+      "timestamp": "2026-04-09T11:44:59.315811+00:00",
+      "accepted": 2,
+      "blocked": 6,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T11:44:59.398816+00:00",
+      "accepted": 2,
+      "blocked": 6,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T11:47:47.571110+00:00",
+      "accepted": 3,
+      "blocked": 5,
+      "created": 0,
+      "updated": 0,
+      "noop": 1
+    },
+    {
+      "timestamp": "2026-04-09T11:49:24.691757+00:00",
+      "accepted": 3,
+      "blocked": 5,
+      "created": 0,
+      "updated": 1,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T11:53:09.357153+00:00",
+      "accepted": 3,
+      "blocked": 5,
+      "created": 0,
+      "updated": 0,
+      "noop": 1
+    },
+    {
+      "timestamp": "2026-04-09T11:53:29.724423+00:00",
+      "accepted": 2,
+      "blocked": 6,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T12:01:07.621496+00:00",
+      "accepted": 3,
+      "blocked": 5,
+      "created": 0,
+      "updated": 0,
+      "noop": 1
+    },
+    {
+      "timestamp": "2026-04-09T12:15:32.317021+00:00",
+      "accepted": 2,
+      "blocked": 6,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T12:19:44.829920+00:00",
+      "accepted": 2,
+      "blocked": 6,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T12:21:34.808149+00:00",
+      "accepted": 2,
+      "blocked": 6,
+      "created": 0,
+      "updated": 0,
+      "noop": 1
+    },
+    {
+      "timestamp": "2026-04-09T12:23:50.839891+00:00",
+      "accepted": 2,
+      "blocked": 6,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T13:16:43.372837+00:00",
+      "accepted": 0,
+      "blocked": 8,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T13:18:40.272597+00:00",
+      "accepted": 0,
+      "blocked": 8,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T13:20:55.210542+00:00",
+      "accepted": 2,
+      "blocked": 6,
+      "created": 0,
+      "updated": 0,
+      "noop": 1
+    },
+    {
+      "timestamp": "2026-04-09T13:20:55.902064+00:00",
+      "accepted": 0,
+      "blocked": 8,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T13:25:56.747683+00:00",
+      "accepted": 0,
+      "blocked": 8,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    },
+    {
+      "timestamp": "2026-04-09T13:25:57.050205+00:00",
+      "accepted": 0,
+      "blocked": 8,
+      "created": 0,
+      "updated": 0,
+      "noop": 0
+    }
+  ]
+}

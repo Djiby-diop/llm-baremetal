@@ -1,0 +1,16 @@
+{
+    "redlines": {
+        "forbidden_memory_ranges": [
+            {"start": "0x00000000", "end": "0x000003FF", "reason": "IVT / BIOS Data Area Protection"},
+            {"start": "0x000A0000", "end": "0x000BFFFF", "reason": "VGA Buffer (Restricted for display only)"}
+        ],
+        "sensitive_opcodes": [
+            "cli", "sti", "hlt", "inb", "outb"
+        ],
+        "mandatory_wrappers": {
+            "pci_config": "oo_bus_bridge_emit",
+            "error_handling": "oo_bus_emit_warden_alert"
+        }
+    },
+    "enforcement_level": "strict"
+}

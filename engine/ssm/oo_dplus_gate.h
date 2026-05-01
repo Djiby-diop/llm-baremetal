@@ -61,12 +61,12 @@
 // ============================================================
 
 typedef enum {
-    DPLUS_ALLOW      = 0,   // Normal operation
-    DPLUS_THROTTLE   = 1,   // Slow inference
-    DPLUS_QUARANTINE = 2,   // Reflex-only isolation
-    DPLUS_FORBID     = 3,   // Skip this generation turn
-    DPLUS_EMERGENCY  = 4,   // Halt all inference
-} DPlusVerdict;
+    OO_DPLUS_ALLOW      = 0,   // Normal operation
+    OO_DPLUS_THROTTLE   = 1,   // Slow inference
+    OO_DPLUS_QUARANTINE = 2,   // Reflex-only isolation
+    OO_DPLUS_FORBID     = 3,   // Skip this generation turn
+    OO_DPLUS_EMERGENCY  = 4,   // Halt all inference
+} OoDplusVerdict;
 
 static const char* const g_dplus_verdict_name[] = {
     "ALLOW", "THROTTLE", "QUARANTINE", "FORBID", "EMERGENCY"
@@ -77,8 +77,8 @@ static const char* const g_dplus_verdict_name[] = {
 // ============================================================
 
 typedef struct {
-    DPlusVerdict  verdict;           // Current verdict
-    DPlusVerdict  verdict_prev;      // Previous verdict (for change detection)
+    OoDplusVerdict  verdict;           // Current verdict
+    OoDplusVerdict  verdict_prev;      // Previous verdict (for change detection)
 
     // Counters
     int           consec_non_allow;  // Consecutive non-ALLOW verdicts
@@ -142,7 +142,7 @@ static void _dgate_emit_verdict(const DPlusGateCtx *g, int turn) {
     buf[pos++] = ' ';
     // verdict=ALLOW
     const char *vs = "verdict="; for (int i = 0; vs[i] && pos < 120; i++) buf[pos++] = vs[i];
-    const char *vn = g_dplus_verdict_name[g->verdict > DPLUS_EMERGENCY ? 0 : g->verdict];
+    const char *vn = g_dplus_verdict_name[g->verdict > OO_DPLUS_EMERGENCY ? 0 : g->verdict];
     for (int i = 0; vn[i] && pos < 120; i++) buf[pos++] = vn[i];
     buf[pos++] = ' ';
     // reason=0xNN
@@ -158,8 +158,8 @@ static void _dgate_emit_verdict(const DPlusGateCtx *g, int turn) {
 
 static void oo_dplus_gate_init(DPlusGateCtx *g) {
     if (!g) return;
-    g->verdict           = DPLUS_ALLOW;
-    g->verdict_prev      = DPLUS_ALLOW;
+    g->verdict           = OO_DPLUS_ALLOW;
+    g->verdict_prev      = OO_DPLUS_ALLOW;
     g->consec_non_allow  = 0;
     g->consec_emergency  = 0;
     g->total_evaluations = 0;
@@ -187,9 +187,9 @@ static void oo_dplus_gate_init(DPlusGateCtx *g) {
 //   resonance      — behavioral anomaly score 0-100
 //   turn           — current inference turn
 //
-// Returns the new DPlusVerdict (also stored in g->verdict).
+// Returns the new OoDplusVerdict (also stored in g->verdict).
 
-static DPlusVerdict oo_dplus_gate_evaluate(
+static OoDplusVerdict oo_dplus_gate_evaluate(
     DPlusGateCtx *g,
     int pressure,
     int sentinel_trip,
@@ -198,7 +198,7 @@ static DPlusVerdict oo_dplus_gate_evaluate(
     int resonance,
     int turn)
 {
-    if (!g) return DPLUS_ALLOW;
+    if (!g) return OO_DPLUS_ALLOW;
 
     g->total_evaluations++;
     g->last_pressure         = pressure;
@@ -214,54 +214,54 @@ static DPlusVerdict oo_dplus_gate_evaluate(
         return g->verdict;
     }
 
-    int new_verdict = DPLUS_ALLOW;
+    int new_verdict = OO_DPLUS_ALLOW;
     int reasons     = 0;
 
     // Rule 1: OOM — immediate EMERGENCY
     if (mem_free_mib < OO_DPLUS_MEM_EMERGENCY_MIB) {
-        new_verdict = DPLUS_EMERGENCY;
+        new_verdict = OO_DPLUS_EMERGENCY;
         reasons |= DPLUS_REASON_OOM;
     }
 
     // Rule 2: Sentinel tripped → at least QUARANTINE
     if (sentinel_trip) {
-        new_verdict = _dgate_max(new_verdict, DPLUS_QUARANTINE);
+        new_verdict = _dgate_max(new_verdict, OO_DPLUS_QUARANTINE);
         reasons |= DPLUS_REASON_SENTINEL;
     }
 
     // Rule 3: CRITICAL pressure → at least QUARANTINE
     if (pressure >= 3) {  // SOMA_PRESSURE_CRITICAL
-        new_verdict = _dgate_max(new_verdict, DPLUS_QUARANTINE);
+        new_verdict = _dgate_max(new_verdict, OO_DPLUS_QUARANTINE);
         reasons |= DPLUS_REASON_PRESSURE_CRIT;
     }
 
     // Rule 4: HIGH pressure + slow tok/s → THROTTLE
     if (pressure >= 2 && tok_s > 0 && tok_s < OO_DPLUS_MIN_TOK_S) {
-        new_verdict = _dgate_max(new_verdict, DPLUS_THROTTLE);
+        new_verdict = _dgate_max(new_verdict, OO_DPLUS_THROTTLE);
         reasons |= DPLUS_REASON_TOK_RATE;
     }
 
     // Rule 5: Behavioral resonance anomaly → QUARANTINE
     if (resonance > OO_DPLUS_RESONANCE_QUARANTINE) {
-        new_verdict = _dgate_max(new_verdict, DPLUS_QUARANTINE);
+        new_verdict = _dgate_max(new_verdict, OO_DPLUS_QUARANTINE);
         reasons |= DPLUS_REASON_RESONANCE;
     }
 
     // Rule 6: Consecutive non-ALLOW → escalate one level
     if (g->consec_non_allow >= OO_DPLUS_CONSEC_DENY_ESCALATE) {
-        if (new_verdict < DPLUS_EMERGENCY) {
+        if (new_verdict < OO_DPLUS_EMERGENCY) {
             new_verdict++;
             reasons |= DPLUS_REASON_CONSEC_DENY;
         }
     }
 
     g->last_reason_flags = reasons;
-    DPlusVerdict prev = g->verdict;
+    OoDplusVerdict prev = g->verdict;
 
     // Update consecutive counters
-    if (new_verdict != DPLUS_ALLOW) {
+    if (new_verdict != OO_DPLUS_ALLOW) {
         g->consec_non_allow++;
-        if (new_verdict == DPLUS_EMERGENCY) g->consec_emergency++;
+        if (new_verdict == OO_DPLUS_EMERGENCY) g->consec_emergency++;
         else g->consec_emergency = 0;
     } else {
         g->consec_non_allow = 0;
@@ -273,7 +273,7 @@ static DPlusVerdict oo_dplus_gate_evaluate(
     else if (new_verdict < prev) g->total_reliefs++;
 
     g->verdict_prev = prev;
-    g->verdict      = (DPlusVerdict)new_verdict;
+    g->verdict      = (OoDplusVerdict)new_verdict;
 
     // Emit UART on change
     if (g->verdict != prev) {
@@ -289,7 +289,7 @@ static DPlusVerdict oo_dplus_gate_evaluate(
 // Release manual hold and reset consecutive counters (REPL /dplus_reset).
 static void oo_dplus_gate_reset(DPlusGateCtx *g) {
     if (!g) return;
-    g->verdict          = DPLUS_ALLOW;
+    g->verdict          = OO_DPLUS_ALLOW;
     g->consec_non_allow = 0;
     g->consec_emergency = 0;
     g->manual_hold      = 0;
@@ -311,7 +311,7 @@ static int oo_dplus_gate_status_str(const DPlusGateCtx *g, char *buf, int buflen
         for(int _i=_n-1;_i>=0&&pos<buflen-1;_i--)buf[pos++]=_t[_i]; } } while(0)
 
     DGATE_PUTS("verdict=");
-    DGATE_PUTS(g_dplus_verdict_name[g->verdict > DPLUS_EMERGENCY ? 0 : g->verdict]);
+    DGATE_PUTS(g_dplus_verdict_name[g->verdict > OO_DPLUS_EMERGENCY ? 0 : g->verdict]);
     DGATE_PUTS(" consec="); DGATE_ITOA(g->consec_non_allow);
     DGATE_PUTS(" esc=");    DGATE_ITOA(g->total_escalations);
     DGATE_PUTS(" rel=");    DGATE_ITOA(g->total_reliefs);

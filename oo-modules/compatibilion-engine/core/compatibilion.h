@@ -46,6 +46,8 @@ typedef struct {
     uint64_t mem_bytes;
     uint32_t gop_width;
     uint32_t gop_height;
+    uint32_t pci_device_count;
+    uint64_t pcie_ecam_base;      /* Extended Config Space Base (from ACPI MCFG) */
     char cpu_vendor[16];
     char cpu_brand[64];
 } CompatibilionCaps;

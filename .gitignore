@@ -176,6 +176,12 @@ __pycache__/
 *.pyc
 .venv/
 
+# DIOP local runtime/test artifacts
+.diop_data/
+diop/runtime/memory/
+diop/tests/.tmp/
+diop_workspace/
+
 # Rust (oo-guard)
 oo-guard/target/
 

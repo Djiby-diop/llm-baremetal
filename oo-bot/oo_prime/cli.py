@@ -3,17 +3,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .bus_bridge import (
-    BusPaths,
-    BotBusState,
-    emit_heartbeat,
-    emit_cycle_report,
-    read_inbox,
-    react_to_messages,
-    render_bus_status,
-    run_bus_listener,
-    sync_bus_once,
-)
 from .config import load_policy
 from .engine import run_cycles, write_report
 
@@ -204,50 +193,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable all strict checks (simulation gate, apply, risk, health)",
     )
-
-    # ── Bus subcommands ──────────────────────────────────────────────────────
-    subparsers = parser.add_subparsers(dest="bus_cmd", help="Bus integration commands")
-
-    listen_p = subparsers.add_parser(
-        "bus-listen",
-        help="Run oo-bot bus event loop (reacts to Governor directives)",
-    )
-    listen_p.add_argument("--bus-dir", default="bus", help="Bus directory path")
-    listen_p.add_argument("--agent-id", default="oo-bot", help="Agent instance ID for bus")
-    listen_p.add_argument("--poll-ms", default=500, type=int, help="Poll interval in ms")
-
-    status_p = subparsers.add_parser(
-        "bus-status",
-        help="Show current governor state from bus",
-    )
-    status_p.add_argument("--bus-dir", default="bus", help="Bus directory path")
-    status_p.add_argument("--agent-id", default="oo-bot", help="Agent instance ID")
-    status_p.add_argument("--since-s", default=3600, type=int, help="Only consider last N seconds")
-
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-
-    # ── Bus subcommands (dispatched before normal cycle logic) ────────────────
-    if getattr(args, "bus_cmd", None) == "bus-listen":
-        import time
-        bus_dir = Path(getattr(args, "bus_dir", "bus")).resolve()
-        agent_id = getattr(args, "agent_id", "oo-bot")
-        poll_ms = int(getattr(args, "poll_ms", 500))
-        run_bus_listener(bus_dir, agent_id, poll_ms)
-        return 0
-
-    if getattr(args, "bus_cmd", None) == "bus-status":
-        import time
-        bus_dir = Path(getattr(args, "bus_dir", "bus")).resolve()
-        agent_id = getattr(args, "agent_id", "oo-bot")
-        since_s = int(getattr(args, "since_s", 3600))
-        since = int(time.time()) - since_s
-        state = sync_bus_once(bus_dir, agent_id, since=since)
-        print(render_bus_status(state))
-        return 0
 
     root = Path(args.root).resolve()
     policy_path = Path(args.policy).resolve()

@@ -1,0 +1,43 @@
+{
+  "min_health_score": 0.55,
+  "max_decisions_per_cycle": 8,
+  "blocked_actions": [
+    "delete_module",
+    "rewrite_genome"
+  ],
+  "require_simulation_for": [
+    "evolve_policy",
+    "reallocate_critical_resource",
+    "stabilize_module"
+  ],
+  "protected_targets": [
+    "OS-G (Operating System Genesis)",
+    "oo-guard"
+  ],
+  "apply_allowlist": [
+    "propose_docs",
+    "propose_test_scaffold",
+    "advisory_stabilize",
+    "propose_system_action_plan",
+    "propose_osg_action_plan",
+    "propose_module_doc_patch",
+    "propose_module_test_scaffold"
+  ],
+  "apply_target_prefixes": [],
+  "reminder_targets": [
+    "OS-G (Operating System Genesis)"
+  ],
+  "apply_default_mode": "safe",
+  "max_risk_points_per_cycle": 10,
+  "target_cooldown_cycles": 1,
+  "action_cooldown_by_action": {
+    "propose_system_action_plan": 2
+  },
+  "repetition_threshold": 2,
+  "repetition_statuses": [
+    "blocked",
+    "noop",
+    "skipped"
+  ],
+  "max_deferred_reasons_in_log": 10
+}
