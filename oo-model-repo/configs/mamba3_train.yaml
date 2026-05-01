@@ -1,0 +1,92 @@
+# Batterfyl Mamba3 Training Config
+# Phase P — Fine-tune mamba-130m on mamba3_training.jsonl (331 samples)
+#
+# This config defines the 3-phase training pipeline:
+#   1. latent_sft     : full-model SFT on OO domain data
+#   2. halting_head   : freeze backbone, train halt predictor
+#   3. eval_export    : evaluate + emit checkpoint to bus
+
+model_name: oo-mamba3-batterfyl
+base_model: state-spaces/mamba-130m-hf
+family: mamba-ssm
+architecture: mamba2
+params_target: 130000000
+
+dataset:
+  train: data/processed/mamba3_training.jsonl
+  split_ratio: 0.90        # 90% train / 10% eval (297 / 33 samples)
+  seed: 42
+  max_seq_len: 512
+
+tokenizer:
+  base: state-spaces/mamba-130m-hf
+  vocab_size: 50282
+
+training:
+  micro_batch_size: 4
+  gradient_accumulation: 8   # effective batch = 32
+  epochs: 3
+  max_steps: 1000
+  learning_rate: 1.0e-4
+  lr_schedule: cosine
+  warmup_steps: 50
+  weight_decay: 0.01
+  grad_clip: 1.0
+  bf16: true
+  seed: 42
+  output_dir: checkpoints/mamba3_batterfyl
+  save_every_n_steps: 200
+  log_every_n_steps: 10
+
+phases:
+  - id: 1
+    name: latent_sft
+    steps: 600
+    lr: 1.0e-4
+    freeze_backbone: false
+    description: "SFT on full 331-sample OO dataset (OO_META 64%, SWARM 3%, SELF 7%)"
+  - id: 2
+    name: halting_head
+    steps: 200
+    lr: 5.0e-5
+    freeze_backbone: true
+    trainable_params: ["halting_head"]
+    description: "Fine-tune halting head on halt_prob labels; target calibration error < 0.05"
+  - id: 3
+    name: eval_export
+    steps: 0
+    lr: 0.0
+    freeze_backbone: true
+    description: "Evaluate + export to ssm_binary; emit checkpoint event to OO bus"
+
+eval:
+  metrics:
+    - perplexity              # overall token-level perplexity on held-out split
+    - oo_meta_accuracy        # correct completion on OO_META instruction samples
+    - halt_prob_calibration   # |predicted_halt_prob - label_halt_prob| mean error
+    - governor_accuracy       # correct SovereignMode prediction on governor samples
+    - swarm_accuracy          # correct SwarmMsgType / OoNodeState prediction
+  eval_domains:
+    - OO_META
+    - SWARM
+    - SELF
+    - MATH
+  held_out_ratio: 0.10
+  target_perplexity: 3.0
+  target_halt_calibration_error: 0.05
+
+integration:
+  quantization_target: bf16
+  export_format: ssm_binary
+  runtime_target: llm-baremetal
+  ssm_infer_compatible: true
+  export_script: scripts/export_ssm_binary.py
+  bus_emit: true
+  bus_dir: /tmp/oo-bus
+  bus_agent_id: batterfyl-trainer
+
+notes: >
+  Batterfyl Phase P training run. Uses mamba3_training.jsonl (331 weighted samples).
+  Governor/Bus concepts added in Phase N (64 governor + 40 warden samples with 2x weight).
+  Swarm coordination added in Phase O (26 swarm samples).
+  Target: deployable checkpoint for bare-metal ssm_infer integration.
