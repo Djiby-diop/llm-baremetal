@@ -198,6 +198,9 @@ static void llmk_repl_no_model_loop(void) {
     g_soma_spec_buf = 0;
     // Phase Y: init distributed swarm net (peer_id=0, no fixed addr — single instance)
     soma_swarm_net_init(&g_soma_swarm_net, 0, 0ULL, 0);
+    // Phase O: init swarm node identity + sync protocol
+    oo_swarm_node_init(&g_swarm_node, 0, soma_dna_hash(&g_soma_dna), &g_soma_swarm_net, 0);
+    oo_swarm_sync_init(&g_swarm_sync, &g_swarm_node);
     // Phase P: enable immunion in record mode (logs threat patterns; no auto-react)
     immunion_set_mode(&g_immunion, IMMUNION_MODE_RECORD);
     // Phase R: enable symbion in watch mode (feeds performance samples)
@@ -235,6 +238,18 @@ static void llmk_repl_no_model_loop(void) {
                 /* Apply: g_soma_dna.cognition_bias += bias_d (best-effort) */
                 (void)bias_d; (void)temp_d; /* applied by inference layer */
             }
+        }
+
+        /* ── Phase O: Swarm node tick ───────────────────────────────────────
+         * Tick the swarm state machine on every REPL iteration.
+         * g_soma_smb.tick_count counts inference steps; we scale to ~ms.
+         * Degraded = warden pressure above 0.5 (D+ non-ALLOW threshold).
+         * ----------------------------------------------------------------- */
+        {
+            unsigned int swarm_now_ms = (unsigned int)(g_soma_smb.tick_count * 50u);
+            unsigned int swarm_dna    = soma_dna_hash(&g_soma_dna);
+            int swarm_degraded = (g_soma_warden.pressure > 0.5f) ? 1 : 0;
+            oo_swarm_node_tick(&g_swarm_node, swarm_now_ms, swarm_dna, swarm_degraded);
         }
 
         // Autorun: consume next scripted line if active.
@@ -1052,6 +1067,97 @@ static void llmk_repl_no_model_loop(void) {
             } else {
                 Print(L"\r\n[Swarm] status: %s  /soma_swarm [0|1]\r\n\r\n",
                       g_soma_swarm.enabled ? L"ON" : L"OFF");
+            }
+            continue;
+        }
+        // ── Phase O: OO Swarm node commands ─────────────────────────────────
+        if (my_strncmp(prompt, "/swarm_status", 13) == 0 && (prompt[13] == 0 || prompt[13] == ' ')) {
+            Print(L"\r\n");
+            oo_swarm_node_print_status(&g_swarm_node);
+            Print(L"  sync_ctx: sent=%d recv=%d consensus=%d\r\n\r\n",
+                  (int)g_swarm_sync.packets_sent,
+                  (int)g_swarm_sync.packets_recv,
+                  (int)g_swarm_sync.consensus_count);
+            continue;
+        }
+        if (my_strncmp(prompt, "/swarm_peers", 12) == 0 && (prompt[12] == 0 || prompt[12] == ' ')) {
+            Print(L"\r\n[SwarmNode] node_id=%d state=%s active_peers=%d\r\n",
+                  (int)g_swarm_node.node_id,
+                  (const CHAR16 *)0, /* state printed below */
+                  (int)g_swarm_node.n_active_peers);
+            /* Print state name via ASCII helper */
+            const char *sname = oo_swarm_node_state_name(g_swarm_node.state);
+            CHAR16 sname16[32]; ascii_to_char16(sname16, sname, 32);
+            Print(L"[SwarmNode] state=%s\r\n", sname16);
+            for (int pi = 0; pi < OO_NODE_PEER_MAX; pi++) {
+                const OoSwarmPeer *peer = &g_swarm_node.peers[pi];
+                if (peer->peer_id == 0 && peer->last_seen_ms == 0) continue;
+                Print(L"  peer[%d] id=%d dna=0x%08X last_seen=%dms degraded=%d\r\n",
+                      pi,
+                      (int)peer->peer_id,
+                      (unsigned int)peer->dna_hash,
+                      (int)peer->last_seen_ms,
+                      (int)peer->degraded);
+            }
+            if (g_swarm_node.n_active_peers == 0)
+                Print(L"  (no peers seen yet — single-instance mode)\r\n");
+            Print(L"\r\n");
+            continue;
+        }
+        if (my_strncmp(prompt, "/swarm_sync", 11) == 0 && (prompt[11] == 0 || prompt[11] == ' ')) {
+            const char *arg = prompt + 11;
+            while (*arg == ' ') arg++;
+            unsigned int now_ms = (unsigned int)(g_soma_smb.tick_count * 50u);
+            if (my_strncmp(arg, "hello", 5) == 0) {
+                unsigned char pkt[32];
+                oo_swarm_sync_send_hello(&g_swarm_sync, now_ms, pkt);
+                Print(L"\r\n[SwarmSync] HELLO broadcast (seq=%d)\r\n\r\n",
+                      (int)g_swarm_sync.seq);
+            } else if (my_strncmp(arg, "dna", 3) == 0) {
+                unsigned char pkt[32];
+                oo_swarm_sync_send_dna(&g_swarm_sync,
+                                       soma_dna_hash(&g_soma_dna),
+                                       0.0f, 0.0f, pkt);
+                Print(L"\r\n[SwarmSync] DNA broadcast hash=0x%08X (seq=%d)\r\n\r\n",
+                      (unsigned int)soma_dna_hash(&g_soma_dna),
+                      (int)g_swarm_sync.seq);
+            } else if (my_strncmp(arg, "status", 6) == 0) {
+                unsigned char flags = 0;
+                if (g_soma_warden.pressure > 0.5f) flags |= SWARM_STATUS_DEGRADED;
+                if (g_soma_warden.pressure > 0.8f) flags |= SWARM_STATUS_EMERGENCY;
+                if (g_swarm_node.state == OO_NODE_ISOLATED) flags |= SWARM_STATUS_ISOLATED;
+                unsigned char pkt[32];
+                oo_swarm_sync_send_status(&g_swarm_sync, flags, pkt);
+                Print(L"\r\n[SwarmSync] STATUS sent flags=0x%02X "
+                      L"(degraded=%d emergency=%d isolated=%d)\r\n\r\n",
+                      (unsigned int)flags,
+                      (int)!!(flags & SWARM_STATUS_DEGRADED),
+                      (int)!!(flags & SWARM_STATUS_EMERGENCY),
+                      (int)!!(flags & SWARM_STATUS_ISOLATED));
+            } else {
+                /* Default: run consensus if model loaded, else print status */
+                Print(L"\r\n[SwarmSync] usage: /swarm_sync [hello|dna|status]\r\n");
+                Print(L"  sent=%d recv=%d consensus=%d seq=%d\r\n\r\n",
+                      (int)g_swarm_sync.packets_sent,
+                      (int)g_swarm_sync.packets_recv,
+                      (int)g_swarm_sync.consensus_count,
+                      (int)g_swarm_sync.seq);
+            }
+            continue;
+        }
+        if (my_strncmp(prompt, "/swarm_id", 9) == 0) {
+            const char *arg = prompt + 9;
+            while (*arg == ' ') arg++;
+            if (*arg >= '0' && *arg <= '7') {
+                unsigned int new_id = (unsigned int)(*arg - '0');
+                oo_swarm_node_init(&g_swarm_node, new_id, soma_dna_hash(&g_soma_dna),
+                                   &g_soma_swarm_net,
+                                   (unsigned int)(g_soma_smb.tick_count * 50u));
+                oo_swarm_sync_init(&g_swarm_sync, &g_swarm_node);
+                Print(L"\r\n[SwarmNode] node_id set to %d — re-initialized\r\n\r\n", (int)new_id);
+            } else {
+                Print(L"\r\n[SwarmNode] current node_id=%d  usage: /swarm_id <0-7>\r\n\r\n",
+                      (int)g_swarm_node.node_id);
             }
             continue;
         }

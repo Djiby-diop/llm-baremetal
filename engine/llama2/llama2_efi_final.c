@@ -49,6 +49,8 @@
 #include "calibrion-engine/core/calibrion.h"
 #include "compatibilion-engine/core/compatibilion.h"
 #include "evolvion-engine/core/evolvion.h"
+#include "evolvion-engine/core/oo_driver_probe.h"
+#include "ghost-engine/core/oo_net_packet.h"
 #include "synaption-engine/core/synaption.h"
 #include "conscience-engine/core/conscience.h"
 #include "neuralfs-engine/core/neuralfs.h"
@@ -95,13 +97,18 @@
 #include "../ssm/soma_cortex.h"
 #include "../ssm/soma_export.h"
 #include "../ssm/soma_warden.h"
-#include "../ssm/oo_dplus_gate.h"
-#include "../ssm/oo_bus_bridge.h"
 #include "../ssm/soma_session.h"
 #include "../ssm/soma_dna_persist.h"
 #include "../ssm/soma_dna_sampler.h"
 #include "../ssm/soma_spec.h"
 #include "../ssm/soma_swarm_net.h"
+#include "../ssm/oo_swarm_node.h"    /* Phase O: swarm node identity + state machine */
+#include "../ssm/oo_swarm_sync.h"    /* Phase O: swarm sync protocol                 */
+#include "../ssm/oo_quantum_rng.h"
+#include "../ssm/oo_self_model.h"
+#include "../ssm/oo_neuralfs2.h"
+#include "../ssm/oo_shell.h"
+#include "../ssm/soma_uart.h"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);

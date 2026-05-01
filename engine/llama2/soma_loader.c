@@ -104,10 +104,165 @@ static void llmk_load_repl_cfg_diopion_best_effort(DiopionEngine *e) {
     }
 }
 
+static EFI_STATUS llmk_cortex_load_from_file(const CHAR16 *path16) {
+    if (!g_root) return EFI_NOT_READY;
+    
+    EFI_FILE_HANDLE cfh = NULL;
+    EFI_STATUS cst = uefi_call_wrapper(g_root->Open, 5, g_root, &cfh, path16, EFI_FILE_MODE_READ, 0ULL);
+    if (EFI_ERROR(cst)) return cst;
+
+    EFI_FILE_INFO *cfi = NULL; UINTN cfisz = SIZE_OF_EFI_FILE_INFO + 256;
+    uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, cfisz, (void **)&cfi);
+    if (!cfi) { uefi_call_wrapper(cfh->Close, 1, cfh); return EFI_OUT_OF_RESOURCES; }
+    uefi_call_wrapper(cfh->GetInfo, 4, cfh, &gEfiFileInfoGuid, &cfisz, cfi);
+    UINT64 csz = cfi->FileSize;
+    uefi_call_wrapper(BS->FreePool, 1, cfi);
+
+    void *cbuf = llmk_arena_alloc(&g_zones, LLMK_ARENA_ZONE_C, csz, 64);
+    if (!cbuf) { uefi_call_wrapper(cfh->Close, 1, cfh); return EFI_OUT_OF_RESOURCES; }
+
+    UINT8 *cdst = (UINT8 *)cbuf; UINT64 crem = csz;
+    while (crem > 0) {
+        UINTN chunk = (crem > 4*1024*1024) ? 4*1024*1024 : (UINTN)crem;
+        cst = uefi_call_wrapper(cfh->Read, 3, cfh, &chunk, cdst);
+        if (EFI_ERROR(cst) || chunk == 0) { uefi_call_wrapper(cfh->Close, 1, cfh); return EFI_DEVICE_ERROR; }
+        cdst += chunk; crem -= chunk;
+    }
+    uefi_call_wrapper(cfh->Close, 1, cfh);
+
+    OosiV3Header *ch = (OosiV3Header *)cbuf;
+    if (ch->magic != OOSI_V3_MAGIC) return EFI_UNSUPPORTED;
+
+    int cD  = (int)ch->d_model;
+    int cDi = (int)(ch->d_model * ch->expand);
+    int cS  = (int)ch->d_state;
+    int cDc = (int)ch->d_conv;
+    int cDt = (int)ch->dt_rank;
+    int cN  = (int)ch->n_layer;
+    int cV  = (int)ch->vocab_size;
+    int cHd = (int)ch->halt_d_input;
+
+    UINT64 csc_b = (UINT64)(3*cD + 4*cDi + cDt + 2*cS + 4) * sizeof(float);
+    UINT64 chs_b = (UINT64)cN * cDi * cS * sizeof(float);
+    UINT64 ccv_b = (UINT64)cN * cDi * cDc * sizeof(float);
+    UINT64 ccp_b = (UINT64)cN * sizeof(int);
+
+    g_soma_cortex.scratch  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, csc_b, 64);
+    g_soma_cortex.logits   = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, (UINT64)cV*sizeof(float), 16);
+    g_soma_cortex.h_state  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, chs_b, 64);
+    g_soma_cortex.conv_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, ccv_b, 64);
+    g_soma_cortex.conv_pos = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, ccp_b, 4);
+    g_soma_cortex.halt_h1  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, 512*sizeof(float), 16);
+    g_soma_cortex.halt_h2  = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, 64*sizeof(float), 16);
+    g_soma_cortex.halt_buf = llmk_arena_alloc(&g_zones, LLMK_ARENA_SCRATCH, (UINT64)(cHd+1)*sizeof(float), 16);
+
+    if (!g_soma_cortex.scratch || !g_soma_cortex.logits || !g_soma_cortex.h_state) return EFI_OUT_OF_RESOURCES;
+
+    char mname[64];
+    llmk_copy_char16_to_ascii(mname, 64, path16);
+    int cr = soma_cortex_load(&g_soma_cortex, cbuf, csz, mname);
+    return (cr == 0) ? EFI_SUCCESS : EFI_LOAD_ERROR;
+}
+
+static EFI_STATUS llmk_ssm_v3_load_from_file(const CHAR16 *path16) {
+    if (!g_root) return EFI_NOT_READY;
+    
+    EFI_FILE_HANDLE cfh = NULL;
+    EFI_STATUS cst = uefi_call_wrapper(g_root->Open, 5, g_root, &cfh, path16, EFI_FILE_MODE_READ, 0ULL);
+    if (EFI_ERROR(cst)) return cst;
+
+    EFI_FILE_INFO *cfi = NULL; UINTN cfisz = SIZE_OF_EFI_FILE_INFO + 256;
+    uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, cfisz, (void **)&cfi);
+    if (!cfi) { uefi_call_wrapper(cfh->Close, 1, cfh); return EFI_OUT_OF_RESOURCES; }
+    uefi_call_wrapper(cfh->GetInfo, 4, cfh, &gEfiFileInfoGuid, &cfisz, cfi);
+    UINT64 csz = cfi->FileSize;
+    uefi_call_wrapper(BS->FreePool, 1, cfi);
+
+    void *cbuf = llmk_arena_alloc(&g_zones, LLMK_ARENA_WEIGHTS, csz, 64);
+    if (!cbuf) { uefi_call_wrapper(cfh->Close, 1, cfh); return EFI_OUT_OF_RESOURCES; }
+
+    UINT8 *cdst = (UINT8 *)cbuf; UINT64 crem = csz;
+    while (crem > 0) {
+        UINTN chunk = (crem > 4*1024*1024) ? 4*1024*1024 : (UINTN)crem;
+        cst = uefi_call_wrapper(cfh->Read, 3, cfh, &chunk, cdst);
+        if (EFI_ERROR(cst) || chunk == 0) { uefi_call_wrapper(cfh->Close, 1, cfh); return EFI_DEVICE_ERROR; }
+        cdst += chunk; crem -= chunk;
+    }
+    uefi_call_wrapper(cfh->Close, 1, cfh);
+
+    SsmStatus st = oosi_v3_load(&g_oosi_v3_weights, cbuf, csz);
+    if (st != SSM_OK) return EFI_LOAD_ERROR;
+
+    g_oosi_v3_valid = 1;
+    Print(L"[SSM-v3] Loaded Architect brain (%d MB)\r\n", (int)(csz/(1024*1024)));
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS llmk_diop_load_model(const char *role, const char *path) {
+    if (!role || !path) return EFI_INVALID_PARAMETER;
+
+    Print(L"[DIOP] Specialized loading for role: %a from %a\r\n", role, path);
+
+    // Convert path to CHAR16
+    CHAR16 path16[192];
+    ascii_to_char16(path16, path, 192);
+
+    if (llmk_ascii_streq(role, "warden")) {
+        // Load into cortex (ZONE_C)
+        return llmk_cortex_load_from_file(path16);
+    } else if (llmk_ascii_streq(role, "architect")) {
+        // Architect uses SSM-v3 infrastructure
+        return llmk_ssm_v3_load_from_file(path16);
+    } else if (llmk_ascii_streq(role, "core")) {
+        // Core is the main backbone
+        // We need to trigger a re-load of the main model
+        // This usually happens via /load or at boot, but we can bridge it
+        Print(L"[DIOP] Core loading requires system reset or /ssm_load.\r\n");
+        return EFI_UNSUPPORTED;
+    }
+
+    return EFI_NOT_FOUND;
+}
+
 static const CHAR16 *djibion_mode_name(DjibionMode m) {
     if (m == DJIBION_MODE_OFF) return L"off";
     if (m == DJIBION_MODE_OBSERVE) return L"observe";
     if (m == DJIBION_MODE_ENFORCE) return L"enforce";
+    return L"?";
+}
+
+static const CHAR16* oo_mode_name_w(int mode, int engine_type) {
+    switch(engine_type) {
+        case 0: /* evolvion */
+            if (mode == 0) return L"off";
+            if (mode == 1) return L"stale";
+            if (mode == 2) return L"live";
+            break;
+        case 2: /* conscience */
+            if (mode == 0) return L"off";
+            if (mode == 1) return L"act";
+            if (mode == 2) return L"obs";
+            break;
+        case 8: /* collectivion */
+            if (mode == 0) return L"off";
+            if (mode == 1) return L"active";
+            if (mode == 2) return L"passive";
+            break;
+        case 9: /* metabion */
+            if (mode == 0) return L"off";
+            if (mode == 1) return L"track";
+            if (mode == 2) return L"guide";
+            break;
+        case 11: /* pheromion */
+            if (mode == 0) return L"off";
+            if (mode == 1) return L"trace";
+            if (mode == 2) return L"boost";
+            break;
+        default:
+            if (mode == 0) return L"off";
+            if (mode == 1) return L"on";
+            break;
+    }
     return L"?";
 }
 
@@ -704,6 +859,11 @@ static SomaSpecCtx     g_soma_spec;
 static ssm_f32        *g_soma_spec_buf = 0;
 // Phase Y: distributed swarm net (multi-instance peer consensus)
 static SomaSwarmNetCtx g_soma_swarm_net;
+// Phase O: OO swarm node identity + sync protocol (multi-instance coordination)
+static OoSwarmNode     g_swarm_node;
+static OoSwarmSync     g_swarm_sync;
+// Phase Z: Persistent Key-Value store (NeuralFS v2)
+static Nfs2Store       g_nfs2_store;
 // ─────────────────────────────────────────────────────────────────────────────
 
 static const CHAR16 *llmk_soma_route_name_wide(SomaRoute route) {
