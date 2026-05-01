@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-05-01T00:34:17.304797+00:00",
-  "total_samples": 331,
+  "generated_at": "2026-05-01T12:13:05.050747+00:00",
+  "total_samples": 365,
   "shuffle": true,
   "seed": 42,
   "datasets": {
@@ -11,9 +11,9 @@
       "default_domain": "FACTUAL"
     },
     "oo_native_concepts.jsonl": {
-      "raw_count": 46,
+      "raw_count": 63,
       "weight": 2,
-      "weighted_count": 92,
+      "weighted_count": 126,
       "default_domain": "OO_META"
     },
     "self_introspection.jsonl": {
@@ -48,16 +48,16 @@
     }
   },
   "domain_distribution": {
-    "OO_META": 212,
+    "OO_META": 246,
+    "MATH": 57,
     "SELF": 24,
     "CODE": 13,
-    "REASONING": 15,
-    "MATH": 57,
-    "SWARM": 10
+    "SWARM": 10,
+    "REASONING": 15
   },
   "halt_prob_stats": {
-    "count": 331,
-    "mean": 0.1376,
+    "count": 365,
+    "mean": 0.1341,
     "min": 0.01,
     "max": 0.9
   }

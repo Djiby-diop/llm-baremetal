@@ -49,6 +49,16 @@ DATASETS = [
 REQUIRED_FIELDS = {"instruction", "response"}
 
 
+def _messages_to_instruction_response(obj: dict) -> dict | None:
+    """Convert ChatML messages format to instruction/response format."""
+    msgs = obj.get("messages", [])
+    user_content = next((m["content"] for m in msgs if m.get("role") == "user"), None)
+    asst_content = next((m["content"] for m in msgs if m.get("role") == "assistant"), None)
+    if user_content is None or asst_content is None:
+        return None
+    return {"instruction": user_content, "response": asst_content}
+
+
 def load_jsonl(path: Path) -> list[dict]:
     samples = []
     if not path.exists():
@@ -61,9 +71,17 @@ def load_jsonl(path: Path) -> list[dict]:
                 continue
             try:
                 obj = json.loads(line)
+                # Support both instruction/response and ChatML messages format
                 if not REQUIRED_FIELDS.issubset(obj.keys()):
-                    print(f"[WARN] {path.name}:{i} missing required fields — skip", file=sys.stderr)
-                    continue
+                    if "messages" in obj:
+                        converted = _messages_to_instruction_response(obj)
+                        if converted is None:
+                            print(f"[WARN] {path.name}:{i} messages format incomplete — skip", file=sys.stderr)
+                            continue
+                        obj = converted
+                    else:
+                        print(f"[WARN] {path.name}:{i} missing required fields — skip", file=sys.stderr)
+                        continue
                 samples.append(obj)
             except json.JSONDecodeError as e:
                 print(f"[WARN] {path.name}:{i} JSON error: {e} — skip", file=sys.stderr)
