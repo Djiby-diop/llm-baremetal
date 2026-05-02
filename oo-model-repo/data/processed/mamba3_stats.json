@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-05-02T01:03:41.379327+00:00",
-  "total_samples": 841,
+  "generated_at": "2026-05-02T09:34:39.524735+00:00",
+  "total_samples": 865,
   "shuffle": true,
   "seed": 42,
   "datasets": {
@@ -57,19 +57,25 @@
       "weight": 2,
       "weighted_count": 436,
       "default_domain": "CODE"
+    },
+    "sleep_distilled.jsonl": {
+      "raw_count": 12,
+      "weight": 2,
+      "weighted_count": 24,
+      "default_domain": "OO_META"
     }
   },
   "domain_distribution": {
     "CODE": 449,
-    "OO_META": 286,
-    "SELF": 24,
     "REASONING": 15,
+    "OO_META": 310,
     "MATH": 57,
+    "SELF": 24,
     "SWARM": 10
   },
   "halt_prob_stats": {
-    "count": 841,
-    "mean": 0.0931,
+    "count": 865,
+    "mean": 0.0944,
     "min": 0.01,
     "max": 0.9
   }

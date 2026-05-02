@@ -46,6 +46,7 @@ DATASETS = [
     ("swarm_coordination.jsonl",  1,   "OO_META",   0.15),
     ("bio_engines.jsonl",         2,   "OO_META",   0.08),   # Phase V: 12 new bio-engines
     ("djibion.jsonl",             2,   "CODE",      0.06),   # Phase U: Djibion ultramodel 218 samples
+    ("sleep_distilled.jsonl",     2,   "OO_META",   0.12),   # Phase T3: Sleep Learning distilled rules
 ]
 
 REQUIRED_FIELDS = {"instruction", "response"}
@@ -171,8 +172,8 @@ def generate(shuffle: bool, seed: int, dry_run: bool) -> None:
     with stats_path.open("w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\nWrote {total} samples → {out_path}")
-    print(f"Stats  → {stats_path}")
+    print(f"\nWrote {total} samples -> {out_path}")
+    print(f"Stats  -> {stats_path}")
     print("\nDomain distribution:")
     for domain, count in sorted(domain_counts.items(), key=lambda x: -x[1]):
         print(f"  {domain:20s}  {count:5d}  ({100*count/total:.1f}%)")
