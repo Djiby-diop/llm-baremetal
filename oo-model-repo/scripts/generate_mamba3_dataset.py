@@ -45,6 +45,7 @@ DATASETS = [
     ("code_domain.jsonl",         1,   "CODE",      0.05),
     ("swarm_coordination.jsonl",  1,   "OO_META",   0.15),
     ("bio_engines.jsonl",         2,   "OO_META",   0.08),   # Phase V: 12 new bio-engines
+    ("djibion.jsonl",             2,   "CODE",      0.06),   # Phase U: Djibion ultramodel 218 samples
 ]
 
 REQUIRED_FIELDS = {"instruction", "response"}

@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-05-01T16:56:46.537136+00:00",
-  "total_samples": 405,
+  "generated_at": "2026-05-02T01:03:41.379327+00:00",
+  "total_samples": 841,
   "shuffle": true,
   "seed": 42,
   "datasets": {
@@ -51,19 +51,25 @@
       "weight": 2,
       "weighted_count": 40,
       "default_domain": "OO_META"
+    },
+    "djibion.jsonl": {
+      "raw_count": 218,
+      "weight": 2,
+      "weighted_count": 436,
+      "default_domain": "CODE"
     }
   },
   "domain_distribution": {
+    "CODE": 449,
     "OO_META": 286,
-    "MATH": 57,
-    "REASONING": 15,
-    "SWARM": 10,
     "SELF": 24,
-    "CODE": 13
+    "REASONING": 15,
+    "MATH": 57,
+    "SWARM": 10
   },
   "halt_prob_stats": {
-    "count": 405,
-    "mean": 0.1287,
+    "count": 841,
+    "mean": 0.0931,
     "min": 0.01,
     "max": 0.9
   }
