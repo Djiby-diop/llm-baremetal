@@ -249,6 +249,9 @@ def react_to_messages(
             # Phase T: react to DIOP gateway worker events
             diops_logs = _handle_diops_event(state, msg)
             logs.extend(diops_logs)
+        elif msg.kind == "dplus_verdict":
+            # Phase T2: D+ policy verdict from DIOP warden → update gov_mode
+            logs.extend(_handle_dplus_verdict(state, msg))
         elif msg.kind == "inference_result":
             # Phase X: DIOP trained-model inference result
             logs.extend(_handle_inference_result(state, msg))
@@ -402,6 +405,67 @@ def _handle_diops_event(state: BotBusState, msg: BusMessage) -> list[str]:
         logs.append(f"[diops] 💡 worker result ({worker}): {summary[:120]}")
         state.diop_last_infer_summary = summary[:200]
 
+    return logs
+
+
+def _handle_dplus_verdict(state: BotBusState, msg: BusMessage) -> list[str]:
+    """
+    Phase T2: React to dplus_verdict from DIOP warden → OO Governor.
+
+    Payload: "verdict=QUARANTINE reason=<R> pressure=<N> source=diop_warden[_probe]"
+
+    Maps verdicts to gov_mode and apply_mode:
+      ALLOW      → restore normal if previously degraded
+      THROTTLE   → gov_mode=degraded, apply_mode=safe
+      QUARANTINE → gov_mode=safe, apply_mode=observe
+      FORBID     → gov_mode=safe, apply_mode=observe + suspended=True
+      EMERGENCY  → gov_mode=emergency, suspended=True
+    """
+    logs: list[str] = []
+    verdict  = _kv(msg.payload, "verdict")  or "ALLOW"
+    reason   = _kv(msg.payload, "reason")   or "unknown"
+    pressure = _kv(msg.payload, "pressure") or "0"
+    source   = _kv(msg.payload, "source")   or "unknown"
+
+    logs.append(
+        f"[dplus] 🛡️  D+ verdict from {source}: {verdict} "
+        f"(reason={reason} pressure={pressure})"
+    )
+
+    prev_mode = state.gov_mode
+
+    if verdict == "ALLOW":
+        if state.gov_mode != "normal":
+            state.gov_mode   = "normal"
+            state.apply_mode = "safe"
+            state.suspended  = False
+            logs.append("[dplus] ✅  verdict=ALLOW — gov_mode restored to normal")
+
+    elif verdict == "THROTTLE":
+        state.gov_mode   = "degraded"
+        state.apply_mode = "safe"
+        if prev_mode != "degraded":
+            logs.append("[dplus] ⚠️  verdict=THROTTLE — gov_mode=degraded, apply_mode=safe")
+
+    elif verdict == "QUARANTINE":
+        state.gov_mode   = "safe"
+        state.apply_mode = "observe"
+        if prev_mode not in ("safe", "emergency"):
+            logs.append("[dplus] 🔒  verdict=QUARANTINE — gov_mode=safe, apply_mode=observe")
+
+    elif verdict in ("FORBID", "DENY"):
+        state.gov_mode   = "safe"
+        state.apply_mode = "observe"
+        state.suspended  = True
+        logs.append(f"[dplus] 🔴  verdict={verdict} — SUSPENDED (reason={reason})")
+
+    elif verdict == "EMERGENCY":
+        state.gov_mode  = "emergency"
+        state.suspended = True
+        logs.append(f"[dplus] 🚨  EMERGENCY verdict — full suspension (source={source})")
+
+    state.diop_last_kind = f"dplus_{verdict.lower()}"
+    state.diop_last_ts   = msg.ts_epoch_s
     return logs
 
 
