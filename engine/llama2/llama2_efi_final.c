@@ -79,6 +79,12 @@
 #include "../network/oo_net_wifi.h"
 #include "../network/oo_net_wifi.c"
 
+// OO Hardware Drivers (Phase Z)
+#include "../drivers/oo_audio_hda.h"
+#include "../drivers/oo_audio_hda.c"
+#include "../drivers/oo_nvme.h"
+#include "../drivers/oo_nvme.c"
+
 // OO Multicore SMP (UEFI MP Services)
 #include "../../oo-multicore/core/oo_multicore.h"
 #include "../../oo-multicore/core/oo_multicore.c"
@@ -300,4 +306,6 @@ static void llmk_copy_ascii_bounded(char *dst, int dst_cap, const char *src) {
 #include "soma_loader.c"
 #include "soma_repl.c"
 #include "soma_inference.c"
+#include "orchestrion_ci.c"
+#include "soma_distill.c"
 #include "soma_boot.c"
