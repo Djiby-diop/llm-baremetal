@@ -320,6 +320,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         Print(L"[SM] SomaMind V1 ready (budget=%d, hidden=%d)\r\n",
               (int)g_somamind.halt.budget, SOMAMIND_HIDDEN_DIM);
 
+    /* Phase Z2: USB HID keyboard (supplements PS/2) */
+    {
+        int kb_count = oo_usb_hid_init(&g_oo_usb_hid);
+        if (g_boot_verbose)
+            Print(L"[USB-HID] %d keyboard handle(s) found\r\n", kb_count);
+    }
+
+    /* Phase Z3: WiFi firmware loader (USB WiFi chipsets) */
+    {
+        int wfw_count = oo_wifi_fw_init(&g_oo_wifi_fw);
+        if (g_boot_verbose)
+            Print(L"[WiFi-FW] %d USB WiFi device(s) detected\r\n", wfw_count);
+        /* Actual firmware upload deferred until fw blob available on disk */
+    }
+
     // Best-effort graphics init (GOP). Optional: REPL still works without it.
     {
         EFI_STATUS gst = llmk_gop_init_best_effort();
@@ -4288,6 +4303,26 @@ snap_autoload_done:
                       (unsigned long long)g_somamind.total_tokens_saved);
                 Print(L"  Tools registered=%d\r\n\r\n", (int)g_somamind.tools.n_tools);
                 continue;
+            } else if (my_strncmp(prompt, "/usb_hid_status", 15) == 0) {
+                Print(L"\r\n[USB-HID] handles=%d  total_keys=%llu  buf=%s\r\n\r\n",
+                      (int)g_oo_usb_hid.n_handles,
+                      (unsigned long long)g_oo_usb_hid.total_keys,
+                      oo_usb_hid_has_data(&g_oo_usb_hid) ? L"pending" : L"empty");
+                continue;
+            } else if (my_strncmp(prompt, "/wifi_fw_status", 15) == 0) {
+                Print(L"\r\n[WiFi-FW] devices=%d  initialized=%d\r\n",
+                      (int)g_oo_wifi_fw.n_devices,
+                      (int)g_oo_wifi_fw.initialized);
+                for (int _i = 0; _i < g_oo_wifi_fw.n_devices; _i++) {
+                    Print(L"  [%d] VID=%04x PID=%04x fw_loaded=%d bytes=%u\r\n",
+                          _i,
+                          (unsigned)g_oo_wifi_fw.devices[_i].vid,
+                          (unsigned)g_oo_wifi_fw.devices[_i].pid,
+                          (int)g_oo_wifi_fw.devices[_i].fw_loaded,
+                          (unsigned)g_oo_wifi_fw.devices[_i].bytes_sent);
+                }
+                Print(L"\r\n");
+                continue;
             } else if (my_strncmp(prompt, "/nfs_save", 9) == 0) {
                 if (g_root) {
                     int st_nfs = nfs2_persist_save(&g_nfs2, g_root);
@@ -7278,6 +7313,10 @@ snap_autoload_done:
         }
 
         { CHAR16 _gdmg[80]; SPrint(_gdmg, sizeof(_gdmg), L"[dbg] gen-loop-start max_gen=%d capture=%d\r\n", max_gen_tokens, (int)g_capture_mode); llmk_serial_write_char16(_gdmg); Print(_gdmg); }
+
+        /* Phase SM: reset SSM hidden state at start of each generation turn */
+        { extern SomaMindV1 g_somamind; sm_ssm_reset(&g_somamind.ssm); g_somamind.halt.tokens_generated = 0; g_somamind.tools.found = 0; g_somamind.tools.in_tool_tag = 0; g_somamind.tools.in_args_tag = 0; }
+
         for (int step = 0; step < max_gen_tokens; step++) {
             { CHAR16 _gds[80]; SPrint(_gds, sizeof(_gds), L"[dbg] step-enter step=%d max=%d\r\n", step, max_gen_tokens); llmk_serial_write_char16(_gds); }
             // We sample from the logits produced by the previous forward pass.
@@ -7333,7 +7372,43 @@ snap_autoload_done:
                 break;
             }
 
-            // Track immediate repeats (useful as a cheap repetition signal).
+            /* ── Phase SM: SomaMind V1 per-token tick ──────────────────────────
+             * Runs after sampling but before printing — so tool injection can
+             * prepend its output before the normal decoded text.
+             * ----------------------------------------------------------------- */
+            {
+                extern SomaMindV1 g_somamind;
+                const char *sm_piece = (next >= 0 && next < config.vocab_size && tokenizer.vocab[next])
+                                       ? tokenizer.vocab[next] : "";
+                SmHaltReason sm_halt = sm_tick(&g_somamind, state.logits,
+                                               config.vocab_size, next, sm_piece);
+                if (sm_halt == SM_HALT_TOOL) {
+                    char tool_out[256];
+                    int tr = sm_exec_tool(&g_somamind, tool_out, (int)sizeof(tool_out));
+                    if (tr == SM_TOOL_EXEC && tool_out[0]) {
+                        uefi_print_utf8_bytes("\r\n[OO-Tool] ", 11);
+                        uefi_print_utf8_bytes(tool_out, (int)__builtin_strlen(tool_out));
+                        uefi_print_utf8_bytes("\r\n", 2);
+                    }
+                    if (!stop_reason) {
+                        stop_reason = L"sm_tool";
+                        stop_token  = next;
+                        stop_step   = step;
+                        stop_pos    = pos;
+                    }
+                    break;
+                } else if (sm_halt == SM_HALT_CONFIDENT) {
+                    /* Early halt — OO is confident, no need to keep generating */
+                    if (!stop_reason) {
+                        stop_reason = L"sm_confident";
+                        stop_token  = next;
+                        stop_step   = step;
+                        stop_pos    = pos;
+                    }
+                    break;
+                }
+                /* SM_HALT_BUDGET handled by max_gen_tokens anyway */
+            }
             if (next == token) immediate_repeat_count++;
             
             // Check if stuck on same token (per conversation)

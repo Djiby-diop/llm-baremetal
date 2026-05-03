@@ -5505,6 +5505,8 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/voice_status",    L"Show voice/NLP router stats (intents, queries, auto-exec count)" },
     { "/voice_echo",      L"Toggle voice echo: /voice_echo 1 or 0" },
     { "/somamind_status", L"Show SomaMind V1 SSM state, adaptive halting stats, tool-use info" },
+    { "/usb_hid_status", L"Show USB HID keyboard handles and buffer state" },
+    { "/wifi_fw_status",  L"Show USB WiFi firmware loader status (RTL/MT chipsets)" },
 
     { "/diag_on", L"Enable Diagnostion diagnostics" },
     { "/diag_off", L"Disable Diagnostion diagnostics" },
@@ -5760,6 +5762,8 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/voice_status",
         "/voice_echo",
         "/somamind_status",
+        "/usb_hid_status",
+        "/wifi_fw_status",
         "/logo",
         "/commands",
         "/help",

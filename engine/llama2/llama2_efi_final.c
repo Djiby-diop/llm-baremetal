@@ -85,6 +85,14 @@
 #include "../drivers/oo_nvme.h"
 #include "../drivers/oo_nvme.c"
 
+// OO USB HID keyboard (Phase Z2)
+#include "../drivers/oo_usb_hid.h"
+#include "../drivers/oo_usb_hid.c"
+
+// OO WiFi firmware loader (Phase Z3)
+#include "../drivers/oo_wifi_fw.h"
+#include "../drivers/oo_wifi_fw.c"
+
 // OO Multicore SMP (UEFI MP Services)
 #include "../../oo-multicore/core/oo_multicore.h"
 #include "../../oo-multicore/core/oo_multicore.c"

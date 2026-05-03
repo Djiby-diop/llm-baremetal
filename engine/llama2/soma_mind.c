@@ -2384,6 +2384,8 @@ static OoMulticoreCtx g_oo_multicore;
 static OoAudioHda  g_oo_audio;
 static OoNvmeCtrl  g_oo_nvme;
 static SomaMindV1  g_somamind;
+static OoUsbHid    g_oo_usb_hid;
+static OoWifiFw    g_oo_wifi_fw;
 static SymbionEngine g_symbion;
 static CollectivionEngine g_collectivion;
 static MetabionEngine g_metabion;
