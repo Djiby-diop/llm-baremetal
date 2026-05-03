@@ -310,6 +310,11 @@ OosiV3HaltResult oosi_v3_forward_one(OosiV3GenCtx *ctx, int token_id) {
     // 3. Final RMSNorm
     _v3_rmsnorm(x_cur, w->final_norm, x_out, D, 1e-5f);
 
+    // 3.5 Soma-Adapter (LoRA In-Situ)
+    // Applies autonomous learned delta to the hidden state before the LM head.
+    extern void oit_lora_apply_global(float *vec, int dim);
+    oit_lora_apply_global(x_out, D);
+
     // 4. LM head (int8): [V × D] → logits
     _v3_matvec_q8(w->lm_head_q8, w->lm_head_scale,
                   x_out, ctx->logits, w->vocab_size, D);

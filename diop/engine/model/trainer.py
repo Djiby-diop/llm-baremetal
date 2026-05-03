@@ -285,7 +285,19 @@ class DiopModelTrainer:
             for line in f:
                 line = line.strip()
                 if line:
-                    try: out.append(json.loads(line))
+                    try: 
+                        s = json.loads(line)
+                        # --- OO Dreamion Bridge ---
+                        # If this is a synthetic dream exported by the baremetal AP core:
+                        if s.get("type") == "dream_synth":
+                            p_ids = s.get("prompt_ids", [])
+                            c_ids = s.get("completion_ids", [])
+                            if p_ids and c_ids and self.tokenizer:
+                                # The AP only gives us raw IDs. We decode them back to text here
+                                # so the standard DIOP pipeline can process them!
+                                s["prompt"] = self.tokenizer.decode(p_ids)
+                                s["completion"] = self.tokenizer.decode(c_ids)
+                        out.append(s)
                     except Exception: pass
         return out
 

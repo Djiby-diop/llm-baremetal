@@ -38,8 +38,9 @@ typedef enum {
     OO_CORE_ROLE_RATIONAL   = 1,  /* splitbrain RATIONAL instance */
     OO_CORE_ROLE_CREATIVE   = 2,  /* splitbrain CREATIVE instance */
     OO_CORE_ROLE_DREAM      = 3,  /* dreamion background */
-    OO_CORE_ROLE_SENTINEL   = 4,  /* pressure + watchdog monitor */
-    OO_CORE_ROLE_IDLE       = 5,  /* parked, available */
+    OO_CORE_ROLE_DISTILL    = 4,  /* autonomous in-situ training */
+    OO_CORE_ROLE_SENTINEL   = 5,  /* pressure + watchdog monitor */
+    OO_CORE_ROLE_IDLE       = 6,  /* parked, available */
 } OoCoreRole;
 
 /* ── Core state ────────────────────────────────────────────────────── */

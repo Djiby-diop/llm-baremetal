@@ -61,6 +61,10 @@ typedef struct {
     char          journal_path[OO_BRIDGE_VAL_LEN];
     char          kv_path     [OO_BRIDGE_VAL_LEN];
 
+    /* Model path + version (auto-detected from extension) */
+    char model_path   [OO_BRIDGE_VAL_LEN]; /* e.g. "EFI/OO/MODEL.OOSI3" */
+    int  model_version;                     /* 2=OOSI v2, 3=OOSI v3, 0=unknown */
+
     /* LLM overrides (0 = use default from repl.cfg) */
     int   max_tokens;      /* 0 = no override */
     float temperature;     /* 0.0 = no override */

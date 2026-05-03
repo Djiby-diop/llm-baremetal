@@ -64,7 +64,7 @@ SsmStatus llmk_oo_infer_tokenizer_init(
 );
 
 // ============================================================
-// Boot-time initialization
+// Boot-time initialization — OOSI v2 (existing format)
 //
 // Call once after loading:
 //   - MAMB weights (float32) into cold zone
@@ -88,6 +88,38 @@ SsmStatus llmk_oo_infer_init(
     float top_p,            // 0.9 recommended
     uint32_t seed,
     int max_tokens          // 64 recommended for bare-metal
+);
+
+// ============================================================
+// Boot-time initialization — OOSI v3 (self-contained format)
+//
+// OOSI v3 bundles ALL weights (no separate MAMB binary).
+// Caller must map the entire .oosi3 file into contiguous memory,
+// then pass the OosiV3Weights pointer from oosi_v3_load().
+//
+// Warm buffers: same layout as v2 except halt_h1/h2 sizing
+// may differ — use OosiV3HaltHead.d_input for exact sizes.
+//
+// Returns SSM_OK on success.
+// ============================================================
+#include "../engine/ssm/oosi_v3_loader.h"
+#include "../engine/ssm/oosi_v3_infer.h"
+
+SsmStatus llmk_oo_infer_init_v3(
+    const OosiV3Weights *w,     // from oosi_v3_load()
+    ssm_f32 *scratch,           // [d_model + 4*d_inner + dt_rank + 2*d_state + 2*d_model]
+    ssm_f32 *logits,            // [vocab_size]
+    ssm_f32 *h_state,           // [n_layer * d_inner * d_state]
+    ssm_f32 *conv_buf,          // [n_layer * d_inner * d_conv]
+    int     *conv_pos,          // [n_layer]
+    ssm_f32 *halt_h1,           // [512]
+    ssm_f32 *halt_h2,           // [64]
+    ssm_f32 *halt_out,          // [1]
+    float    halt_threshold,    // 0.7 recommended
+    float    temperature,       // 0.8 recommended
+    float    top_p,             // 0.9 recommended
+    uint32_t seed,
+    int      max_tokens
 );
 
 // ============================================================

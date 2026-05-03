@@ -143,7 +143,11 @@ static void llmk_repl_no_model_loop(void) {
 
     Print(L"OK: REPL ready (no model). Type /help\r\n");
 
+#include "orchestrion_ci.h"
+OrchestrionCI g_ci;
+
     // Initialize SomaMind (Router + DNA + SMB + Dream + Meta + Swarm stub)
+    ci_init(&g_ci);
     soma_router_init(&g_soma_router);
     soma_dna_init_default(&g_soma_dna);
     soma_smb_init(&g_soma_smb);
@@ -256,6 +260,15 @@ static void llmk_repl_no_model_loop(void) {
                 soma_dreamion_flush_to_disk((void *)g_root);
                 g_dreamion_flush_requested = 0;   /* acknowledge */
             }
+        }
+
+        /* ── Phase X: Autonomous In-Situ Training Watchdog ─────────────
+         * Monitors OO_DREAM.JSONL and DIOP_EXP.JSONL. If new data is present,
+         * triggers a background training cycle on the LoRA adapter.
+         * ----------------------------------------------------------------- */
+        extern OitEngine g_oit;
+        if (g_oit.enabled && g_root) {
+            oit_watchdog_tick(&g_oit, (void *)g_root);
         }
 
         /* ── Phase O: Swarm node tick ───────────────────────────────────────
@@ -3933,6 +3946,11 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"  ");
             llmk_print_ascii(result.text);
             Print(L"\r\n\r\n");
+
+            /* ── Phase CI: Autonomous Command Intelligence ──────────────── */
+            extern OrchestrionCI g_ci;
+            ci_parse_and_execute(&g_ci, result.text);
+
             continue;
         }
         if (my_strncmp(prompt, "/ssm_reset", 10) == 0) {

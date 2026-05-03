@@ -329,7 +329,18 @@ static void dreami_run_synth(DreamionEngine *e) {
         off = dreami_append(line, DREAMION_JSONL_LINE_MAX, off,
                             ",\"output_len\":");
         off = dreami_fmt_u32(line, DREAMION_JSONL_LINE_MAX, off, p->output_len);
-        off = dreami_append(line, DREAMION_JSONL_LINE_MAX, off, "}\n");
+
+        off = dreami_append(line, DREAMION_JSONL_LINE_MAX, off, ",\"prompt_ids\":[");
+        for (uint32_t i = 0; i < p->input_len; i++) {
+            if (i > 0) off = dreami_append(line, DREAMION_JSONL_LINE_MAX, off, ",");
+            off = dreami_fmt_u32(line, DREAMION_JSONL_LINE_MAX, off, p->input_tokens[i]);
+        }
+        off = dreami_append(line, DREAMION_JSONL_LINE_MAX, off, "],\"completion_ids\":[");
+        for (uint32_t i = 0; i < p->output_len; i++) {
+            if (i > 0) off = dreami_append(line, DREAMION_JSONL_LINE_MAX, off, ",");
+            off = dreami_fmt_u32(line, DREAMION_JSONL_LINE_MAX, off, p->output_tokens[i]);
+        }
+        off = dreami_append(line, DREAMION_JSONL_LINE_MAX, off, "]} \n");
         (void)off;
         e->jsonl.line_count++;
     }
