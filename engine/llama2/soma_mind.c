@@ -2555,6 +2555,10 @@ int llmk_diop_orchestrate_select_model(const char *prompt) {
 static OoSelfModel g_oo_self_model;
 /* Phase F: NeuralFS v2 — persistent RAM key-value store */
 static Nfs2Store   g_nfs2;
+/* Phase W: Natural Language → REPL Command Router */
+static OvrEngine   g_ovr;
+/* Phase X: In-Situ Self-Training Engine */
+static OitEngine   g_oit;
 
 // Forward declarations (used by early config loaders)
 static EFI_STATUS llmk_open_read_file(EFI_FILE_HANDLE *out, const CHAR16 *name);
@@ -2606,4 +2610,134 @@ static void llmk_diopion_burst_finish_one(int *io_max_gen_tokens, int *io_top_k,
     if (io_top_k) *io_top_k = g_diopion_saved_top_k;
     if (io_temperature) *io_temperature = g_diopion_saved_temperature;
     g_diopion_burst_active = 0;
+}
+
+/* ── OIT helpers (EFI context) ──────────────────────────────────────── */
+
+/* Count '\n' lines in a JSONL file on the FAT32 volume.
+ * Reads file in 4KB chunks (stack-safe). Returns 0 on error. */
+uint32_t oit_count_jsonl_lines(const void *root_dir, const unsigned short *path16) {
+    EFI_FILE_HANDLE root = (EFI_FILE_HANDLE)(UINTN)root_dir;
+    if (!root || !path16) return 0;
+
+    EFI_FILE_HANDLE fh = NULL;
+    EFI_STATUS st = uefi_call_wrapper(root->Open, 5, root, &fh,
+                                      (CHAR16 *)path16,
+                                      EFI_FILE_MODE_READ, 0ULL);
+    if (EFI_ERROR(st) || !fh) return 0;
+
+    uint32_t lines = 0;
+    CHAR8 buf[512];
+    for (;;) {
+        UINTN rlen = sizeof(buf);
+        st = uefi_call_wrapper(fh->Read, 3, fh, &rlen, buf);
+        if (EFI_ERROR(st) || rlen == 0) break;
+        for (UINTN i = 0; i < rlen; i++)
+            if (buf[i] == '\n') lines++;
+    }
+    uefi_call_wrapper(fh->Close, 1, fh);
+    return lines;
+}
+
+/* Read training pairs from a JSONL file.
+ * Expects lines of the form: {"prompt":"...","response":"...","score":N}
+ * Returns number of pairs parsed (up to max_pairs). */
+int oit_read_jsonl_pairs(void *root_dir, const unsigned short *path16,
+                          OitPair *pairs, int max_pairs) {
+    EFI_FILE_HANDLE root = (EFI_FILE_HANDLE)(UINTN)root_dir;
+    if (!root || !path16 || !pairs || max_pairs <= 0) return 0;
+
+    EFI_FILE_HANDLE fh = NULL;
+    EFI_STATUS st = uefi_call_wrapper(root->Open, 5, root, &fh,
+                                      (CHAR16 *)path16,
+                                      EFI_FILE_MODE_READ, 0ULL);
+    if (EFI_ERROR(st) || !fh) return 0;
+
+    /* Seek near end to get most recent pairs (last ~8KB) */
+    uefi_call_wrapper(fh->SetPosition, 2, fh, (UINT64)-1ULL);
+    UINT64 size = 0;
+    {
+        EFI_FILE_INFO *fi = NULL;
+        UINTN fi_sz = 0;
+        EFI_STATUS s2 = uefi_call_wrapper(fh->GetInfo, 4, fh,
+                            &gEfiFileInfoGuid, &fi_sz, NULL);
+        if (s2 == EFI_BUFFER_TOO_SMALL && fi_sz > 0) {
+            uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, fi_sz + 8, (void**)&fi);
+            if (fi) {
+                uefi_call_wrapper(fh->GetInfo, 4, fh, &gEfiFileInfoGuid, &fi_sz, fi);
+                size = fi->FileSize;
+                uefi_call_wrapper(BS->FreePool, 1, fi);
+            }
+        }
+    }
+    UINT64 seek_off = (size > 8192) ? size - 8192 : 0;
+    uefi_call_wrapper(fh->SetPosition, 2, fh, seek_off);
+
+    /* Read into stack buffer */
+    static char jsonl_buf[8192 + 256];  /* static: avoid stack overflow */
+    UINTN rlen = sizeof(jsonl_buf) - 1;
+    uefi_call_wrapper(fh->Read, 3, fh, &rlen, jsonl_buf);
+    uefi_call_wrapper(fh->Close, 1, fh);
+    jsonl_buf[rlen] = '\0';
+
+    int n_pairs = 0;
+    char *line = jsonl_buf;
+
+    /* Skip to first newline if we seeked mid-line */
+    if (seek_off > 0) { while (*line && *line != '\n') line++; if (*line) line++; }
+
+    while (*line && n_pairs < max_pairs) {
+        /* Find end of line */
+        char *eol = line;
+        while (*eol && *eol != '\n') eol++;
+        char save = *eol; *eol = '\0';
+
+        /* Minimal JSON field extractor: find "prompt":"..." and "response":"..." */
+        OitPair *pair = &pairs[n_pairs];
+        pair->input[0]  = '\0';
+        pair->output[0] = '\0';
+        pair->quality   = 0.5f;
+
+        /* Extract "prompt": value */
+        char *pp = llmk_ascii_strstr(line, "\"prompt\"");
+        if (pp) {
+            pp += 8; /* skip "prompt" */
+            while (*pp && *pp != '"') pp++;
+            if (*pp == '"') pp++;
+            int i = 0;
+            while (*pp && *pp != '"' && i < 255)
+                pair->input[i++] = *pp++;
+            pair->input[i] = '\0';
+        }
+        /* Extract "response": value */
+        char *rp = llmk_ascii_strstr(line, "\"response\"");
+        if (rp) {
+            rp += 10;
+            while (*rp && *rp != '"') rp++;
+            if (*rp == '"') rp++;
+            int i = 0;
+            while (*rp && *rp != '"' && i < 255)
+                pair->output[i++] = *rp++;
+            pair->output[i] = '\0';
+        }
+        /* Extract "score": value → quality */
+        char *sp = llmk_ascii_strstr(line, "\"score\"");
+        if (sp) {
+            sp += 7;
+            while (*sp == ' ' || *sp == ':' || *sp == ' ') sp++;
+            int score = 0, neg = 0;
+            if (*sp == '-') { neg = 1; sp++; }
+            while (*sp >= '0' && *sp <= '9') score = score * 10 + (*sp++ - '0');
+            if (neg) score = -score;
+            pair->quality = (score >= 5) ? 0.9f : (score >= 0) ? 0.5f : 0.1f;
+        }
+
+        if (pair->input[0] && pair->output[0]) n_pairs++;
+
+        *eol = save;
+        line = eol;
+        if (*line == '\n') line++;
+    }
+
+    return n_pairs;
 }

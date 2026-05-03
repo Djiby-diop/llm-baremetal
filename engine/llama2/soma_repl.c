@@ -287,6 +287,49 @@ static void llmk_repl_no_model_loop(void) {
         }
         if (prompt[0] == 0) continue;
 
+        /* ── Phase W: Voice/NLP pre-parser ─────────────────────────────────
+         * If the input is NOT a / command, run it through the voice router.
+         * - STRONG_MATCH (score >= 40): auto-execute the mapped command
+         * - WEAK_MATCH   (score 20-39): ask for confirmation (or auto if verbose=0)
+         * - NO_MATCH:     fall through to LLM inference as normal
+         * ----------------------------------------------------------------- */
+        if (!ovr_is_command(prompt) && !ovr_should_skip(prompt)) {
+            OvrResult vr = ovr_route(&g_ovr, prompt);
+            if (vr.level != OVR_NO_MATCH && vr.cmd[0]) {
+                if (g_ovr.echo_intent) {
+                    CHAR16 label16[72], cmd16[OVR_CMD_MAX + 4];
+                    ascii_to_char16(label16, vr.label, 72);
+                    ascii_to_char16(cmd16, vr.cmd, OVR_CMD_MAX + 4);
+                    Print(L"\r\n[OO] %s -> %s\r\n",
+                          label16, cmd16);
+                }
+                /* Inject the routed command into the prompt buffer */
+                int i = 0;
+                while (vr.cmd[i] && i < 511) { prompt[i] = vr.cmd[i]; i++; }
+                prompt[i] = '\0';
+                /* Fall through: prompt is now a /command and will be handled below */
+            }
+        }
+
+        /* ── Phase Y: Automation watchdog ─────────────────────────────────
+         * Tick the OIT watchdog every REPL cycle. Fires silently when
+         * DIOP_EXP.JSONL + OO_DREAM.JSONL accumulate OIT_TRIGGER_LINES new lines.
+         * Also auto-saves NFS2 every 50 inferences to avoid data loss.
+         * ----------------------------------------------------------------- */
+        {
+            static uint32_t _auto_save_ctr = 0;
+            _auto_save_ctr++;
+            if (_auto_save_ctr % 50 == 0 && g_root) {
+                nfs2_persist_save(&g_nfs2, g_root);
+                /* Also persist updated LoRA delta */
+                oit_lora_save(&g_oit, &g_nfs2);
+            }
+            /* Watchdog: autonomous training trigger */
+            if (_auto_save_ctr % 10 == 0) {
+                oit_watchdog_tick(&g_oit, (void *)g_root);
+            }
+        }
+
         if (my_strncmp(prompt, "/help", 5) == 0 || my_strncmp(prompt, "/commands", 9) == 0) {
             llmk_print_no_model_help();
             continue;

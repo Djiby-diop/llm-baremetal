@@ -71,6 +71,19 @@
 #include "djibmark.h"
 #include "interface.h"      // Simple loading overlay (off by default)
 
+// OO Network Stack (Ethernet + DHCP + UDP + BootSwarm)
+#include "../network/oo_net_core.h"
+#include "../network/oo_net_core.c"
+
+// OO WiFi Driver (EFI WiFi2 Protocol + USB SNP fallback)
+#include "../network/oo_net_wifi.h"
+#include "../network/oo_net_wifi.c"
+
+// OO Multicore SMP (UEFI MP Services)
+#include "../../oo-multicore/core/oo_multicore.h"
+#include "../../oo-multicore/core/oo_multicore.c"
+
+
 // GGUF support
 #include "gguf_loader.h"
 #include "gguf_infer.h"
@@ -93,6 +106,8 @@
 #include "../ssm/soma_reflex.h"
 #include "../ssm/soma_logic.h"
 #include "../ssm/soma_memory.h"
+#include "../ssm/oo_neuralfs2_persist.h"
+#include "../ssm/oo_neuralfs2_persist.c"
 #include "../ssm/soma_journal.h"
 #include "../ssm/soma_cortex.h"
 #include "../ssm/soma_export.h"
@@ -109,6 +124,14 @@
 #include "../ssm/oo_neuralfs2.h"
 #include "../ssm/oo_shell.h"
 #include "../ssm/soma_uart.h"
+
+// Phase W: Natural Language → REPL Command Router
+#include "../voice/oo_voice_router.h"
+#include "../voice/oo_voice_router.c"
+
+// Phase X: In-Situ Self-Training Engine (RAG + LoRA delta)
+#include "../trainer/oo_insitu_train.h"
+#include "../trainer/oo_insitu_train.c"
 
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);

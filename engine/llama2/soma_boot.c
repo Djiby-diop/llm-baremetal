@@ -291,6 +291,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     llmk_boot_mark(L"cpu_detect");
 
+    /* Phase W: Voice/NLP command router */
+    ovr_init(&g_ovr);
+    g_ovr.echo_intent = 1;  /* Print "[OO heard: ...] → /cmd" before executing */
+    if (g_boot_verbose) Print(L"[OVR] Voice router ready (%d intents, FR+EN)\r\n", OVR_INTENT_COUNT);
+
+    /* Phase X: In-Situ Self-Training Engine */
+    oit_init(&g_oit, 512);  /* 512 = typical hidden_dim for small models */
+    oit_lora_load(&g_oit, &g_nfs2);  /* Reload saved LoRA delta if present */
+    if (g_boot_verbose) Print(L"[OIT] Self-training engine ready (rank=%d, RAG+LoRA)\r\n",
+                               g_oit.lora.rank);
+
     /* Phase M: Multicore SMP Initialization */
     oo_multicore_init(&g_oo_multicore);
     if (g_oo_multicore.enabled && g_oo_multicore.core_count > 1) {
@@ -4205,6 +4216,42 @@ snap_autoload_done:
                     int ok = oo_net_boot_announce(0, 0, 0, 0);
                     Print(L"\r\n[net] BootSwarm announce %s\r\n\r\n", ok ? L"sent" : L"failed");
                 }
+                continue;
+            } else if (my_strncmp(prompt, "/oo_train_status", 16) == 0) {
+                /* Show in-situ training engine status */
+                extern void oit_print_status(const OitEngine *e, void (*print_fn)(const char *));
+                oit_print_status(&g_oit, (void (*)(const char *))llmk_print_ascii);
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/oo_train", 9) == 0) {
+                /* Manually trigger one in-situ training cycle */
+                Print(L"\r\n[OIT] Starting in-situ training cycle...\r\n");
+                if (g_root) {
+                    int n = oit_train_from_jsonl(&g_oit, (void *)g_root);
+                    /* Also save updated LoRA delta to NFS2 */
+                    oit_lora_save(&g_oit, &g_nfs2);
+                    nfs2_persist_save(&g_nfs2, g_root);
+                    Print(L"[OIT] Processed %d pairs. LoRA delta saved.\r\n\r\n", n);
+                } else {
+                    Print(L"[OIT] Error: no root FS available.\r\n\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/voice_status", 13) == 0) {
+                /* Show voice router stats */
+                Print(L"\r\n[OVR] Voice Router Status\r\n");
+                Print(L"  intents: %d  threshold_strong: %d  threshold_weak: %d\r\n",
+                      (int)OVR_INTENT_COUNT,
+                      (int)g_ovr.threshold_strong,
+                      (int)g_ovr.threshold_weak);
+                Print(L"  queries_routed: %u  auto_executed: %u\r\n",
+                      (unsigned)g_ovr.queries_routed,
+                      (unsigned)g_ovr.queries_auto_executed);
+                Print(L"  echo_intent: %s\r\n\r\n",
+                      g_ovr.echo_intent ? L"on" : L"off");
+                continue;
+            } else if (my_strncmp(prompt, "/voice_echo ", 12) == 0) {
+                g_ovr.echo_intent = (prompt[12] == '1') ? 1 : 0;
+                Print(L"\r\n[OVR] echo_intent = %s\r\n\r\n", g_ovr.echo_intent ? L"on" : L"off");
                 continue;
             } else if (my_strncmp(prompt, "/smp_status", 11) == 0) {
                 oo_multicore_print(&g_oo_multicore);
