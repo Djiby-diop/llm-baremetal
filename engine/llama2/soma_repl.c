@@ -226,17 +226,35 @@ static void llmk_repl_no_model_loop(void) {
          * If there is no input (prompt == 0 at end of loop), dreamion_tick()
          * will count this as an idle cycle.  When user types something,
          * dreamion_tick_active() wakes the dream engine.
-         * A lightweight dreamion_step() runs one task per idle iteration.
          * ---------------------------------------------------------------- */
         dreamion_tick(&g_dreamion, 1);
-        if (g_dreamion.mode != DREAMION_MODE_OFF && !g_dreamion.awake) {
-            dreamion_step(&g_dreamion);
+        
+        /* If Multicore is active and AP is handling Dreamion, we skip step here */
+        int smp_dreamion = (g_oo_multicore.enabled && g_oo_multicore.core_count > 1);
+        if (!smp_dreamion && g_dreamion.mode != DREAMION_MODE_OFF && !g_dreamion.awake) {
+            DreamionTaskType dt = dreamion_step(&g_dreamion);
             /* Apply pending DNA mutation to SomaDNA if available */
             if (dreamion_has_dna_mutation(&g_dreamion)) {
                 float bias_d = 0.0f, temp_d = 0.0f;
                 dreamion_pop_dna_mutation(&g_dreamion, &bias_d, &temp_d);
-                /* Apply: g_soma_dna.cognition_bias += bias_d (best-effort) */
-                (void)bias_d; (void)temp_d; /* applied by inference layer */
+                /* Applied best-effort — no lock needed (single core) */
+                g_soma_dna.cognition_bias += bias_d;
+                if (g_soma_dna.cognition_bias < 0.0f) g_soma_dna.cognition_bias = 0.0f;
+                if (g_soma_dna.cognition_bias > 1.0f) g_soma_dna.cognition_bias = 1.0f;
+            }
+            if (dt == DREAMION_TASK_FLUSH_JSONL && g_root) {
+                extern int soma_dreamion_flush_to_disk(void *root_dir);
+                soma_dreamion_flush_to_disk((void *)g_root);
+            }
+        }
+
+        /* BSP auto-flush: AP1 Dreamion signalled that its JSONL buffer is full */
+        if (smp_dreamion) {
+            extern volatile int g_dreamion_flush_requested;
+            if (g_dreamion_flush_requested && g_root) {
+                extern int soma_dreamion_flush_to_disk(void *root_dir);
+                soma_dreamion_flush_to_disk((void *)g_root);
+                g_dreamion_flush_requested = 0;   /* acknowledge */
             }
         }
 
@@ -3745,6 +3763,20 @@ static void llmk_repl_no_model_loop(void) {
                                       (int)(ds.recommended_bias_delta * 1000));
                         }
                     }
+
+                    // Phase D: Record this interaction into the Dreamion Engine for background consolidation
+                    if (n_out > 0) {
+                        uint16_t d_prompt[32];
+                        uint16_t d_out[32];
+                        int p_len = n > 32 ? 32 : n;
+                        int o_len = n_out > 32 ? 32 : n_out;
+                        for (int i = 0; i < p_len; i++) d_prompt[i] = (uint16_t)(ids[i] & 0xFFFF);
+                        for (int i = 0; i < o_len; i++) d_out[i] = (uint16_t)(out_ids[i] & 0xFFFF);
+                        float halt_prob = 0.0f; /* We don't have final r.halt_prob easily accessible here, use 0.0f for now */
+                        dreamion_record_inference(&g_dreamion, d_prompt, (uint8_t)p_len, d_out, (uint8_t)o_len,
+                                                  halt_prob, soma_first_conf, (uint8_t)soma_domain_used, (uint8_t)soma_core_used);
+                    }
+
                     // Phase H: record this interaction in session memory
                     if (g_soma_memory.enabled && n_out > 0) {
                         // Build a short ASCII response summary from first decoded tokens

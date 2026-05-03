@@ -1977,6 +1977,9 @@ static int g_cfg_oo_conf_threshold = 60;
 // OO M4: optional network read-only tick (best-effort; never required to boot).
 // Default is 0 (off).
 static int g_cfg_oo_net = 0;
+// OO WiFi variables
+static char g_cfg_wifi_ssid[128];
+static char g_cfg_wifi_pass[128];
 // Optional: URL hint to fetch a signed manifest from (placeholder for now).
 static char g_cfg_oo_manifest_url[192];
 
@@ -2377,6 +2380,7 @@ static NeuralfsEngine g_neuralfs;
 static GhostEngine g_ghost;
 static ImmunionEngine g_immunion;
 static DreamionEngine g_dreamion;
+static OoMulticoreCtx g_oo_multicore;
 static SymbionEngine g_symbion;
 static CollectivionEngine g_collectivion;
 static MetabionEngine g_metabion;
@@ -2385,6 +2389,62 @@ static MorphionEngine g_morphion;
 static PheromionEngine g_pheromion;
 
 /* Novel engines — Phase 2 (emotional, temporal, hunger, introspection, apoptosis) */
+
+/* ── AP Dreamion Worker ─────────────────────────────────────────── */
+/* Volatile flag: AP1 sets this to 1 when the JSONL buffer needs flushing.
+ * BSP checks this in the REPL loop and calls soma_dreamion_flush_to_disk(). */
+volatile int g_dreamion_flush_requested = 0;
+
+void ap_dreamion_worker(void) {
+    while (1) {
+        if (g_dreamion.mode != DREAMION_MODE_OFF && !g_dreamion.awake) {
+            DreamionTaskType task = dreamion_step(&g_dreamion);
+            
+            /* Signal BSP to flush JSONL when buffer is ready */
+            if (task == DREAMION_TASK_FLUSH_JSONL)
+                g_dreamion_flush_requested = 1;
+
+            /* Apply pending DNA mutation to SomaDNA — best-effort, no lock */
+            if (dreamion_has_dna_mutation(&g_dreamion)) {
+                float bias_d = 0.0f, temp_d = 0.0f;
+                dreamion_pop_dna_mutation(&g_dreamion, &bias_d, &temp_d);
+                g_soma_dna.cognition_bias += bias_d;
+                if (g_soma_dna.cognition_bias < 0.0f) g_soma_dna.cognition_bias = 0.0f;
+                if (g_soma_dna.cognition_bias > 1.0f) g_soma_dna.cognition_bias = 1.0f;
+            }
+        }
+        /* pause: lowers power + acts as memory barrier for g_dreamion.awake reload */
+        __asm__ __volatile__("pause" ::: "memory");
+    }
+}
+
+/* ── Dreamion IO ────────────────────────────────────────────────── */
+static void dreamion_flush_cb(const char *line, uint32_t len, void *userdata) {
+    EFI_FILE_HANDLE fh = (EFI_FILE_HANDLE)userdata;
+    if (!fh || !line || len == 0) return;
+    UINTN wl = len;
+    uefi_call_wrapper(fh->Write, 3, fh, &wl, (void *)line);
+}
+
+int soma_dreamion_flush_to_disk(void *root_dir) {
+    EFI_FILE_HANDLE root = (EFI_FILE_HANDLE)root_dir;
+    if (!root) return 0;
+    
+    EFI_FILE_HANDLE fh = NULL;
+    EFI_STATUS st = uefi_call_wrapper(root->Open, 5, root, &fh, L"OO_DREAM.JSONL",
+                                      EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0ULL);
+    if (EFI_ERROR(st) || !fh) return 0;
+    
+    /* Seek EOF */
+    uefi_call_wrapper(fh->SetPosition, 2, fh, 0xFFFFFFFFFFFFFFFFULL);
+    
+    uint32_t flushed = dreamion_flush_jsonl(&g_dreamion, dreamion_flush_cb, fh);
+    
+    uefi_call_wrapper(fh->Flush, 1, fh);
+    uefi_call_wrapper(fh->Close, 1, fh);
+    return (int)flushed;
+}
+
 static LimbionEngine    g_limbion;      /* 2D affective state modulates inference */
 static ChronionEngine   g_chronion;     /* temporal self-awareness (boot/step/DNA age) */
 static TrophionEngine   g_trophion;     /* compute hunger (idle→verbose, gorged→terse) */

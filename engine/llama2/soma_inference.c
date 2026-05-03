@@ -1222,6 +1222,10 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
             if (llmk_cfg_parse_bool(val, &b)) {
                 g_cfg_oo_net = (b != 0);
             }
+        } else if (llmk_cfg_streq_ci(key, "wifi_ssid")) {
+            llmk_cfg_copy_ascii_token(g_cfg_wifi_ssid, (int)sizeof(g_cfg_wifi_ssid), val);
+        } else if (llmk_cfg_streq_ci(key, "wifi_pass") || llmk_cfg_streq_ci(key, "wifi_password")) {
+            llmk_cfg_copy_ascii_token(g_cfg_wifi_pass, (int)sizeof(g_cfg_wifi_pass), val);
         } else if (llmk_cfg_streq_ci(key, "oo_manifest_url") || llmk_cfg_streq_ci(key, "oo_manifest") || llmk_cfg_streq_ci(key, "oo_manifest_uri")) {
             llmk_cfg_copy_ascii_token(g_cfg_oo_manifest_url, (int)sizeof(g_cfg_oo_manifest_url), val);
         }
@@ -5488,6 +5492,15 @@ static const llmk_cmd_help_entry g_llmk_cmd_help[] = {
     { "/compat_probe", L"Re-probe CPU features" },
     { "/oo_status", L"Show OO organism engines status" },
 
+    { "/smp_status",   L"Show SMP multicore status (cores, roles, mailbox)" },
+    { "/nfs_save",     L"Persist NFS2 key-value store to disk (OONFS2.BIN)" },
+    { "/nfs_list",     L"List all NFS2 records (key + write count + preview)" },
+    { "/nfs_get",      L"Read NFS2 record:  /nfs_get <key>" },
+    { "/nfs_set",      L"Write NFS2 record: /nfs_set <key> <value>" },
+    { "/nfs_del",      L"Delete NFS2 record: /nfs_del <key>" },
+    { "/dream_status", L"Show Dreamion stats (AP1 idle, deep cycles, synth pairs, DNA mutations)" },
+    { "/dream_flush",  L"Flush AP1 Dreamion JSONL training buffer to OO_DREAM.JSONL" },
+
     { "/diag_on", L"Enable Diagnostion diagnostics" },
     { "/diag_off", L"Disable Diagnostion diagnostics" },
     { "/diag_status", L"Show diagnostics status + counters" },
@@ -5729,6 +5742,14 @@ static void llmk_try_tab_complete_command(CHAR16 *buffer, int max_len, int *io_p
         "/diopion_profile",
         "/diopion_burst",
         "/diopion_status",
+        "/smp_status",
+        "/nfs_save",
+        "/nfs_list",
+        "/nfs_get",
+        "/nfs_set",
+        "/nfs_del",
+        "/dream_status",
+        "/dream_flush",
         "/logo",
         "/commands",
         "/help",

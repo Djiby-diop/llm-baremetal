@@ -268,6 +268,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     /* Phase F: NeuralFS v2 — initialize RAM key-value store */
     {
         nfs2_init(&g_nfs2);
+        
+        // Tentative de chargement du NeuralFS persistant depuis le disque
+        if (g_root) {
+            int st_nfs = nfs2_persist_load(&g_nfs2, g_root);
+            if (g_boot_verbose) {
+                if (st_nfs == 0) Print(L"[NFS2] Loaded persistent store from disk\r\n");
+                else Print(L"[NFS2] No existing store found on disk (starting fresh)\r\n");
+            }
+        }
+        
         if (g_boot_verbose) Print(L"[NFS2] ready (%u slots, ~%u KB)\r\n\r\n",
                                    (unsigned)NFS2_MAX_RECORDS,
                                    (unsigned)(sizeof(Nfs2Store) >> 10));
@@ -280,6 +290,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                            g_quantum_rng.seed_last);
 
     llmk_boot_mark(L"cpu_detect");
+
+    /* Phase M: Multicore SMP Initialization */
+    oo_multicore_init(&g_oo_multicore);
+    if (g_oo_multicore.enabled && g_oo_multicore.core_count > 1) {
+        int target_ap = 1; /* AP1 sera le Dreamion */
+        
+        /* Déclaration locale de la fonction wrapper pour l'AP */
+        extern void ap_dreamion_worker(void); 
+        
+        oo_multicore_wake_ap(&g_oo_multicore, target_ap, OO_CORE_ROLE_DREAM, ap_dreamion_worker);
+        if (g_boot_verbose) Print(L"[SMP] Dreamion AP worker assigned to core %d\r\n", target_ap);
+    }
 
     // Best-effort graphics init (GOP). Optional: REPL still works without it.
     {
@@ -299,6 +321,47 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
 
     llmk_boot_mark(L"gop_init");
+
+    // ========================================================================
+    // [NET] OO Network Stack — Ethernet + DHCP + BootSwarm
+    // Opt-in via repl.cfg: oo_net=1
+    // ========================================================================
+    if (g_cfg_oo_net) {
+        if (g_boot_verbose) Print(L"[NET] Initializing network...\r\n");
+
+        // 1. Try WiFi first
+        int wifi_ok = 0;
+        if (g_cfg_wifi_ssid[0]) {
+            oo_wifi_set_credentials(g_cfg_wifi_ssid, g_cfg_wifi_pass);
+            wifi_ok = oo_wifi_init_best_effort();
+        }
+
+        // 2. Try Ethernet (SNP)
+        int net_ok = oo_net_init_best_effort();
+        
+        if (net_ok || wifi_ok) {
+            if (net_ok) Print(L"OK: Network link ready (%a)\r\n", g_oo_net.hostname);
+            int dhcp_ok = oo_net_dhcp_best_effort(OO_NET_DHCP_TIMEOUT_S);
+            if (dhcp_ok) {
+                Print(L"OK: DHCP — IP=");
+                oo_net_print_ip(g_oo_net.ip);
+                Print(L"  GW=");
+                oo_net_print_ip(g_oo_net.gateway);
+                Print(L"\r\n\r\n");
+                /* Announce presence to swarm peers */
+                oo_net_boot_announce(
+                    g_cfg_oo_enable ? (UINT32)g_oo_last_mode : 0,
+                    0, 0, 0);
+                if (g_boot_verbose) Print(L"[NET] BootSwarm announce sent\r\n\r\n");
+            } else {
+                Print(L"NOTE: DHCP timeout — network available but no IP\r\n\r\n");
+            }
+        } else {
+            if (g_boot_verbose) Print(L"[NET] No network interface found\r\n\r\n");
+        }
+    }
+
+    llmk_boot_mark(L"net_init");
 
     // Show diagnostic info if requested via repl.cfg: boot_diag=1
     if (g_boot_diag) {
@@ -4124,7 +4187,165 @@ snap_autoload_done:
                       (int)g_thanatosion.dying_pressure_steps);
                 llmk_oo_print_persistence_status_best_effort();
                 continue;
-
+            } else if (my_strncmp(prompt, "/net_status", 11) == 0) {
+                oo_net_print_status();
+                continue;
+            } else if (my_strncmp(prompt, "/wifi_status", 12) == 0) {
+                oo_wifi_print_status();
+                continue;
+            } else if (my_strncmp(prompt, "/wifi_scan", 10) == 0) {
+                int n = oo_wifi_scan();
+                Print(L"\r\n[WiFi] Scanned %d network(s)\r\n", n);
+                oo_wifi_print_status();
+                continue;
+            } else if (my_strncmp(prompt, "/net_announce", 13) == 0) {
+                if (!g_oo_net.eth_ready && !g_oo_net.wifi_ready) {
+                    Print(L"\r\n[net] Network not ready. Set oo_net=1 in repl.cfg\r\n\r\n");
+                } else {
+                    int ok = oo_net_boot_announce(0, 0, 0, 0);
+                    Print(L"\r\n[net] BootSwarm announce %s\r\n\r\n", ok ? L"sent" : L"failed");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/smp_status", 11) == 0) {
+                oo_multicore_print(&g_oo_multicore);
+                continue;
+            } else if (my_strncmp(prompt, "/nfs_save", 9) == 0) {
+                if (g_root) {
+                    int st_nfs = nfs2_persist_save(&g_nfs2, g_root);
+                    if (st_nfs == 0) Print(L"\r\n[NFS2] State successfully saved to disk.\r\n\r\n");
+                    else Print(L"\r\n[NFS2] Error saving state to disk (err=%d).\r\n\r\n", st_nfs);
+                } else {
+                    Print(L"\r\n[NFS2] Error: Root file system not available.\r\n\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/nfs_list", 9) == 0) {
+                /* List all NFS2 records */
+                Print(L"\r\n[NFS2] %u / %u records used, %u total writes\r\n",
+                      (unsigned)g_nfs2.record_count,
+                      (unsigned)NFS2_MAX_RECORDS,
+                      (unsigned)g_nfs2.total_writes);
+                int shown = 0;
+                for (int i = 0; i < NFS2_MAX_RECORDS; i++) {
+                    if (!(g_nfs2.records[i].flags & NFS2_FLAG_USED)) continue;
+                    CHAR16 name16[NFS2_NAME_MAX + 2];
+                    char preview[48];
+                    int plen = (int)g_nfs2.records[i].data_len;
+                    if (plen > 46) plen = 46;
+                    for (int j = 0; j < plen; j++) {
+                        char c = g_nfs2.records[i].data[j];
+                        preview[j] = (c >= 32 && c < 127) ? c : '.';
+                    }
+                    preview[plen] = '\0';
+                    CHAR16 data16[50];
+                    ascii_to_char16(name16, g_nfs2.records[i].name, NFS2_NAME_MAX + 2);
+                    ascii_to_char16(data16, preview, 50);
+                    Print(L"  [%2d] %-20s | wr=%-3u | %s%s\r\n",
+                          i, name16,
+                          (unsigned)g_nfs2.records[i].write_count,
+                          data16,
+                          (int)g_nfs2.records[i].data_len > 46 ? L"..." : L"");
+                    shown++;
+                }
+                if (shown == 0) Print(L"  (empty)\r\n");
+                Print(L"\r\n");
+                continue;
+            } else if (my_strncmp(prompt, "/nfs_get ", 9) == 0) {
+                /* Get a NFS2 record by key */
+                const char *key = prompt + 9;
+                while (*key == ' ') key++;
+                const char *val = nfs2_read(&g_nfs2, key);
+                if (val) {
+                    CHAR16 k16[NFS2_NAME_MAX + 2];
+                    CHAR16 v16[NFS2_DATA_MAX + 2];
+                    ascii_to_char16(k16, key, NFS2_NAME_MAX + 2);
+                    ascii_to_char16(v16, val, NFS2_DATA_MAX + 2);
+                    Print(L"\r\n[NFS2] %s =\r\n  %s\r\n\r\n", k16, v16);
+                } else {
+                    CHAR16 k16[NFS2_NAME_MAX + 2];
+                    ascii_to_char16(k16, key, NFS2_NAME_MAX + 2);
+                    Print(L"\r\n[NFS2] Key not found: %s\r\n\r\n", k16);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/nfs_set ", 9) == 0) {
+                /* Set a NFS2 record: /nfs_set <key> <value> */
+                char *kv = (char *)(prompt + 9);
+                while (*kv == ' ') kv++;
+                char *sp = kv;
+                while (*sp && *sp != ' ') sp++;
+                if (*sp == '\0') {
+                    Print(L"\r\n[NFS2] Usage: /nfs_set <key> <value>\r\n\r\n");
+                } else {
+                    *sp = '\0';
+                    const char *nfs_key = kv;
+                    const char *nfs_val = sp + 1;
+                    while (*nfs_val == ' ') nfs_val++;
+                    CHAR16 k16[NFS2_NAME_MAX + 2];
+                    ascii_to_char16(k16, nfs_key, NFS2_NAME_MAX + 2);
+                    int rc = nfs2_write(&g_nfs2, nfs_key, nfs_val);
+                    if (rc == 0)
+                        Print(L"\r\n[NFS2] OK: %s written.\r\n\r\n", k16);
+                    else if (rc == -1)
+                        Print(L"\r\n[NFS2] Error: store is full (%u/%u).\r\n\r\n",
+                              (unsigned)g_nfs2.record_count, (unsigned)NFS2_MAX_RECORDS);
+                    else if (rc == -2)
+                        Print(L"\r\n[NFS2] Error: key %s is read-only.\r\n\r\n", k16);
+                    else
+                        Print(L"\r\n[NFS2] Error: data too long (max %u bytes).\r\n\r\n",
+                              (unsigned)(NFS2_DATA_MAX - 1));
+                    *sp = ' '; /* restore prompt (unused after continue) */
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/nfs_del ", 9) == 0) {
+                /* Delete a NFS2 record */
+                const char *key = prompt + 9;
+                while (*key == ' ') key++;
+                CHAR16 k16[NFS2_NAME_MAX + 2];
+                ascii_to_char16(k16, key, NFS2_NAME_MAX + 2);
+                int rc = nfs2_delete(&g_nfs2, key);
+                if (rc == 0)
+                    Print(L"\r\n[NFS2] Deleted: %s\r\n\r\n", k16);
+                else if (rc == -1)
+                    Print(L"\r\n[NFS2] Key not found: %s\r\n\r\n", k16);
+                else
+                    Print(L"\r\n[NFS2] Error: key %s is read-only.\r\n\r\n", k16);
+                continue;
+            } else if (my_strncmp(prompt, "/dream_status", 13) == 0) {
+                /* Show Dreamion engine stats (AP1 activity) */
+                const char *mode_name = dreamion_mode_name_ascii(g_dreamion.mode);
+                const char *task_name = dreamion_task_name_ascii(g_dreamion.current_task);
+                CHAR16 mode16[32], task16[32];
+                ascii_to_char16(mode16, mode_name, 32);
+                ascii_to_char16(task16, task_name, 32);
+                Print(L"\r\n[Dreamion] mode=%-10s  awake=%d  task=%s\r\n",
+                      mode16, g_dreamion.awake, task16);
+                Print(L"  idle_ticks=%-8u  active_ticks=%u\r\n",
+                      (unsigned)g_dreamion.idle_ticks,
+                      (unsigned)g_dreamion.active_ticks);
+                Print(L"  cycles: total=%-6u  light=%-6u  deep=%u\r\n",
+                      (unsigned)g_dreamion.stats.total_dream_cycles,
+                      (unsigned)g_dreamion.stats.light_cycles,
+                      (unsigned)g_dreamion.stats.deep_cycles);
+                Print(L"  dedup_pairs=%-6u  synth_pairs=%-6u  dna_mutations=%u\r\n",
+                      (unsigned)g_dreamion.stats.dedup_pairs,
+                      (unsigned)g_dreamion.stats.synth_pairs_generated,
+                      (unsigned)g_dreamion.stats.dna_mutations_suggested);
+                Print(L"  jsonl_flushed=%-6u  wakes=%u\r\n",
+                      (unsigned)g_dreamion.stats.jsonl_lines_flushed,
+                      (unsigned)g_dreamion.stats.wakes);
+                int smp_active = (g_oo_multicore.enabled && g_oo_multicore.core_count > 1);
+                Print(L"  AP1_dreamion=%s  pending_dna=%d\r\n\r\n",
+                      smp_active ? L"active" : L"BSP(fallback)",
+                      g_dreamion.pending_dna_ready);
+                continue;
+            } else if (my_strncmp(prompt, "/dream_flush", 12) == 0) {
+                extern int soma_dreamion_flush_to_disk(void *root_dir);
+                if (g_root) {
+                    int flushed = soma_dreamion_flush_to_disk((void *)g_root);
+                    Print(L"\r\n[Dreamion] Flushed %d synthetic memories to OO_DREAM.JSONL\r\n\r\n", flushed);
+                } else {
+                    Print(L"\r\n[Dreamion] Error: Root FS not available.\r\n\r\n");
+                }
+                continue;
             } else if (my_strncmp(prompt, "/gop", 4) == 0) {
                 if (!g_gop_fb32) {
                     Print(L"\r\n  GOP: not available\r\n\r\n");
