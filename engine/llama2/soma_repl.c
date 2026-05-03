@@ -276,6 +276,11 @@ OrchestrionCI g_ci;
          * g_soma_smb.tick_count counts inference steps; we scale to ~ms.
          * Degraded = warden pressure above 0.5 (D+ non-ALLOW threshold).
          * ----------------------------------------------------------------- */
+        /* ── Phase V: Soma-Vitals (Metabolism) ──────────────────────────
+         * Monitor physical state (temp, battery) and emit vital events.
+         * ----------------------------------------------------------------- */
+        soma_vitals_tick();
+
         {
             unsigned int swarm_now_ms = (unsigned int)(g_soma_smb.tick_count * 50u);
             unsigned int swarm_dna    = soma_dna_hash(&g_soma_dna);

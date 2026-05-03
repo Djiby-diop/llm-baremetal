@@ -148,6 +148,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         llmk_print_logo();
     }
 
+    // ========================================================================
+    // [1.5/7] Soma-Vitals Engine
+    // ========================================================================
+    if (g_boot_verbose) {
+        Print(L"[1.5/7] Initializing Vitals Engine (Metabolism)...\r\n");
+    }
+    soma_vitals_init();
+
     if (g_boot_verbose) {
         Print(L"OK: File system ready\r\n\r\n");
     }

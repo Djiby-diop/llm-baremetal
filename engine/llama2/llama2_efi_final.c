@@ -320,4 +320,5 @@ static void llmk_copy_ascii_bounded(char *dst, int dst_cap, const char *src) {
 #include "soma_inference.c"
 #include "orchestrion_ci.c"
 #include "soma_distill.c"
+#include "soma_vitals.c"
 #include "soma_boot.c"
