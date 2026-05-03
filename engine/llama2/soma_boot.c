@@ -314,6 +314,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         if (g_boot_verbose) Print(L"[SMP] Dreamion AP worker assigned to core %d\r\n", target_ap);
     }
 
+    /* Phase SM: SomaMind V1 — compact SSM + adaptive halting + tool-use */
+    sm_init(&g_somamind, 384);
+    if (g_boot_verbose)
+        Print(L"[SM] SomaMind V1 ready (budget=%d, hidden=%d)\r\n",
+              (int)g_somamind.halt.budget, SOMAMIND_HIDDEN_DIM);
+
     // Best-effort graphics init (GOP). Optional: REPL still works without it.
     {
         EFI_STATUS gst = llmk_gop_init_best_effort();
@@ -4255,6 +4261,32 @@ snap_autoload_done:
                 continue;
             } else if (my_strncmp(prompt, "/smp_status", 11) == 0) {
                 oo_multicore_print(&g_oo_multicore);
+                continue;
+            } else if (my_strncmp(prompt, "/somamind_status", 16) == 0) {
+                /* SomaMind V1 SSM + halting stats — inline Print wrapper */
+                Print(L"[SM] SomaMind V1 status:\r\n");
+                {
+                    char smb[512];
+                    /* Build status string manually since sm_print_status needs a callback */
+                    int si = 0;
+                    #define SM_APPEND(s) do { const char *_p = (s); while (*_p && si < 480) smb[si++] = *_p++; } while(0)
+                    SM_APPEND("  ssm.step="); SM_APPEND("(see below)");
+                    smb[si] = '\0';
+                    #undef SM_APPEND
+                }
+                Print(L"  SSM   step=%u  output_norm=%d/100  initialized=%d\r\n",
+                      (unsigned)g_somamind.ssm.step,
+                      (int)(g_somamind.ssm.last_output_norm * 100.0f),
+                      (int)g_somamind.initialized);
+                Print(L"  Halt  tokens=%u/%u  conf_ema=%d/1000\r\n",
+                      (unsigned)g_somamind.halt.tokens_generated,
+                      (unsigned)g_somamind.halt.budget,
+                      (int)(g_somamind.halt.confidence_ema * 1000.0f));
+                Print(L"  Stats confident=%llu  tool=%llu  saved=%llu tokens\r\n",
+                      (unsigned long long)g_somamind.total_halts_confident,
+                      (unsigned long long)g_somamind.total_halts_tool,
+                      (unsigned long long)g_somamind.total_tokens_saved);
+                Print(L"  Tools registered=%d\r\n\r\n", (int)g_somamind.tools.n_tools);
                 continue;
             } else if (my_strncmp(prompt, "/nfs_save", 9) == 0) {
                 if (g_root) {

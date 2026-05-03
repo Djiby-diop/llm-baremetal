@@ -139,6 +139,10 @@
 #include "../trainer/oo_insitu_train.h"
 #include "../trainer/oo_insitu_train.c"
 
+// Phase SM: SomaMind V1 — compact SSM + adaptive halting + tool-use
+#include "../ssm/oo_somamind_v1.h"
+#include "../ssm/oo_somamind_v1.c"
+
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 
