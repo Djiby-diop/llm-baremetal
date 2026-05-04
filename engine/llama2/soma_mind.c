@@ -1,3 +1,6 @@
+/* forward declaration needed before first use at ~line 204 */
+static const char *llmk_model_format_ascii(LlmkModelFormat fmt);
+
 static void llmk_mind_release_sidecar_blob(void) {
     if (g_mind_sidecar_blob) {
         uefi_call_wrapper(BS->FreePool, 1, g_mind_sidecar_blob);
@@ -2454,6 +2457,7 @@ static LimbionEngine    g_limbion;      /* 2D affective state modulates inferenc
 static ChronionEngine   g_chronion;     /* temporal self-awareness (boot/step/DNA age) */
 static TrophionEngine   g_trophion;     /* compute hunger (idle→verbose, gorged→terse) */
 static MirrorionEngine  g_mirrorion;    /* self-introspection Q/A → OO_MIRROR.JSONL */
+static ThanatosionEngine g_thanatosion; /* graceful death & rebirth engine */
 typedef struct {
     int active_role; // 0=none, 1=core, 2=warden, 3=architect
     int external_learning_active;
@@ -2462,8 +2466,8 @@ typedef struct {
 
 static DiopIntelligenceCluster g_diop_cluster;
 
-extern EFI_STATUS llmk_open_binary_file_append(EFI_FILE_HANDLE *out_file, const CHAR16 *path);
-extern EFI_STATUS llmk_file_write_bytes(EFI_FILE_HANDLE f, const void *buf, UINTN count);
+static EFI_STATUS llmk_open_binary_file_append(EFI_FILE_HANDLE *out_file, const CHAR16 *path);
+static EFI_STATUS llmk_file_write_bytes(EFI_FILE_HANDLE f, const void *buf, UINTN count);
 
 void llmk_diop_experience_capture(const char *prompt, const char *response, int score) {
     if (g_diopion.mode == DIOPION_MODE_OFF) return;
@@ -2541,7 +2545,7 @@ void llmk_diop_experience_capture(const char *prompt, const char *response, int 
 
 // Mandatory Orchestrator: chooses the model based on prompt complexity
 int llmk_diop_orchestrate_select_model(const char *prompt) {
-    if (g_diopion.mode != DIOPION_MODE_AUTONOMOUS) return 0; // Default to Core
+    if (g_diopion.mode != DIOPION_MODE_ENFORCE) return 0; // Default to Core
     
     // Simple heuristic: if prompt contains "security" or "audit", use Warden
     if (llmk_ascii_strstr(prompt, "security") || llmk_ascii_strstr(prompt, "audit")) {

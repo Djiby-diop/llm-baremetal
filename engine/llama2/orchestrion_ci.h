@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ORCHESTRION_CI_H
+#define ORCHESTRION_CI_H
 #include <stdint.h>
 
 /* orchestrion_ci.h — Command Intelligence Orchestrator 
@@ -20,7 +21,10 @@ typedef enum {
     CI_ACTION_DREAM_FLUSH,
     CI_ACTION_SYSTEM_REBOOT,
     CI_ACTION_UI_TOGGLE,
+    CI_ACTION_WEB_SEARCH,
 } CiAction;
 
 void ci_init(OrchestrionCI *ci);
 int  ci_parse_and_execute(OrchestrionCI *ci, const char *llm_output);
+
+#endif /* ORCHESTRION_CI_H */

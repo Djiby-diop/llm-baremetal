@@ -2,21 +2,7 @@
 #include <efi.h>
 #include <efilib.h>
 
-/* Simple substring search since we don't have strstr in baremetal by default */
-static const char* my_strstr(const char *haystack, const char *needle) {
-    if (!haystack || !needle) return NULL;
-    for (int i = 0; haystack[i]; i++) {
-        int j = 0;
-        while (needle[j] && haystack[i+j] == needle[j]) j++;
-        if (!needle[j]) return &haystack[i];
-    }
-    return NULL;
-}
-
-static int my_strcmp(const char *s1, const char *s2) {
-    while (*s1 && (*s1 == *s2)) { s1++; s2++; }
-    return *(unsigned char*)s1 - *(unsigned char*)s2;
-}
+/* my_strstr and my_strcmp provided by soma_inference.c in the unity build */
 
 void ci_init(OrchestrionCI *ci) {
     if (!ci) return;
@@ -56,6 +42,11 @@ int ci_parse_and_execute(OrchestrionCI *ci, const char *llm_output) {
                  
         else if (my_strstr(llm_output, "redémarre le système") ||
                  my_strstr(llm_output, "reboot")) action = CI_ACTION_SYSTEM_REBOOT;
+
+        else if (my_strstr(llm_output, "cherche sur le net") ||
+                 my_strstr(llm_output, "vérifie sur internet") ||
+                 my_strstr(llm_output, "qui est ") ||
+                 my_strstr(llm_output, "qu'est-ce que ")) action = CI_ACTION_WEB_SEARCH;
     }
 
     if (action == CI_ACTION_NONE) return 0;
@@ -78,8 +69,8 @@ int ci_parse_and_execute(OrchestrionCI *ci, const char *llm_output) {
         case CI_ACTION_DREAM_FLUSH:
             Print(L"DREAM_FLUSH\r\n");
             extern int soma_dreamion_flush_to_disk(void *root_dir);
-            extern void* g_root;
-            soma_dreamion_flush_to_disk(g_root);
+            extern EFI_FILE_HANDLE g_root;
+            soma_dreamion_flush_to_disk((void *)g_root);
             break;
         case CI_ACTION_SYSTEM_REBOOT:
             Print(L"SYSTEM_REBOOT\r\n");
@@ -89,6 +80,12 @@ int ci_parse_and_execute(OrchestrionCI *ci, const char *llm_output) {
             Print(L"UI_TOGGLE\r\n");
             extern int g_tui_enabled;
             g_tui_enabled = !g_tui_enabled;
+            break;
+        case CI_ACTION_WEB_SEARCH:
+            Print(L"WEB_SEARCH (Autonomous)\r\n");
+            /* Emit UART signal for the host loop to catch and process */
+            extern void soma_uart_emit(const char *s);
+            soma_uart_emit("[oo-event] kind=web_search_request query=auto");
             break;
         default: break;
     }

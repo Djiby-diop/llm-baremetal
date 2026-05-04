@@ -98,7 +98,7 @@ void collectivion_send_hello(CollectivionEngine *e, GhostEngine *ghost) {
 void collectivion_sync_dna(CollectivionEngine *e, GhostEngine *ghost,
                            uint32_t dna_hash, float delta_temp, float delta_topp) {
     if (!e || !ghost) return;
-    if (e->mode != COLLECTIVION_MODE_ACTIVE) return;
+    if (e->mode != COLLECTIVION_MODE_PULSE) return;
     
     // Also emit as an official PATCH event for the host
     collectivion_send_msg(e, ghost, OO_EVENT_PATCH, &dna_hash, 4);
@@ -165,8 +165,7 @@ int collectivion_recv_all(CollectivionEngine *e, GhostEngine *ghost,
 const char *collectivion_mode_name_ascii(CollectivionMode mode) {
     switch (mode) {
         case COLLECTIVION_MODE_OFF:     return "off";
-        case COLLECTIVION_MODE_PASSIVE: return "passive";
-        case COLLECTIVION_MODE_ACTIVE:  return "active";
+        case COLLECTIVION_MODE_PULSE:     return "active";
         default:                        return "?";
     }
 }

@@ -86,7 +86,7 @@ static int wifi2_find(void) {
  * We identify them by checking if there are >1 SNP handles and the first one
  * is already being used by oo_net_core (Ethernet). */
 static int wifi2_find_snp_fallback(void) {
-    EFI_GUID snp_guid = EFI_SIMPLE_NETWORK_PROTOCOL;
+    EFI_GUID snp_guid = EFI_SIMPLE_NETWORK_PROTOCOL_GUID;
     EFI_HANDLE *handles = NULL;
     UINTN count = 0;
 

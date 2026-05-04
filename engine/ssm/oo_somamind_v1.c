@@ -1,3 +1,5 @@
+﻿#ifndef OO_SOMAMIND_V1_C_IMPL
+#define OO_SOMAMIND_V1_C_IMPL
 /* oo_somamind_v1.c — SomaMind V1 implementation
  * Freestanding C11. No libc, no malloc, no printf.
  *
@@ -347,3 +349,4 @@ void sm_print_status(const SomaMindV1 *sm, void (*print_fn)(const char *)) {
     sm_pfn_str(print_fn, sm->tools.pending_name);
     sm_pfn_str(print_fn, "\"\r\n");
 }
+#endif /* OO_SOMAMIND_V1_C_IMPL */

@@ -148,27 +148,37 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         llmk_print_logo();
     }
 
+    llmk_serial_write_char16(L"[dbg] post-logo\r\n");
+
     // ========================================================================
     // [1.5/7] Soma-Vitals Engine
     // ========================================================================
     if (g_boot_verbose) {
         Print(L"[1.5/7] Initializing Vitals Engine (Metabolism)...\r\n");
     }
+    llmk_serial_write_char16(L"[dbg] before vitals_init\r\n");
     soma_vitals_init();
+    llmk_serial_write_char16(L"[dbg] after vitals_init\r\n");
 
     if (g_boot_verbose) {
         Print(L"OK: File system ready\r\n\r\n");
     }
 
+    llmk_serial_write_char16(L"[dbg] before boot_mark\r\n");
     llmk_boot_mark(L"fs_ready");
+    llmk_serial_write_char16(L"[dbg] after boot_mark\r\n");
 
     // OO M1: best-effort persistent boot tick (writes OOSTATE.BIN + appends OOJOUR.LOG)
     // Opt-in via repl.cfg: oo_enable=1
+    llmk_serial_write_char16(L"[dbg] before oo_boot_tick\r\n");
     llmk_oo_boot_tick_best_effort();
+    llmk_serial_write_char16(L"[dbg] after oo_boot_tick\r\n");
 
     // OO M4: best-effort network read-only tick (placeholder)
     // Opt-in via repl.cfg: oo_net=1 (and oo_enable=1)
+    llmk_serial_write_char16(L"[dbg] before oo_net_tick\r\n");
     llmk_oo_net_tick_best_effort();
+    llmk_serial_write_char16(L"[dbg] after oo_net_tick\r\n");
 
     /* NeuralFS: index EFI root directory files at boot (best-effort) */
     if (g_root && g_neuralfs.mode != NEURALFS_MODE_OFF) {

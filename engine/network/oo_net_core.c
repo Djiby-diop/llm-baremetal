@@ -58,7 +58,7 @@ void oo_net_print_ip(UINT32 ip_le) {
 /* ── SNP Init ─────────────────────────────────────────────────────── */
 int oo_net_init_best_effort(void) {
     net_zero(&g_oo_net, sizeof(g_oo_net));
-    EFI_GUID snp_guid = EFI_SIMPLE_NETWORK_PROTOCOL;
+    EFI_GUID snp_guid = EFI_SIMPLE_NETWORK_PROTOCOL_GUID;
     EFI_HANDLE *handles = NULL;
     UINTN count = 0;
     EFI_STATUS st = uefi_call_wrapper(BS->LocateHandleBuffer, 5,

@@ -314,6 +314,13 @@ static void llmk_copy_ascii_bounded(char *dst, int dst_cap, const char *src) {
 
 
 /* ── Unity includes (compiled as one translation unit) ───────────── */
+#include "limbion-engine/core/limbion.h"
+#include "chronion-engine/core/chronion.h"
+#include "trophion-engine/core/trophion.h"
+#include "mirrorion-engine/core/mirrorion.h"
+#include "thanatosion-engine/core/thanatosion.h"
+/* tentative forward definition — soma_loader.c provides the actual definition */
+static SomaDNA g_soma_dna;
 #include "soma_mind.c"
 #include "soma_loader.c"
 #include "soma_repl.c"

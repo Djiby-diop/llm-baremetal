@@ -93,6 +93,12 @@ REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	ssm_infer.o mamba_block.o mamba_weights.o bpe_tokenizer.o \
 	oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o \
 	$(SOMA_OBJS) \
+	engine/voice/oo_voice_router.o \
+	engine/voice/oo_voice_context.o \
+	engine/voice/oo_persona.o \
+	engine/voice/oo_wakeword.o \
+	engine/voice/oo_tts_phoneme.o \
+	engine/drivers/oo_rtc.o \
 	oo-modules/djibion-engine/core/djibion.o \
 	oo-modules/diopion-engine/core/diopion.o \
 	oo-modules/diagnostion-engine/core/diagnostion.o \

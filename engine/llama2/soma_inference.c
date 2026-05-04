@@ -1234,13 +1234,15 @@ static void llmk_load_repl_cfg_boot_best_effort(void) {
 
 static void llmk_print_logo(void) {
     // Keep it ASCII-only (UEFI consoles vary) and within ~80 cols.
-    Print(L"\r\n");
-    Print(L"   ___   ___  \r\n");
-    Print(L"  / _ \\ / _ \\ \r\n");
-    Print(L" | | | | | | |\r\n");
-    Print(L" | |_| | |_| |\r\n");
-    Print(L"  \\___/ \\___/ \r\n");
-    Print(L"      Operating Organism\r\n\r\n");
+    // NOTE: Print() calls here were causing #UD/#PF exceptions after return,
+    // likely due to UEFI ConOut state interaction with our AVX/OSXSAVE setup.
+    // Using serial-only output for the logo to avoid this.
+    llmk_serial_write_char16(L"\r\n   ___   ___  \r\n");
+    llmk_serial_write_char16(L"  / _ \\ / _ \\ \r\n");
+    llmk_serial_write_char16(L" | | | | | | |\r\n");
+    llmk_serial_write_char16(L" | |_| | |_| |\r\n");
+    llmk_serial_write_char16(L"  \\___/ \\___/ \r\n");
+    llmk_serial_write_char16(L"      Operating Organism\r\n\r\n");
 
     // Serial-visible marker (keeps automated logs honest).
     llmk_serial_write_char16(L"[logo] printed\r\n");

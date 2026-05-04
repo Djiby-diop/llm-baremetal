@@ -1,7 +1,8 @@
-/* oo_somamind_v1.h — SomaMind V1: compact SSM + adaptive halting + tool-use
+﻿/* oo_somamind_v1.h — SomaMind V1: compact SSM + adaptive halting + tool-use
  * Freestanding C11. No libc, no malloc.
  */
-#pragma once
+#ifndef OO_SOMAMIND_V1_H
+#define OO_SOMAMIND_V1_H
 #include <stdint.h>
 #include <stddef.h>
 
@@ -118,3 +119,4 @@ void sm_ssm_reset(SmSsmState *s);
 
 /* Print engine status via callback (freestanding — no printf). */
 void sm_print_status(const SomaMindV1 *sm, void (*print_fn)(const char *));
+#endif /* OO_SOMAMIND_V1_H */

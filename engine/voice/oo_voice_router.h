@@ -3,19 +3,15 @@
 // Converts free-form user text (FR or EN) into OO REPL commands.
 // No LLM required — pure keyword scoring, fully freestanding.
 //
-// Philosophy:
-//   The user talks to OO like a person. OO understands intent.
-//   "save my memory" → /nfs_save
-//   "how many cores do you have?" → /smp_status
-//   "remember that my name is Djiby" → /nfs_set oo.user.name Djiby
-//   "apprends tout seul" → /oo_train
-//   "tu reves de quoi ?" → /dream_status
+// v2: persona-wired routing via ovr_route_with_persona()
 //
 // Freestanding C11 — no libc, no malloc.
 
 #pragma once
 
 #include <stdint.h>
+#include "oo_voice_context.h"
+#include "oo_persona.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,7 +21,7 @@ extern "C" {
 #define OVR_MAX_TOKENS       48    // max words in one input
 #define OVR_TOKEN_LEN        32    // max chars per token
 #define OVR_CMD_MAX         256    // max chars in output command
-#define OVR_INTENTS_MAX      24    // total intents defined
+#define OVR_INTENTS_MAX      48    // total intents defined (v2: 44)
 #define OVR_KEYWORDS_MAX     12    // max keywords per intent slot
 
 // ── Match results ────────────────────────────────────────────────────────
@@ -42,6 +38,13 @@ typedef struct {
     char          label[64];   // human-readable intent name for feedback
 } OvrResult;
 
+// ── Extended result with persona reply ───────────────────────────────────
+typedef struct {
+    OvrResult   route;
+    char        reply[OVR_CMD_MAX];   // human-readable OO response to speak/display
+    int         is_persona_only;      // 1 = no REPL command, just a reply
+} OvrContextResult;
+
 // ── Engine ───────────────────────────────────────────────────────────────
 typedef struct {
     int  threshold_weak;   // default: 20
@@ -52,8 +55,15 @@ typedef struct {
 } OvrEngine;
 
 // ── Public API ───────────────────────────────────────────────────────────
-void    ovr_init(OvrEngine *e);
+void      ovr_init(OvrEngine *e);
 OvrResult ovr_route(OvrEngine *e, const char *input);
+
+// Full persona-wired routing: context + persona + NLU in one call
+OvrContextResult ovr_route_with_persona(OvrEngine  *e,
+                                         OvcContext *ctx,
+                                         OoPersona  *persona,
+                                         const char *input,
+                                         int         input_len);
 
 // Helper: check if input looks like a REPL command (starts with '/')
 static inline int ovr_is_command(const char *s) {

@@ -43,7 +43,7 @@ static void soma_vitals_emit_event() {
         g_soma_vitals.is_charging,
         g_soma_vitals.ram_usage_mb);
         
-    soma_uart_emit(buf);
+    soma_uart_puts(buf);
 }
 
 void soma_vitals_tick() {
@@ -70,5 +70,5 @@ void soma_vitals_init() {
     g_soma_vitals.cpu_temp = 0.0f;
     g_soma_vitals.battery_level = 1.0f;
     g_soma_vitals.ram_usage_mb = 0;
-    soma_uart_emit("[oo-system] vitals_engine_ready");
+    soma_uart_puts("[oo-system] vitals_engine_ready");
 }

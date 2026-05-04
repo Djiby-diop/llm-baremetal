@@ -2906,19 +2906,30 @@ static void llmk_tui_redraw_best_effort(void) {
     g_tui_dirty = 0;
 }
 
+#include "oo_hud_final.c"
+
 static void llmk_oo_on_step_gop(int id, int tick, int energy) {
     g_tui_last_id = id;
     g_tui_last_tick = tick;
     g_tui_last_energy = energy;
     if (!g_gop_fb32 || !g_gop_w || !g_gop_h) return;
-    UINT32 x = (UINT32)((tick * 13 + id * 31) % (int)g_gop_w);
-    UINT32 y = (UINT32)((tick * 7 + id * 17) % (int)g_gop_h);
-    llmk_gop_put_pixel(x, y, 0, 255, 0);
+
+    // Initialize HUD on first call if needed
+    static int hud_init = 0;
+    if (!hud_init) {
+        init_stars();
+        init_rain();
+        soma_state_demo_fill(&g_soma, 1);
+        hud_init = 1;
+    }
 
     // Best-effort TUI refresh at a low cadence to avoid heavy overhead.
     if (g_tui_enabled && ((tick & 7) == 0 || g_tui_dirty)) {
         llmk_tui_redraw_best_effort();
-    } else {
+    } else if (!g_tui_enabled) {
+        // Mettre à jour l'état mock (pour la démonstration) puis rendre le HUD
+        soma_state_demo_fill(&g_soma, g_tick);
+        soma_render_frame();
         llmk_gop_force_update();
     }
 }

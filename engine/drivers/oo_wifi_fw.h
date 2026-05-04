@@ -8,6 +8,82 @@
 #include <efilib.h>
 #include <stdint.h>
 
+/* ── USB IO Protocol stubs (not in gnu-efi; minimal for WiFi FW loader) ─── */
+#ifndef EFI_USB_IO_PROTOCOL_GUID
+#define EFI_USB_IO_PROTOCOL_GUID \
+    { 0x2B2F68D6, 0x0CD2, 0x44CF, {0x8E, 0x8B, 0xBB, 0xA2, 0x0B, 0x1B, 0x5B, 0x75} }
+
+typedef struct {
+    UINT16 Length;
+    UINT8  DescriptorType;
+    UINT16 BcdUSB;
+    UINT8  DeviceClass;
+    UINT8  DeviceSubClass;
+    UINT8  DeviceProtocol;
+    UINT8  MaxPacketSize0;
+    UINT16 IdVendor;
+    UINT16 IdProduct;
+    UINT16 BcdDevice;
+    UINT8  StrManufacturer;
+    UINT8  StrProduct;
+    UINT8  StrSerialNumber;
+    UINT8  NumConfigurations;
+} EFI_USB_DEVICE_DESCRIPTOR;
+
+typedef struct _EFI_USB_IO_PROTOCOL EFI_USB_IO_PROTOCOL;
+
+typedef EFI_STATUS (EFIAPI *EFI_USB_IO_CONTROL_TRANSFER)(
+    IN     EFI_USB_IO_PROTOCOL *This,
+    IN     void                *Request,
+    IN     UINT32               Direction,
+    IN     UINT32               Timeout,
+    IN OUT void                *Data    OPTIONAL,
+    IN     UINTN                DataLength OPTIONAL,
+       OUT UINT32              *Status);
+
+typedef EFI_STATUS (EFIAPI *EFI_USB_IO_BULK_TRANSFER)(
+    IN     EFI_USB_IO_PROTOCOL *This,
+    IN     UINT8                DeviceEndpoint,
+    IN OUT void                *Data,
+    IN OUT UINTN               *DataLength,
+    IN     UINTN                Timeout,
+       OUT UINT32              *Status);
+
+typedef struct {
+    UINT8  Length;
+    UINT8  DescriptorType;
+    UINT8  EndpointAddress;
+    UINT8  Attributes;
+    UINT16 MaxPacketSize;
+    UINT8  Interval;
+} EFI_USB_ENDPOINT_DESCRIPTOR;
+
+typedef EFI_STATUS (EFIAPI *EFI_USB_IO_GET_DEVICE_DESCRIPTOR)(
+    IN  EFI_USB_IO_PROTOCOL      *This,
+    OUT EFI_USB_DEVICE_DESCRIPTOR *DeviceDescriptor);
+
+typedef EFI_STATUS (EFIAPI *EFI_USB_IO_GET_ENDPOINT_DESCRIPTOR)(
+    IN  EFI_USB_IO_PROTOCOL       *This,
+    IN  UINT8                      EndpointIndex,
+    OUT EFI_USB_ENDPOINT_DESCRIPTOR *EndpointDescriptor);
+
+struct _EFI_USB_IO_PROTOCOL {
+    EFI_USB_IO_CONTROL_TRANSFER          UsbControlTransfer;
+    EFI_USB_IO_BULK_TRANSFER             UsbBulkTransfer;
+    void                                *UsbAsyncInterruptTransfer;
+    void                                *UsbSyncInterruptTransfer;
+    void                                *UsbAsyncIsochronousTransfer;
+    void                                *UsbSyncIsochronousTransfer;
+    EFI_USB_IO_GET_DEVICE_DESCRIPTOR     UsbGetDeviceDescriptor;
+    void                                *UsbGetConfigDescriptor;
+    void                                *UsbGetInterfaceDescriptor;
+    EFI_USB_IO_GET_ENDPOINT_DESCRIPTOR   UsbGetEndpointDescriptor;
+    void                                *UsbGetStringDescriptor;
+    void                                *UsbGetSupportedLanguages;
+    void                                *UsbPortReset;
+};
+#endif /* EFI_USB_IO_PROTOCOL_GUID */
+
 #define OO_WIFI_FW_MAX_HANDLES  4
 #define OO_WIFI_FW_MAX_FW_SIZE  (512 * 1024)  /* 512 KB max firmware blob */
 #define OO_WIFI_FW_CHUNK_SIZE   4096

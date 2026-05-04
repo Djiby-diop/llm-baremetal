@@ -512,7 +512,7 @@ void llmk_oo_init(void) {
     soma_dream_init();
     
     // Bridge it to the global contexts
-    soma_mind_init(&g_soma_mind, &g_soma_router, (OosiV3GenCtx*)&g_oosi_ctx, &g_soma_logic, &g_cellion);
+    soma_mind_init(&g_soma_mind, &g_soma_router, (OosiV3GenCtx*)&g_oosi_ctx, &g_soma_logic, &g_cellion, NULL, NULL);
     g_soma_mind_ready = 1;
 }
 

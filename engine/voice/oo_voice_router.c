@@ -2,8 +2,13 @@
 //
 // Freestanding C11 — no libc, no malloc, no external deps.
 // Works in UEFI bare-metal environment.
+//
+// v2: +20 intents (conversational + engineering),
+//     ovr_route_with_persona() wires voice context + persona engine.
 
 #include "oo_voice_router.h"
+#include "oo_voice_context.h"
+#include "oo_persona.h"
 
 // ── Freestanding helpers ─────────────────────────────────────────────────
 
@@ -160,7 +165,7 @@ static const OvrIntent g_ovr_intents[] = {
     {   "GET_MEMORY",
         KWS("what","c'est","qu'est","get","lis","read","cherche","trouve","find","donne"),
         KWS("memory","key","cle","valeur","value","souviens","stored","enregistre","remember"),
-        KWS(),
+        { (const char*)0 },
         15, "EXTRACT_GET:/nfs_get "
     },
     {   "SET_MEMORY",
@@ -279,6 +284,132 @@ static const OvrIntent g_ovr_intents[] = {
         (const char*[]){ (const char*)0 },
         KWS("oo","organism","operating"),
         20, "/logo"
+    },
+
+    // ── Conversational / Emotional (v2) ──────────────────────────────────────
+
+    {   "GREETING",
+        KWS("hello","hi","hey","bonjour","salut","yo","coucou","bonsoir","allo"),
+        (const char*[]){ (const char*)0 },
+        KWS("oo","there","la","ami","friend","monde"),
+        20, "PERSONA:greet"
+    },
+    {   "THANKS",
+        KWS("thanks","thank","merci","remercie","bravo","parfait","cool","super","bien"),
+        (const char*[]){ (const char*)0 },
+        KWS("you","toi","good","nice","great","tres","vraiment"),
+        20, "PERSONA:thank"
+    },
+    {   "ASK_STATE",
+        KWS("how","comment","ca va","tu vas","are you","feeling","ressens"),
+        KWS("you","toi","now","maintenant","today","aujourd"),
+        KWS("ok","bien","alright"),
+        20, "PERSONA:state"
+    },
+    {   "CONFUSION",
+        KWS("quoi","hein","perdu","confused","comprends","understand","pardon","repete","repeat","encore","again"),
+        (const char*[]){ (const char*)0 },
+        KWS("pas","not","please","stp","again","encore"),
+        20, "PERSONA:clarify"
+    },
+    {   "OPINION",
+        KWS("penses","think","avis","opinion","thoughts","suggestion","recommandes","preferes","prefer","crois"),
+        KWS("tu","you","oo","ton","your","cela","ca","this","that","it"),
+        (const char*[]){ (const char*)0 },
+        20, "PERSONA:opinion"
+    },
+    {   "INTRODUCE_SELF",
+        KWS("qui","who","present","introduce","decris","describe","explique","explain"),
+        KWS("tu es","you are","toi","ton","your","c'est quoi","what is"),
+        KWS("oo","organism","system","baremetal","bare"),
+        20, "PERSONA:introduce"
+    },
+    {   "WAKE_ACK",
+        KWS("yes","oui","ok","vas","go","alright","d'accord","ready","pret","continue","start","lance"),
+        (const char*[]){ (const char*)0 },
+        KWS("please","stp","now","maintenant"),
+        20, "PERSONA:wake_ack"
+    },
+    {   "REPEAT_LAST",
+        KWS("repeat","repete","repeter","again","encore","redis","redit","tu disais","tu viens","said"),
+        (const char*[]){ (const char*)0 },
+        KWS("last","dernier","previous","precedent","que","what"),
+        25, "PERSONA:repeat"
+    },
+    {   "STOP",
+        KWS("stop","arrete","stoppe","cancel","annule","halte","enough","suffit","assez","silence","tais"),
+        (const char*[]){ (const char*)0 },
+        KWS("please","stp","toi","that","doing","ca"),
+        25, "PERSONA:stop"
+    },
+
+    // ── Engineering / Low-Level (v2) ──────────────────────────────────────────
+
+    {   "REBOOT",
+        KWS("reboot","redemarrer","restart","relance","reset"),
+        (const char*[]){ (const char*)0 },
+        KWS("now","maintenant","please","hard","soft","warm","cold"),
+        30, "/reboot"
+    },
+    {   "BENCH",
+        KWS("bench","benchmark","perf","performance","vitesse","speed","mesure","timing"),
+        KWS("cpu","mem","inference","llm","model","modele","blas","matmul"),
+        KWS("full","all","quick","rapide","now"),
+        20, "/bench"
+    },
+    {   "INFER",
+        KWS("infer","inference","execute","analyse","predict","pose","question","complete"),
+        KWS("model","modele","llm","oo","engine","moteur"),
+        KWS("now","vite","quick","creative","rational"),
+        25, "/infer"
+    },
+    {   "SWARM_STATUS",
+        KWS("swarm","essaim","peers","nodes","cluster","pair","pairs"),
+        KWS("status","etat","info","qui","combien","how many","alive"),
+        KWS("connected","connecte","online","active","all","tous"),
+        20, "/swarm_status"
+    },
+    {   "SWARM_SYNC",
+        KWS("sync","synchronise","broadcast","partage","update","envoie","diffuse"),
+        KWS("swarm","essaim","peers","nodes","kv","knowledge","model","weights"),
+        KWS("now","all","tous","full","partial"),
+        20, "/swarm_sync"
+    },
+    {   "WARDEN_STATUS",
+        KWS("warden","sentinel","garde","security","securite","safety","guardian","policy","dplus"),
+        (const char*[]){ (const char*)0 },
+        KWS("status","etat","pressure","pression","level","niveau","threat","menace"),
+        25, "/warden_status"
+    },
+    {   "WARDEN_UNLOCK",
+        KWS("unlock","debloque","override","bypass","allow","autoriser","relax","reduce","lower"),
+        KWS("warden","sentinel","security","lock","restriction","policy","dplus"),
+        KWS("level","mode","for","pour","now","temporairement"),
+        20, "/warden_unlock"
+    },
+    {   "DISPLAY_SOMA",
+        KWS("display","affiche","montre","show","lance","ouvre","open","soma","desktop","hud","interface"),
+        (const char*[]){ (const char*)0 },
+        KWS("visual","graphique","gui","hud","bureau","screen","ecran"),
+        25, "/soma_display"
+    },
+    {   "VOICE_MODE",
+        KWS("voice","vocal","voix","audio","speech","parole","parler","speak","ecoute","listen","mic","microphone"),
+        KWS("mode","activate","activer","disable","desactiver","on","off","start","stop"),
+        KWS("please","stp","now","wake"),
+        20, "PERSONA:voice_mode"
+    },
+    {   "MODEL_INFO",
+        KWS("model","modele","weights","poids","llm","neural","quantization","quant"),
+        KWS("info","detail","what","quel","version","size","how big","combien","loaded","status"),
+        (const char*[]){ (const char*)0 },
+        20, "/model_info"
+    },
+    {   "LOAD_MODEL",
+        KWS("load","charge","ouvre","utilise","switch","change","take","prends"),
+        KWS("model","modele","gguf","weights","file","fichier","bin"),
+        KWS("new","different","autre","bigger","better"),
+        25, "EXTRACT_GET:/load_model "
     },
 };
 
@@ -426,4 +557,136 @@ OvrResult ovr_route(OvrEngine *e, const char *input) {
     if (result.level == OVR_STRONG_MATCH) e->queries_auto_executed++;
 
     return result;
+}
+
+// ── Persona-Wired Route ───────────────────────────────────────────────────────
+//
+// Higher-level entry point that integrates:
+//   - Voice context (multi-turn history)
+//   - Persona engine (human-like responses)
+//   - Repeat / greeting / confusion detectors
+//
+// After calling this function:
+//   out->cmd  = REPL command to execute (if any)
+//   out->reply = human-readable OO response to speak/display
+//   out->level = match confidence level
+
+typedef struct {
+    OvrResult   route;
+    char        reply[OVR_CMD_MAX];   // human-readable OO response
+    int         is_persona_only;      // 1 = no REPL command, just a reply
+} OvrContextResult;
+
+OvrContextResult ovr_route_with_persona(OvrEngine        *e,
+                                         OvcContext       *ctx,
+                                         OoPersona        *persona,
+                                         const char       *input,
+                                         int               input_len)
+{
+    OvrContextResult cr;
+    cr.reply[0] = '\0';
+    cr.is_persona_only = 0;
+
+    // 1. Detect meta-intents from context BEFORE routing
+    if (ovc_is_greeting(input, input_len)) {
+        ovc_push_turn(ctx, input, input_len, "greet", 5);
+        OoPersonaResponse pr = oo_persona_greet(persona);
+        ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
+        cr.is_persona_only = 1;
+        cr.route.level = OVR_STRONG_MATCH;
+        ovr_strcpy(cr.route.label, "GREETING", sizeof(cr.route.label));
+        cr.route.cmd[0] = '\0';
+        return cr;
+    }
+
+    if (ovc_is_gratitude(input, input_len)) {
+        OoPersonaResponse pr = oo_persona_thank(persona);
+        ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
+        cr.is_persona_only = 1;
+        cr.route.level = OVR_STRONG_MATCH;
+        ovr_strcpy(cr.route.label, "THANKS", sizeof(cr.route.label));
+        cr.route.cmd[0] = '\0';
+        return cr;
+    }
+
+    if (ovc_is_confusion(input, input_len)) {
+        OoPersonaResponse pr = oo_persona_clarify(persona);
+        ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
+        cr.is_persona_only = 1;
+        cr.route.level = OVR_STRONG_MATCH;
+        ovr_strcpy(cr.route.label, "CONFUSION", sizeof(cr.route.label));
+        cr.route.cmd[0] = '\0';
+        return cr;
+    }
+
+    if (ovc_is_repeat_request(input, input_len)) {
+        // Retrieve last OO response from context
+        ovc_last_oo_response(ctx, cr.reply, OVR_CMD_MAX);
+        if (cr.reply[0] == '\0') {
+            ovr_strcpy(cr.reply, "I don't have a previous response to repeat.", OVR_CMD_MAX);
+        }
+        cr.is_persona_only = 1;
+        cr.route.level = OVR_STRONG_MATCH;
+        ovr_strcpy(cr.route.label, "REPEAT_LAST", sizeof(cr.route.label));
+        cr.route.cmd[0] = '\0';
+        return cr;
+    }
+
+    // 2. Standard NLU routing
+    cr.route = ovr_route(e, input);
+
+    // 3. Persona-only intents (PERSONA: prefix)
+    if (ovr_strhas(cr.route.cmd, "PERSONA:")) {
+        const char *intent_name = cr.route.cmd + 8; // after "PERSONA:"
+        OoPersonaResponse pr;
+
+        if (ovr_strhas(intent_name, "greet")) {
+            pr = oo_persona_greet(persona);
+        } else if (ovr_strhas(intent_name, "thank")) {
+            pr = oo_persona_thank(persona);
+        } else if (ovr_strhas(intent_name, "clarify") || ovr_strhas(intent_name, "stop")) {
+            pr = oo_persona_clarify(persona);
+        } else if (ovr_strhas(intent_name, "introduce")) {
+            pr = oo_persona_introduce(persona);
+        } else if (ovr_strhas(intent_name, "state")) {
+            pr = oo_persona_greet(persona);
+        } else if (ovr_strhas(intent_name, "opinion")) {
+            pr = oo_persona_opinion(persona);
+        } else if (ovr_strhas(intent_name, "voice_mode")) {
+            pr = oo_persona_ack_success(persona, "voice");
+        } else if (ovr_strhas(intent_name, "wake_ack")) {
+            pr = oo_persona_greet(persona);
+        } else if (ovr_strhas(intent_name, "repeat")) {
+            ovc_last_oo_response(ctx, cr.reply, OVR_CMD_MAX);
+            if (cr.reply[0] == '\0') ovr_strcpy(cr.reply, "Nothing to repeat yet.", OVR_CMD_MAX);
+            cr.is_persona_only = 1;
+            ovc_push_turn(ctx, input, input_len, cr.reply, ovr_strlen(cr.reply));
+            return cr;
+        } else {
+            pr = oo_persona_clarify(persona);
+        }
+
+        ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
+        cr.is_persona_only = 1;
+        cr.route.cmd[0] = '\0';
+
+        // Push to context
+        ovc_push_turn(ctx, input, input_len, cr.reply, ovr_strlen(cr.reply));
+        return cr;
+    }
+
+    // 4. Real REPL command — generate ACK response via persona
+    if (cr.route.level != OVR_NO_MATCH && cr.route.cmd[0] != '\0') {
+        OoPersonaResponse pr = oo_persona_ack_success(persona, cr.route.label);
+        ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
+    } else if (cr.route.level == OVR_NO_MATCH) {
+        // No match — ask for clarification
+        OoPersonaResponse pr = oo_persona_clarify(persona);
+        ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
+        cr.is_persona_only = 1;
+    }
+
+    // 5. Push to context history
+    ovc_push_turn(ctx, input, input_len, cr.reply, ovr_strlen(cr.reply));
+    return cr;
 }

@@ -16,7 +16,7 @@
 #define OO_SWARM_SYNC_H
 
 #include "oo_swarm_node.h"
-#include "../llama2/oo_net_packet.h"   /* OoNetPacket, OO_PKT_* */
+#include "oo-modules/ghost-engine/core/oo_net_packet.h"   /* OoNetPacket, OO_PKT_* */
 
 /* ── Sync message types (carried in OoNetPacket.payload[0]) ──── */
 typedef enum {
