@@ -26,7 +26,9 @@ endif
 CFLAGS = -ffreestanding -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
 		 -I/usr/include/efi -I/usr/include/efi/$(ARCH) -DEFI_FUNCTION_WRAPPER \
 		 -Icore -Iengine/llama2 -Iengine/gguf -Iengine/djiblas -Iengine/ssm \
-		 -O2 -msse2 -DDJIBLAS_DISABLE_CPUID=1
+		 -I../oo-system/shared/oo-proto/include \
+		 -I. \
+		 -O2 -msse2 -DDJIBLAS_DISABLE_CPUID=1 -DUEFI_BUILD=1
 
 # Embed a build identifier for /version output (UTC). Override: make BUILD_ID=...
 # NOTE: $(shell ...) in a recursively-expanded variable would re-run on each expansion,
@@ -81,9 +83,12 @@ SOMA_OBJS = engine/ssm/soma_router.o engine/ssm/soma_dna.o engine/ssm/soma_dual.
 	engine/ssm/soma_memory.o engine/ssm/soma_journal.o engine/ssm/soma_cortex.o \
 	engine/ssm/soma_export.o engine/ssm/soma_warden.o engine/ssm/soma_session.o \
 	engine/ssm/soma_dna_persist.o engine/ssm/soma_spec.o \
-	engine/ssm/soma_swarm_net.o
+	engine/ssm/soma_swarm_net.o \
+	engine/ssm/oo_swarm_node.o engine/ssm/oo_swarm_sync.o \
+	engine/ssm/core/soma_mind.o
 
 REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
+	llmk_stubs.o \
 	djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
 	ssm_infer.o mamba_block.o mamba_weights.o bpe_tokenizer.o \
 	oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o \
@@ -328,9 +333,22 @@ engine/ssm/soma_spec.o: engine/ssm/soma_spec.c engine/ssm/soma_spec.h engine/ssm
 engine/ssm/soma_swarm_net.o: engine/ssm/soma_swarm_net.c engine/ssm/soma_swarm_net.h engine/ssm/soma_dna.h engine/ssm/oosi_v3_infer.h
 	$(CC) $(CFLAGS) -c engine/ssm/soma_swarm_net.c -o engine/ssm/soma_swarm_net.o
 
+engine/ssm/oo_swarm_node.o: engine/ssm/oo_swarm_node.c engine/ssm/oo_swarm_node.h
+	$(CC) $(CFLAGS) -c engine/ssm/oo_swarm_node.c -o engine/ssm/oo_swarm_node.o
+
+engine/ssm/oo_swarm_sync.o: engine/ssm/oo_swarm_sync.c engine/ssm/oo_swarm_sync.h
+	$(CC) $(CFLAGS) -c engine/ssm/oo_swarm_sync.c -o engine/ssm/oo_swarm_sync.o
+
+engine/ssm/core/soma_mind.o: engine/ssm/core/soma_mind.c engine/ssm/core/soma_mind.h
+	$(CC) $(CFLAGS) -Iengine/ssm/core -c engine/ssm/core/soma_mind.c -o engine/ssm/core/soma_mind.o
+
+llmk_stubs.o: core/llmk_stubs.c
+	$(CC) $(CFLAGS) -c core/llmk_stubs.c -o llmk_stubs.o
+
 clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
 	rm -f oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o llmk_oo_infer.o
+	rm -f engine/ssm/core/soma_mind.o
 	rm -rf $(OO_BUILD_DIR)
 	@echo "OK: Clean complete"
 
