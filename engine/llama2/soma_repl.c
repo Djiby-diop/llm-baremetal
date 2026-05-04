@@ -1,3 +1,8 @@
+﻿/* orchestrion_ci types needed at file scope for orchestrion_ci.c unity inclusion */
+#include "orchestrion_ci.h"
+
+static OrchestrionCI g_ci;
+
 static void llmk_repl_no_model_loop(void) {
     // Minimal repl.cfg parsing for autorun in no-model mode.
     int autorun_autostart = 0;
@@ -143,9 +148,6 @@ static void llmk_repl_no_model_loop(void) {
 
     Print(L"OK: REPL ready (no model). Type /help\r\n");
 
-#include "orchestrion_ci.h"
-OrchestrionCI g_ci;
-
     // Initialize SomaMind (Router + DNA + SMB + Dream + Meta + Swarm stub)
     ci_init(&g_ci);
     soma_router_init(&g_soma_router);
@@ -273,7 +275,7 @@ OrchestrionCI g_ci;
 
         /* ── Phase O: Swarm node tick ───────────────────────────────────────
          * Tick the swarm state machine on every REPL iteration.
-         * g_soma_smb.tick_count counts inference steps; we scale to ~ms.
+         * g_soma_smb.turn counts inference steps; we scale to ~ms.
          * Degraded = warden pressure above 0.5 (D+ non-ALLOW threshold).
          * ----------------------------------------------------------------- */
         /* ── Phase V: Soma-Vitals (Metabolism) ──────────────────────────
@@ -282,9 +284,9 @@ OrchestrionCI g_ci;
         soma_vitals_tick();
 
         {
-            unsigned int swarm_now_ms = (unsigned int)(g_soma_smb.tick_count * 50u);
+            unsigned int swarm_now_ms = (unsigned int)(g_soma_smb.turn * 50u);
             unsigned int swarm_dna    = soma_dna_hash(&g_soma_dna);
-            int swarm_degraded = (g_soma_warden.pressure > 0.5f) ? 1 : 0;
+            int swarm_degraded = (g_soma_warden.pressure_level >= 1) ? 1 : 0;
             oo_swarm_node_tick(&g_swarm_node, swarm_now_ms, swarm_dna, swarm_degraded);
         }
 
@@ -1186,7 +1188,7 @@ OrchestrionCI g_ci;
         if (my_strncmp(prompt, "/swarm_sync", 11) == 0 && (prompt[11] == 0 || prompt[11] == ' ')) {
             const char *arg = prompt + 11;
             while (*arg == ' ') arg++;
-            unsigned int now_ms = (unsigned int)(g_soma_smb.tick_count * 50u);
+            unsigned int now_ms = (unsigned int)(g_soma_smb.turn * 50u);
             if (my_strncmp(arg, "hello", 5) == 0) {
                 unsigned char pkt[32];
                 oo_swarm_sync_send_hello(&g_swarm_sync, now_ms, pkt);
@@ -1202,8 +1204,8 @@ OrchestrionCI g_ci;
                       (int)g_swarm_sync.seq);
             } else if (my_strncmp(arg, "status", 6) == 0) {
                 unsigned char flags = 0;
-                if (g_soma_warden.pressure > 0.5f) flags |= SWARM_STATUS_DEGRADED;
-                if (g_soma_warden.pressure > 0.8f) flags |= SWARM_STATUS_EMERGENCY;
+                if (g_soma_warden.pressure_level >= 1) flags |= SWARM_STATUS_DEGRADED;
+                if (g_soma_warden.pressure_level >= 2) flags |= SWARM_STATUS_EMERGENCY;
                 if (g_swarm_node.state == OO_NODE_ISOLATED) flags |= SWARM_STATUS_ISOLATED;
                 unsigned char pkt[32];
                 oo_swarm_sync_send_status(&g_swarm_sync, flags, pkt);
@@ -1231,13 +1233,55 @@ OrchestrionCI g_ci;
                 unsigned int new_id = (unsigned int)(*arg - '0');
                 oo_swarm_node_init(&g_swarm_node, new_id, soma_dna_hash(&g_soma_dna),
                                    &g_soma_swarm_net,
-                                   (unsigned int)(g_soma_smb.tick_count * 50u));
+                                   (unsigned int)(g_soma_smb.turn * 50u));
                 oo_swarm_sync_init(&g_swarm_sync, &g_swarm_node);
                 Print(L"\r\n[SwarmNode] node_id set to %d — re-initialized\r\n\r\n", (int)new_id);
             } else {
                 Print(L"\r\n[SwarmNode] current node_id=%d  usage: /swarm_id <0-7>\r\n\r\n",
                       (int)g_swarm_node.node_id);
             }
+            continue;
+        }
+        // ── soma_state: print full OO node state summary ─────────────────
+        if (my_strncmp(prompt, "/soma_state", 11) == 0 && (prompt[11] == 0 || prompt[11] == ' ')) {
+            const char *state_name = oo_swarm_node_state_name(g_swarm_node.state);
+            CHAR16 sn16[32]; ascii_to_char16(sn16, state_name, 32);
+            Print(L"\r\n[OO State] node_id=%d  state=%s  peers=%d\r\n",
+                  (int)g_swarm_node.node_id, sn16,
+                  (int)g_swarm_node.n_active_peers);
+            Print(L"[OO State] dna_hash=0x%08X  pressure=%d  consensus=%d\r\n",
+                  (unsigned int)soma_dna_hash(&g_soma_dna),
+                  (int)g_soma_warden.pressure_level,
+                  (int)g_swarm_sync.consensus_count);
+            /* D+ mode */
+            const char *dplus_mode = dplus_mode_name(g_soma_dna.dplus_mode);
+            CHAR16 dm16[24]; ascii_to_char16(dm16, dplus_mode, 24);
+            Print(L"[OO State] dplus_mode=%s  soul_turn=%u\r\n\r\n",
+                  dm16, (unsigned int)g_soma_smb.turn);
+            continue;
+        }
+        // ── display: launch SOMA GUI if GOP framebuffer is available ──────
+        if (my_strncmp(prompt, "/display", 8) == 0 && (prompt[8] == 0 || prompt[8] == ' ')) {
+            const char *arg = prompt + 8;
+            while (*arg == ' ') arg++;
+            /* Phase S: desktop_display SOMA integration stub.
+             * When SOMA GUI (.efi) is available, this command will chain-load it.
+             * For now: report GOP availability and OoNodeState for SOMA sphere color. */
+            Print(L"\r\n[SOMA Display] Status:\r\n");
+            const char *sn = oo_swarm_node_state_name(g_swarm_node.state);
+            CHAR16 sn16d[32]; ascii_to_char16(sn16d, sn, 32);
+            Print(L"  sphere_color: %s  (ACTIVE=green DEGRADED=yellow ISOLATED=red)\r\n", sn16d);
+            Print(L"  warden_pressure: %d/3  (0=calm 1=warn 2=critical 3=emergency)\r\n",
+                  (int)g_soma_warden.pressure_level);
+            Print(L"  swarm_peers: %d  (orbital rings count)\r\n",
+                  (int)g_swarm_node.n_active_peers);
+            Print(L"  soul_turn: %u  (animation phase)\r\n",
+                  (unsigned int)g_soma_smb.turn);
+#if 0  /* Phase S: enable when soma_display.efi is present on ESP */
+            Print(L"  Launching SOMA display...\r\n");
+            /* TODO: EFI LoadImage + StartImage soma_display.efi */
+#endif
+            Print(L"  [display] Phase S pending — soma_display.efi not yet available\r\n\r\n");
             continue;
         }
         // ── Reflex commands ──────────────────────────────────────────────
@@ -1827,14 +1871,14 @@ OrchestrionCI g_ci;
             Print(L"\r\n[Limbion] ");
             for (int i = 0; lbuf[i]; i++) Print(L"%c", (CHAR16)(unsigned char)lbuf[i]);
             Print(L"\r\n  valence=%d arousal=%d\r\n\r\n",
-                  (int)g_limbion.valence, (int)g_limbion.arousal);
+                  (int)g_limbion.affect.valence, (int)g_limbion.affect.arousal);
             continue;
         }
         if (my_strncmp(prompt, "/chronion_status", 16) == 0) {
             Print(L"\r\n[Chronion] boot=%u steps_boot=%lu tokens_lifetime=%lu\r\n\r\n",
-                  (unsigned)g_chronion.boot_count,
-                  (unsigned long)g_chronion.steps_this_boot,
-                  (unsigned long)g_chronion.tokens_lifetime);
+                  (unsigned)g_chronion.epoch.boot_count,
+                  (unsigned long)g_chronion.epoch.steps_this_boot,
+                  (unsigned long)g_chronion.epoch.tokens_lifetime);
             continue;
         }
         if (my_strncmp(prompt, "/trophion_status", 16) == 0) {
@@ -1978,8 +2022,8 @@ OrchestrionCI g_ci;
         }
         if (my_strncmp(prompt, "/collectivion_mode ", 19) == 0) {
             const char *arg = prompt + 19;
-            if      (my_strncmp(arg, "active",  6) == 0) collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_ACTIVE);
-            else if (my_strncmp(arg, "passive", 7) == 0) collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_PASSIVE);
+            if      (my_strncmp(arg, "active",  6) == 0) collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_PULSE);
+            else if (my_strncmp(arg, "passive", 7) == 0) collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_OFF);
             else                                          collectivion_set_mode(&g_collectivion, COLLECTIVION_MODE_OFF);
             Print(L"\r\n[Collectivion] mode set\r\n\r\n");
             continue;
@@ -3699,12 +3743,12 @@ OrchestrionCI g_ci;
                                                &local_tok, &local_prob, 1,
                                                soma_first_conf > 0.0f ? soma_first_conf : 0.5f,
                                                &g_soma_dna,
-                                               (unsigned int)(g_soma_smb.tick_count & 0xFFFFFFFF));
+                                               (unsigned int)(g_soma_smb.turn & 0xFFFFFFFF));
                         // Read peer consensus (single-machine: just echoes back own vote)
                         SomaSwarmNetResult nr = soma_swarm_net_consensus(
                             &g_soma_swarm_net, g_oosi_v3_ctx.logits,
                             g_soma_dual.vocab_size > 0 ? g_soma_dual.vocab_size : 50282,
-                            (unsigned int)(g_soma_smb.tick_count & 0xFFFFFFFF));
+                            (unsigned int)(g_soma_smb.turn & 0xFFFFFFFF));
                         if (nr.n_peers_used > 1 && nr.consensus_token >= 0) {
                             r.token = nr.consensus_token; // Apply net consensus
                         }
@@ -3829,9 +3873,9 @@ OrchestrionCI g_ci;
                     if (n_out > 0) {
                         uint16_t d_prompt[32];
                         uint16_t d_out[32];
-                        int p_len = n > 32 ? 32 : n;
+                        int p_len = prompt_len > 32 ? 32 : prompt_len;
                         int o_len = n_out > 32 ? 32 : n_out;
-                        for (int i = 0; i < p_len; i++) d_prompt[i] = (uint16_t)(ids[i] & 0xFFFF);
+                        for (int i = 0; i < p_len; i++) d_prompt[i] = (uint16_t)(prompt_tokens[i] & 0xFFFF);
                         for (int i = 0; i < o_len; i++) d_out[i] = (uint16_t)(out_ids[i] & 0xFFFF);
                         float halt_prob = 0.0f; /* We don't have final r.halt_prob easily accessible here, use 0.0f for now */
                         dreamion_record_inference(&g_dreamion, d_prompt, (uint8_t)p_len, d_out, (uint8_t)o_len,

@@ -1,4 +1,19 @@
 
+/* Forward declarations for static helpers defined later in this file */
+static void llmk_ascii_append_char(char *buf, int cap, int *io_p, char c);
+static void llmk_ascii_append_u64(char *buf, int cap, int *io_p, UINT64 v);
+/* Forward declaration for function defined in soma_inference.c (included after) */
+static EFI_STATUS llmk_repl_cfg_set_kv_best_effort(const char *key, const char *val);
+/* Tentative forward declarations for globals defined later in this file */
+extern EFI_FILE_HANDLE g_root;
+static LlmkZones       g_zones;
+static LlmkSentinel    g_sentinel;
+static LlmkLog         g_llmk_log;
+static OosiV3Weights   g_oosi_v3_weights;
+static int             g_oosi_v3_valid;
+static SomaCortexCtx   g_soma_cortex;
+static SomaDNA         g_soma_dna;
+
 static void llmk_load_repl_cfg_diopion_best_effort(DiopionEngine *e) {
     if (!e) return;
 
@@ -5518,6 +5533,13 @@ static void llmk_print_no_model_help(void) {
     Print(L"  /dna_save             Save DNA to soma_dna.bin (EFI partition)\r\n");
     Print(L"  /dna_load             Load DNA from soma_dna.bin\r\n");
     Print(L"  /dna_reset            Reset DNA to defaults + delete soma_dna.bin\r\n");
+    Print(L"\r\n  OO Node + Display:\r\n");
+    Print(L"  /soma_state           Full OO node state (node_id, state, dna_hash, D+ mode)\r\n");
+    Print(L"  /display              SOMA GUI status + sphere color (Phase S: ACTIVE/DEGRADED/ISOLATED)\r\n");
+    Print(L"  /swarm_status         Swarm node state + sync counters\r\n");
+    Print(L"  /swarm_peers          List all known peers with DNA hash + last_seen\r\n");
+    Print(L"  /swarm_sync [hello|dna|status]  Send swarm sync packet\r\n");
+    Print(L"  /swarm_id [0-7]       Show or set node ID\r\n");
     Print(L"\r\n  System:\r\n");
     Print(L"  reboot | reset        Reboot\r\n");
     Print(L"  shutdown              Power off\r\n");
