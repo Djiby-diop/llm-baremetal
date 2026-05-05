@@ -146,7 +146,90 @@ void oo_ioapic_tick(void) {
     _tick_count++;
 }
 
-// ── Main init ─────────────────────────────────────────────────────────────────
+// ── LAPIC Timer Calibration via PIT 8254 ─────────────────────────────────────
+//
+// Method: use PIT channel 0 (port 0x40) as a reference clock.
+// PIT clock = 1,193,182 Hz. Program it for exactly 10ms (11931 counts).
+// While PIT counts down, let LAPIC timer count down from 0xFFFFFFFF.
+// After 10ms, compute: lapic_ticks_10ms = 0xFFFFFFFF - LAPIC_CCR.
+// Result: ticks per millisecond = lapic_ticks_10ms / 10.
+
+static inline void _pit_outb(uint16_t port, uint8_t val) {
+    __asm__ __volatile__("outb %0,%1" : : "a"(val), "Nd"(port));
+}
+static inline uint8_t _pit_inb(uint16_t port) {
+    uint8_t v;
+    __asm__ __volatile__("inb %1,%0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+
+#define PIT_PORT_CH0    0x40    // Channel 0 data port
+#define PIT_PORT_CMD    0x43    // Mode/command register
+// CMD: channel 0, lo/hi byte, mode 0 (interrupt on terminal count), binary
+#define PIT_CMD_CH0_LH_MODE0  0x30
+
+// Calibration count for 10ms at 1193182 Hz
+#define PIT_COUNT_10MS  11931u
+
+uint32_t oo_lapic_calibrate_ms(void) {
+    // Divisor /16 for LAPIC timer (gives good resolution)
+    oo_lapic_write(LAPIC_TIMER_DCR, 0x3);   // divide by 16
+    oo_lapic_write(LAPIC_TIMER_LVT, LAPIC_TIMER_MASKED | 0xEF); // mask, no periodic
+
+    // Load LAPIC timer with max value
+    oo_lapic_write(LAPIC_TIMER_ICR, 0xFFFFFFFFu);
+
+    // Program PIT channel 0, mode 0 (one-shot), 10ms
+    _pit_outb(PIT_PORT_CMD, PIT_CMD_CH0_LH_MODE0);
+    _pit_outb(PIT_PORT_CH0, (uint8_t)(PIT_COUNT_10MS & 0xFF));        // lo byte
+    _pit_outb(PIT_PORT_CH0, (uint8_t)((PIT_COUNT_10MS >> 8) & 0xFF)); // hi byte
+
+    // Wait for PIT to count down to 0
+    // PIT mode 0: output goes high when count reaches 0.
+    // Poll via Read-Back command (0xE2) or simply read status + count.
+    // Simpler: poll until count wraps past small threshold.
+    uint16_t last = 0xFFFF;
+    while (1) {
+        // Latch channel 0 count
+        _pit_outb(PIT_PORT_CMD, 0x00);    // Counter latch command for ch0
+        uint8_t lo = _pit_inb(PIT_PORT_CH0);
+        uint8_t hi = _pit_inb(PIT_PORT_CH0);
+        uint16_t count = (uint16_t)lo | ((uint16_t)hi << 8);
+        // Mode 0: count decrements then stops at 0
+        if (count == 0 || (last < count && last < 100)) break; // wrapped or done
+        last = count;
+    }
+
+    // Read LAPIC timer remaining value
+    uint32_t lapic_remaining = oo_lapic_read(LAPIC_TIMER_CCR);
+    uint32_t lapic_10ms = 0xFFFFFFFFu - lapic_remaining;
+
+    // Divide by 10 → ticks per millisecond
+    uint32_t ticks_per_ms = lapic_10ms / 10u;
+    if (ticks_per_ms == 0) ticks_per_ms = 100000u; // fallback for bare QEMU
+
+    return ticks_per_ms;
+}
+
+// ── Sleep using calibrated LAPIC timer ───────────────────────────────────────
+// Call oo_lapic_calibrate_ms() first to get ticks_per_ms.
+// This is a busy-wait (no interrupts needed).
+
+void oo_lapic_sleep_us(uint32_t ticks_per_ms, uint32_t us) {
+    if (ticks_per_ms == 0) return;
+    uint32_t ticks = (ticks_per_ms * us) / 1000u;
+    if (ticks == 0) ticks = 1;
+
+    oo_lapic_write(LAPIC_TIMER_DCR, 0x3); // divide by 16
+    oo_lapic_write(LAPIC_TIMER_LVT, LAPIC_TIMER_MASKED | 0xEF);
+    oo_lapic_write(LAPIC_TIMER_ICR, ticks);
+
+    // Spin until CCR reaches 0
+    while (oo_lapic_read(LAPIC_TIMER_CCR) > 0)
+        __asm__ __volatile__("pause");
+}
+
+
 
 void oo_ioapic_init(uint64_t lapic_base, uint64_t ioapic_base, int disable_pic) {
     _lapic_base  = lapic_base;

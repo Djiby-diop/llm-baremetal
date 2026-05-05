@@ -137,6 +137,15 @@ uint64_t oo_ioapic_ticks(void);
 // Increment tick counter (called from timer ISR)
 void oo_ioapic_tick(void);
 
+// Calibrate LAPIC timer using PIT 8254 (~10ms window).
+// Returns LAPIC ticks per millisecond.
+// Must be called AFTER oo_ioapic_init() (LAPIC must be enabled).
+uint32_t oo_lapic_calibrate_ms(void);
+
+// Busy-wait for 'us' microseconds using calibrated LAPIC timer.
+// ticks_per_ms: return value of oo_lapic_calibrate_ms().
+void oo_lapic_sleep_us(uint32_t ticks_per_ms, uint32_t us);
+
 #ifdef __cplusplus
 }
 #endif

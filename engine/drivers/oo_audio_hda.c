@@ -43,6 +43,22 @@ static void hda_delay(uint32_t iters) {
 static uint32_t s_corb[HDA_CORB_ENTRIES] __attribute__((aligned(128)));
 static uint64_t s_rirb[HDA_RIRB_ENTRIES] __attribute__((aligned(128)));
 
+/* ── Capture BDL (static, 128-byte aligned per spec) ─────────────── */
+static uint8_t s_cap_buf[HDA_CAP_BDL_ENTRIES][HDA_CAP_BUF_SIZE] __attribute__((aligned(128)));
+
+/* ── GCAP probe: extract ISS/OSS and compute SD offsets ──────────── */
+
+static void hda_probe_gcap(OoAudioHda *a) {
+    uint16_t gcap = hda_read16(a->mmio_base, 0x00);
+    a->iss      = (gcap >> HDA_GCAP_ISS_SHIFT) & HDA_GCAP_ISS_MASK;
+    a->oss      = (gcap >> HDA_GCAP_OSS_SHIFT) & HDA_GCAP_OSS_MASK;
+    /* Clamp: at least 1 in/out each */
+    if (a->iss == 0) a->iss = 1;
+    if (a->oss == 0) a->oss = 1;
+    a->isd_base = HDA_SD_BASE;
+    a->osd_base = HDA_SD_BASE + a->iss * HDA_SD_STRIDE;
+}
+
 /* ── Reset controller ────────────────────────────────────────────── */
 
 static int hda_reset(uint64_t base) {
@@ -167,7 +183,7 @@ static void hda_find_codec(OoAudioHda *a) {
 
 static void hda_stream_setup(OoAudioHda *a) {
     uint64_t base  = a->mmio_base;
-    uint32_t sd    = HDA_SD_BASE; /* stream descriptor 0 */
+    uint32_t sd    = a->osd_base;  /* output stream descriptor (GCAP-derived) */
 
     /* Stop stream */
     hda_write8(base, sd + HDA_SD_CTL, 0x00);
@@ -205,8 +221,23 @@ static void hda_stream_setup(OoAudioHda *a) {
      */
     hda_write16(base, sd + HDA_SD_FMT, 0x0011);
 
-    /* Tag = 1 in upper byte of CTL */
+    /* Tag = 1 in upper byte of CTL — stream tag for DAC output */
     hda_write8(base, sd + HDA_SD_CTL + 2, 0x10);
+
+    /* Set DAC output pin: enable output + headphone drive */
+    hda_send_verb(a, HDA_VERB(a->codec_addr, HDA_NID_PIN_OUT,
+                              HDA_VERB_SET_PIN_WIDGET_CTL,
+                              HDA_PIN_CTL_OUT | HDA_PIN_CTL_HP));
+
+    /* Set DAC stream/channel (stream=1, channel=0) */
+    hda_send_verb(a, HDA_VERB(a->codec_addr, HDA_NID_DAC,
+                              HDA_VERB_SET_CONV_CHANNEL, (1 << 4) | 0));
+
+    /* Set DAC converter format: 48kHz 16-bit stereo */
+    hda_send_verb(a, HDA_VERB(a->codec_addr, HDA_NID_DAC,
+                              HDA_VERB_SET_CONV_FORMAT |
+                              ((HDA_FMT_48KHZ_16BIT_STEREO >> 8) & 0xFF),
+                              HDA_FMT_48KHZ_16BIT_STEREO & 0xFF));
 
     a->output_ready = 1;
 }
@@ -222,17 +253,18 @@ void oo_audio_hda_init(OoAudioHda *a, uint32_t bus_dev_fn, uint64_t mmio_base) {
     a->sample_rate   = 48000;
     a->channels      = 2;
 
-    if (hda_reset(mmio_base) != 0) return; /* controller stuck */
+    if (hda_reset(mmio_base) != 0) return;
 
-    /* Small delay after reset for codecs to enumerate */
+    hda_probe_gcap(a);  /* must happen before CORB/RIRB (uses mmio_base) */
     hda_delay(100000);
 
     hda_corb_init(a);
     hda_rirb_init(a);
     hda_find_codec(a);
 
-    /* Power-up codec (verb: Set Power State D0 on AFG node 1) */
-    hda_send_verb(a, HDA_VERB(a->codec_addr, 1, 0x705, 0x00));
+    /* Power-up AFG node */
+    hda_send_verb(a, HDA_VERB(a->codec_addr, HDA_NID_AFG,
+                              HDA_VERB_SET_POWER_STATE, 0x00));
     hda_delay(50000);
 
     hda_stream_setup(a);
@@ -243,7 +275,7 @@ int oo_audio_hda_play_pcm(OoAudioHda *a, const int16_t *samples, uint32_t n_samp
     if (!a->initialized || !a->output_ready) return -1;
 
     uint64_t base = a->mmio_base;
-    uint32_t sd   = HDA_SD_BASE;
+    uint32_t sd   = a->osd_base;
 
     /* Fill BDL buffers round-robin */
     uint32_t remaining = n_samples;
@@ -302,7 +334,7 @@ int oo_audio_hda_beep(OoAudioHda *a, uint32_t freq_hz, uint32_t duration_ms) {
 
     /* Dispatch to play_pcm using a dummy pointer — buffers already filled */
     uint64_t base = a->mmio_base;
-    uint32_t sd   = HDA_SD_BASE;
+    uint32_t sd   = a->osd_base;
 
     /* Update CBL for actual duration */
     uint32_t total_bytes = samples_total * sizeof(int16_t) * a->channels;
@@ -337,16 +369,132 @@ static void hda_u32_to_str(uint32_t v, char *buf, int size) {
 void oo_audio_hda_print_status(const OoAudioHda *a, void (*print_fn)(const char *)) {
     if (!print_fn) return;
     print_fn("[HDA] Intel High Definition Audio\n");
-    print_fn("  initialized : "); print_fn(a->initialized  ? "yes" : "no");  print_fn("\n");
-    print_fn("  output_ready: "); print_fn(a->output_ready ? "yes" : "no");  print_fn("\n");
+    print_fn("  initialized : "); print_fn(a->initialized    ? "yes" : "no"); print_fn("\n");
+    print_fn("  output_ready: "); print_fn(a->output_ready   ? "yes" : "no"); print_fn("\n");
+    print_fn("  capture_rdy : "); print_fn(a->capture_ready  ? "yes" : "no"); print_fn("\n");
 
     char buf[16];
     hda_u32_to_str(a->sample_rate, buf, sizeof(buf));
     print_fn("  sample_rate : "); print_fn(buf); print_fn(" Hz\n");
 
-    hda_u32_to_str(a->channels, buf, sizeof(buf));
-    print_fn("  channels    : "); print_fn(buf); print_fn("\n");
+    hda_u32_to_str(a->iss, buf, sizeof(buf));
+    print_fn("  ISS (in)    : "); print_fn(buf); print_fn("\n");
+    hda_u32_to_str(a->oss, buf, sizeof(buf));
+    print_fn("  OSS (out)   : "); print_fn(buf); print_fn("\n");
 
     hda_u32_to_str(a->codec_addr, buf, sizeof(buf));
     print_fn("  codec_addr  : "); print_fn(buf); print_fn("\n");
+}
+
+/* ── Microphone capture stream ───────────────────────────────────── */
+
+int oo_audio_hda_capture_start(OoAudioHda *a) {
+    if (!a->initialized) return -1;
+
+    uint64_t base = a->mmio_base;
+    uint32_t sd   = a->isd_base;  /* Input Stream Descriptor 0 */
+
+    /* ── Reset ISD ────────────────────────────────────────────────── */
+    hda_write8(base, sd + HDA_SD_CTL, 0x00);
+    hda_delay(5000);
+
+    /* Assert stream reset: SRST bit */
+    hda_write8(base, sd + HDA_SD_CTL, 0x01);
+    for (int i = 0; i < 1000; i++) {
+        if (hda_read8(base, sd + HDA_SD_CTL) & 0x01) break;
+        hda_delay(10);
+    }
+    hda_write8(base, sd + HDA_SD_CTL, 0x00);
+    for (int i = 0; i < 1000; i++) {
+        if (!(hda_read8(base, sd + HDA_SD_CTL) & 0x01)) break;
+        hda_delay(10);
+    }
+
+    /* ── Build capture BDL ────────────────────────────────────────── */
+    for (int i = 0; i < HDA_CAP_BDL_ENTRIES; i++) {
+        a->cap_bdl[i].addr = (uint64_t)(uintptr_t)s_cap_buf[i];
+        a->cap_bdl[i].len  = HDA_CAP_BUF_SIZE;
+        a->cap_bdl[i].ioc  = 1;  /* interrupt on completion (for BCIS polling) */
+    }
+
+    uint64_t bdl_phys = (uint64_t)(uintptr_t)a->cap_bdl;
+    hda_write32(base, sd + HDA_SD_BDPL, (uint32_t)(bdl_phys & 0xFFFFFFFF));
+    hda_write32(base, sd + HDA_SD_BDPU, (uint32_t)(bdl_phys >> 32));
+    hda_write32(base, sd + HDA_SD_CBL,  HDA_CAP_BDL_ENTRIES * HDA_CAP_BUF_SIZE);
+    hda_write16(base, sd + HDA_SD_LVI,  HDA_CAP_BDL_ENTRIES - 1);
+
+    /* Format: 48kHz 16-bit mono — hardware captures at 48kHz */
+    hda_write16(base, sd + HDA_SD_FMT, HDA_FMT_48KHZ_16BIT_MONO);
+
+    /* Stream tag = 2 (ISD tag, distinct from OSD tag=1) */
+    hda_write8(base, sd + HDA_SD_CTL + 2, 0x20);  /* tag=2 in bits [7:4] */
+
+    /* ── Configure codec input path ───────────────────────────────── */
+
+    /* Power up ADC converter node */
+    hda_send_verb(a, HDA_VERB(a->codec_addr, HDA_NID_ADC,
+                              HDA_VERB_SET_POWER_STATE, 0x00));
+    hda_delay(10000);
+
+    /* Enable mic input pin: VRef 80% (provides microphone bias) */
+    hda_send_verb(a, HDA_VERB(a->codec_addr, HDA_NID_PIN_MIC,
+                              HDA_VERB_SET_PIN_WIDGET_CTL,
+                              HDA_PIN_CTL_IN | HDA_PIN_CTL_VREF80));
+
+    /* Connect ADC to stream tag 2, channel 0 */
+    hda_send_verb(a, HDA_VERB(a->codec_addr, HDA_NID_ADC,
+                              HDA_VERB_SET_CONV_CHANNEL, (2 << 4) | 0));
+
+    /* Set ADC converter format to match ISD: 48kHz 16-bit mono */
+    hda_send_verb(a, HDA_VERB(a->codec_addr, HDA_NID_ADC,
+                              HDA_VERB_SET_CONV_FORMAT |
+                              ((HDA_FMT_48KHZ_16BIT_MONO >> 8) & 0xFF),
+                              HDA_FMT_48KHZ_16BIT_MONO & 0xFF));
+
+    /* ── Start ISD DMA ────────────────────────────────────────────── */
+    a->cap_rd_buf = 0;
+    hda_write8(base, sd + HDA_SD_CTL, 0x02);  /* RUN bit */
+
+    a->capture_ready = 1;
+    return 0;
+}
+
+/*
+ * oo_audio_hda_read_samples — copy captured audio into caller buffer
+ *
+ * Checks if a BDL buffer has been filled by the hardware (BCIS status bit).
+ * Decimates 3:1 from 48kHz to 16kHz (simple drop-sample — sufficient for
+ * wakeword energy detection; not for high-quality ASR).
+ *
+ * Returns number of 16kHz 16-bit mono samples written to buf.
+ * Returns 0 if no buffer completed yet.
+ * Returns -1 if capture not started.
+ */
+int oo_audio_hda_read_samples(OoAudioHda *a, int16_t *buf, int buf_cap) {
+    if (!a->initialized || !a->capture_ready || !buf || buf_cap <= 0) return -1;
+
+    uint64_t base = a->mmio_base;
+    uint32_t sd   = a->isd_base;
+
+    /* BCIS (Buffer Completion Interrupt Status) = bit 2 of SD_STS */
+    uint8_t sts = hda_read8(base, sd + HDA_SD_STS);
+    if (!(sts & 0x04)) return 0;  /* no buffer complete yet */
+
+    /* Clear BCIS by writing 1 */
+    hda_write8(base, sd + HDA_SD_STS, 0x04);
+
+    /* Read from completed BDL buffer (current cap_rd_buf) */
+    const int16_t *src = (const int16_t *)(uintptr_t)s_cap_buf[a->cap_rd_buf];
+    int src_samples = HDA_CAP_BUF_SIZE / sizeof(int16_t);  /* 2048 at 48kHz */
+
+    /* Decimate 3:1 → 682 samples at 16kHz */
+    int out = 0;
+    for (int i = 0; i < src_samples && out < buf_cap; i += 3) {
+        buf[out++] = src[i];
+    }
+
+    /* Advance to next BDL buffer */
+    a->cap_rd_buf = (a->cap_rd_buf + 1) % HDA_CAP_BDL_ENTRIES;
+
+    return out;
 }
