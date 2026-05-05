@@ -99,7 +99,9 @@ REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	engine/voice/oo_wakeword.o \
 	engine/voice/oo_tts_phoneme.o \
 	engine/voice/oo_voice_desktop_bridge.o \
+	engine/voice/oo_voice_nlp.o \
 	engine/drivers/oo_rtc.o \
+	engine/drivers/oo_usb_msc.o \
 	engine/drivers/oo_acpi.o \
 	engine/drivers/oo_ioapic.o \
 	engine/drivers/oo_edid.o \

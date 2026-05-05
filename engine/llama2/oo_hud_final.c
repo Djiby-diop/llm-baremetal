@@ -564,6 +564,100 @@ static void draw_bar_horiz_particles(INT32 x, INT32 y, INT32 w, INT32 h,
     }
 }
 
+/* ── Heatmap (Topography) ───────────────────────────────────────── */
+static void draw_heatmap(INT32 x, INT32 y, INT32 w, INT32 h, UINT32 pct, UINT32 tick, UINT32 base_col) {
+    int cols = w / 5;
+    int rows = h / 5;
+    for (int r = 0; r < rows; r++) {
+        for (int c = 0; c < cols; c++) {
+            int block_pct = (c + r * cols) * 100 / (cols * rows);
+            if (block_pct < (int)pct) {
+                INT32 bright = isin((c*9 + r*13 - (int)tick*3) & 63) * 40 / 127 + 60;
+                UINT32 r_base = (base_col >> 16) & 0xFFu;
+                UINT32 g_base = (base_col >> 8) & 0xFFu;
+                UINT32 b_base = base_col & 0xFFu;
+                UINT32 cr = r_base * bright / 100u; if (cr > 255) cr = 255;
+                UINT32 cg = g_base * bright / 100u; if (cg > 255) cg = 255;
+                UINT32 cb = b_base * bright / 100u; if (cb > 255) cb = 255;
+                fill_rect(x + c*5, y + r*5, 4, 4, SOMA_RGB(cr, cg, cb));
+            } else {
+                fill_rect(x + c*5, y + r*5, 4, 4, SOMA_RGB(5, 10, 20));
+            }
+        }
+    }
+}
+
+/* ── Radar Sweep Scanner ────────────────────────────────────────── */
+static void draw_radar(INT32 cx, INT32 cy, INT32 r, UINT32 tick) {
+    draw_circle(cx, cy, r, SOMA_CYAN_DIM);
+    draw_circle(cx, cy, r/2, SOMA_CYAN_DIM);
+    draw_line(cx - r, cy, cx + r, cy, SOMA_CYAN_DIM);
+    draw_line(cx, cy - r, cx, cy + r, SOMA_CYAN_DIM);
+    
+    INT32 angle = (INT32)(tick * 2u) % 64;
+    INT32 sx = cx + r * icos(angle) / 127;
+    INT32 sy = cy + r * isin(angle) / 127;
+    draw_line(cx, cy, sx, sy, SOMA_GREEN);
+    
+    for (int i=1; i<8; i++) {
+        INT32 trail_ang = (angle - i + 64) % 64;
+        INT32 tx = cx + r * icos(trail_ang) / 127;
+        INT32 ty = cy + r * isin(trail_ang) / 127;
+        UINT32 fade = SOMA_RGB(0, 255 - i*30, 80 - i*10);
+        draw_line(cx, cy, tx, ty, fade);
+    }
+    
+    for (int b=0; b<4; b++) {
+        INT32 b_ang = (b*19 + 7) % 64;
+        INT32 b_dist = r/4 + (b*12) % (r - r/4);
+        INT32 bx = cx + b_dist * icos(b_ang) / 127;
+        INT32 by = cy + b_dist * isin(b_ang) / 127;
+        INT32 diff = (angle - b_ang + 64) % 64;
+        if (diff < 12) {
+            UINT32 bc = SOMA_RGB(255 - diff*20, 255, 255 - diff*20);
+            fill_rect(bx-1, by-1, 3, 3, bc);
+        } else {
+            fill_rect(bx-1, by-1, 3, 3, SOMA_CYAN_DIM);
+        }
+    }
+}
+
+/* ── Neural Constellation ───────────────────────────────────────── */
+static void draw_constellation(INT32 cx, INT32 cy, INT32 w, INT32 h, UINT32 tick) {
+    INT32 center_r = 6;
+    draw_circle(cx, cy, center_r, SOMA_CYAN);
+    draw_str_center(cx, cy + 12, "SOMA", SOMA_CYAN_DIM, 1);
+    
+    int n_peers = g_soma.peer_count;
+    if (n_peers > 6) n_peers = 6;
+    if (n_peers == 0) return;
+    for (int i=0; i<n_peers; i++) {
+        const SomaPeer *peer = &g_soma.peers[i];
+        if (!peer->active) continue;
+        
+        INT32 p_ang = (INT32)(tick / 8u + i * 64/n_peers) % 64;
+        INT32 dist = (w < h ? w/2 : h/2) - 25 + isin((int)(tick/2u + i*10)%64)*10/127;
+        
+        INT32 px = cx + dist * icos(p_ang) / 127;
+        INT32 py = cy + dist * isin(p_ang) / 127;
+        
+        UINT32 p_col = soma_state_color(peer->state);
+        
+        INT32 pulse = isin((int)(tick*3u - dist)%64);
+        UINT32 line_col = (pulse > 0) ? p_col : SOMA_CYAN_DIM;
+        draw_line(cx, cy, px, py, line_col);
+        fill_rect(px-2, py-2, 5, 5, p_col);
+        
+        if ((tick + i*15) % 40 < 10) {
+            INT32 pkt_dist = dist * ((tick + i*15) % 40) / 10;
+            INT32 pkt_x = cx + pkt_dist * icos(p_ang) / 127;
+            INT32 pkt_y = cy + pkt_dist * isin(p_ang) / 127;
+            fill_rect(pkt_x-1, pkt_y-1, 3, 3, SOMA_WHITE);
+        }
+        draw_str_center(px, py + 8, peer->peer_id, SOMA_WHITE, 1);
+    }
+}
+
 /* ── LAYER 4: Panels ─────────────────────────────────────────────── */
 static void render_panels(UINT32 tick) {
     char buf[64]; int pos;
@@ -624,10 +718,11 @@ static void render_panels(UINT32 tick) {
         draw_str(p2x+4, ry, a->name, SOMA_CYAN_DIM, 1);
         UINT32 pct = a->total_mb > 0u ? (a->used_mb * 100u / a->total_mb) : 0u;
         UINT32 mcol = pct > 85u ? SOMA_RED : pct > 60u ? SOMA_AMBER : SOMA_MAGENTA;
-        draw_bar_horiz_particles(p2x+4, ry+9, p2w-12, 7, a->used_mb, a->total_mb, mcol, tick);
+        // Heatmap rendering
+        draw_heatmap(p2x+4, ry+9, p2w-40, 10, pct, tick, mcol);
         pos = 0; soma_num_cat(buf, &pos, pct); soma_str_cat(buf, &pos, "%");
         draw_str(p2x + p2w - 30, ry, buf, mcol, 1);
-        ry += 22;
+        ry += 24;
     }
 
     /* Panel 3: SYS_LOG (mid-left) */
@@ -644,20 +739,17 @@ static void render_panels(UINT32 tick) {
         ry += 24;
     }
 
+    // Radar Scanner overlaid on the right side
+    draw_radar(p3x + p3w - 60, p3y + 70, 45, tick);
+
     /* Panel 4: NEURAL NODES (mid-right) */
     INT32 p4x = W(700) + g_plx_x, p4y = H(350) + g_plx_y, p4w = W(270), p4h = H(330);
     draw_panel(p4x, p4y, p4w, p4h, "NEURAL NODES", SOMA_AMBER);
     ry = p4y + 18;
 
-    for (int i = 0; i < g_soma.peer_count && i < 6; i++) {
-        const SomaPeer *peer = &g_soma.peers[i];
-        UINT32 dot_col = peer->active ? soma_state_color(peer->state) : SOMA_CYAN_DIM;
-        fill_rect(p4x+4, ry+1, 6, 6, dot_col);
-        draw_str(p4x+14, ry, peer->peer_id, peer->active ? SOMA_WHITE : SOMA_CYAN_DIM, 1);
-        pos = 0; soma_num_cat(buf, &pos, peer->latency_ms); soma_str_cat(buf, &pos, "MS");
-        draw_str(p4x + p4w - 36, ry, buf, SOMA_CYAN_DIM, 1);
-        ry += 14;
-    }
+    // Draw the new interactive constellation graph instead of list
+    draw_constellation(p4x + p4w/2, p4y + p4h/2, p4w, p4h - 40, tick);
+
     pos = 0;
     soma_str_cat(buf, &pos, "PEERS: ");
     soma_num_cat(buf, &pos, (UINT32)g_soma.peer_count);
