@@ -418,6 +418,70 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         llmk_print_diag();
     }
 
+    /* Phase WI: IOAPIC + LAPIC — interrupt routing + timer calibration
+     * Must run after ACPI (MADT gives LAPIC/IOAPIC bases).
+     * Falls back to default bases (0xFEE00000/0xFEC00000) if ACPI unavailable. */
+    {
+        uint64_t lapic_base  = 0xFEE00000ULL;
+        uint64_t ioapic_base = 0xFEC00000ULL;
+        /* Prefer ACPI MADT values if available */
+        const OoAcpiInfo *acpi = oo_acpi_get();
+        if (acpi && acpi->lapic_base)              lapic_base  = acpi->lapic_base;
+        if (acpi && acpi->ioapic_count > 0)        ioapic_base = acpi->ioapics[0].base;
+        oo_ioapic_init(lapic_base, ioapic_base, 1 /* disable legacy PIC */);
+        uint32_t ticks_per_ms = oo_lapic_calibrate_ms();
+        if (g_boot_verbose)
+            Print(L"[LAPIC] IOAPIC ready, %u ticks/ms\r\n", (unsigned)ticks_per_ms);
+    }
+
+    /* Phase WD: HDA Audio — init capture + playback
+     * Find HDA controller via PCI (vendor 8086, device 2668 for QEMU).
+     * Best-effort: voice works without HDA (text-only fallback). */
+    {
+        uint32_t hda_bdf = 0;
+        for (uint8_t _hi = 0; _hi < g_oo_driver_probe.device_count; _hi++) {
+            OoPciDevice *_pd = &g_oo_driver_probe.devices[_hi];
+            if (_pd->vendor_id == 0x8086 &&
+                (_pd->device_id == 0x2668 ||   /* QEMU HDA */
+                 _pd->device_id == 0x1C20 ||   /* Intel 6-series */
+                 _pd->device_id == 0x8C20)) {  /* Intel 8-series */
+                hda_bdf = (uint32_t)((_pd->bus << 8) | (_pd->device << 3) | _pd->func);
+                break;
+            }
+        }
+        if (hda_bdf) {
+            /* MMIO base from BAR0 (bits[31:14]) */
+            extern uint32_t oo_pci_read_config_32(uint8_t bus, uint8_t dev,
+                                                   uint8_t func, uint8_t reg);
+            uint8_t bus  = (uint8_t)((hda_bdf >> 8) & 0xFF);
+            uint8_t dev  = (uint8_t)((hda_bdf >> 3) & 0x1F);
+            uint8_t func = (uint8_t)(hda_bdf & 0x07);
+            uint64_t mmio = (uint64_t)(oo_pci_read_config_32(bus, dev, func, 0x10) & ~0xFUL);
+            oo_audio_hda_init(&g_hda, hda_bdf, mmio);
+            if (g_boot_verbose)
+                Print(L"[HDA] Audio controller at PCI %02X:%02X.%X mmio=0x%llX\r\n",
+                      (unsigned)bus, (unsigned)dev, (unsigned)func, (UINTN)mmio);
+        } else {
+            if (g_boot_verbose) Print(L"[HDA] No supported audio controller found\r\n");
+        }
+    }
+
+    /* Phase WW: Voice Pipeline Loop
+     * Init bridge (shared state for HUD), then start voice loop.
+     * uart_emit=1 so HUD python bridge picks up OO_VOICE: lines. */
+    {
+        OvlConfig vcfg = {
+            .hda          = &g_hda,
+            .bridge       = (void *)0,  /* bridge managed internally by voice loop */
+            .lang_fr      = 1,          /* French TTS by default */
+            .uart_emit    = 1,          /* Emit JSON state on UART COM1 */
+            .lapic_ticks_per_ms = 0     /* 0 = skip timed sleep, best-effort */
+        };
+        int vret = oo_voice_loop_init(&vcfg);
+        if (g_boot_verbose)
+            Print(L"[VOICE] Pipeline %s\r\n", vret == 0 ? L"ready" : L"failed (text-only)");
+    }
+
     // LLM-OO runtime: init early, then optionally hook to GOP for heartbeat.
     llmk_oo_init();
     llmk_oo_set_on_step(llmk_oo_on_step_gop);

@@ -143,6 +143,23 @@
 #include "../voice/oo_voice_router.h"
 #include "../voice/oo_voice_router.c"
 
+// Phase WW: Full Voice Pipeline (HDA capture → wakeword → NLP → TTS → HDA play)
+// Headers only — implementations linked via REPL_OBJS (.o files)
+#include "../voice/oo_wakeword.h"
+#include "../voice/oo_voice_context.h"
+#include "../voice/oo_persona.h"
+#include "../voice/oo_tts_phoneme.h"
+#include "../voice/oo_voice_desktop_bridge.h"
+#include "../voice/oo_voice_nlp.h"
+#include "../voice/oo_voice_state_writer.h"
+#include "../voice/oo_voice_loop.h"
+
+// Phase WD: HDA audio driver (headers only — .c linked via REPL_OBJS)
+#include "../drivers/oo_audio_hda.h"
+
+// Phase WI: IOAPIC + LAPIC (headers only — .c linked via REPL_OBJS)
+#include "../drivers/oo_ioapic.h"
+
 // Phase X: In-Situ Self-Training Engine (RAG + LoRA delta)
 #include "../trainer/oo_insitu_train.h"
 #include "../trainer/oo_insitu_train.c"

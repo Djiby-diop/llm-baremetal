@@ -2566,6 +2566,8 @@ static OoSelfModel g_oo_self_model;
 static Nfs2Store   g_nfs2;
 /* Phase W: Natural Language → REPL Command Router */
 static OvrEngine   g_ovr;
+/* Phase WW: Full Voice Pipeline — HDA audio */
+static OoAudioHda  g_hda;
 /* Phase X: In-Situ Self-Training Engine */
 static OitEngine   g_oit;
 
