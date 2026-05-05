@@ -12,6 +12,10 @@
 
 // ── Freestanding helpers ─────────────────────────────────────────────────
 
+#ifndef NULL
+#define NULL ((void*)0)
+#endif
+
 static int ovr_tolower(int c) {
     return (c >= 'A' && c <= 'Z') ? c + 32 : c;
 }
@@ -571,12 +575,6 @@ OvrResult ovr_route(OvrEngine *e, const char *input) {
 //   out->reply = human-readable OO response to speak/display
 //   out->level = match confidence level
 
-typedef struct {
-    OvrResult   route;
-    char        reply[OVR_CMD_MAX];   // human-readable OO response
-    int         is_persona_only;      // 1 = no REPL command, just a reply
-} OvrContextResult;
-
 OvrContextResult ovr_route_with_persona(OvrEngine        *e,
                                          OvcContext       *ctx,
                                          OoPersona        *persona,
@@ -590,7 +588,7 @@ OvrContextResult ovr_route_with_persona(OvrEngine        *e,
     // 1. Detect meta-intents from context BEFORE routing
     if (ovc_is_greeting(input, input_len)) {
         ovc_push_turn(ctx, input, input_len, "greet", 5);
-        OoPersonaResponse pr = oo_persona_greet(persona);
+        OoPersonaResponse pr = oo_persona_greet(persona, NULL);
         ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
         cr.is_persona_only = 1;
         cr.route.level = OVR_STRONG_MATCH;
@@ -610,7 +608,7 @@ OvrContextResult ovr_route_with_persona(OvrEngine        *e,
     }
 
     if (ovc_is_confusion(input, input_len)) {
-        OoPersonaResponse pr = oo_persona_clarify(persona);
+        OoPersonaResponse pr = oo_persona_clarify(persona, NULL);
         ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
         cr.is_persona_only = 1;
         cr.route.level = OVR_STRONG_MATCH;
@@ -641,21 +639,21 @@ OvrContextResult ovr_route_with_persona(OvrEngine        *e,
         OoPersonaResponse pr;
 
         if (ovr_strhas(intent_name, "greet")) {
-            pr = oo_persona_greet(persona);
+            pr = oo_persona_greet(persona, NULL);
         } else if (ovr_strhas(intent_name, "thank")) {
             pr = oo_persona_thank(persona);
         } else if (ovr_strhas(intent_name, "clarify") || ovr_strhas(intent_name, "stop")) {
-            pr = oo_persona_clarify(persona);
+            pr = oo_persona_clarify(persona, NULL);
         } else if (ovr_strhas(intent_name, "introduce")) {
             pr = oo_persona_introduce(persona);
         } else if (ovr_strhas(intent_name, "state")) {
-            pr = oo_persona_greet(persona);
+            pr = oo_persona_greet(persona, NULL);
         } else if (ovr_strhas(intent_name, "opinion")) {
-            pr = oo_persona_opinion(persona);
+            pr = oo_persona_opinion(persona, NULL);
         } else if (ovr_strhas(intent_name, "voice_mode")) {
-            pr = oo_persona_ack_success(persona, "voice");
+            pr = oo_persona_ack_success(persona, "voice", NULL);
         } else if (ovr_strhas(intent_name, "wake_ack")) {
-            pr = oo_persona_greet(persona);
+            pr = oo_persona_greet(persona, NULL);
         } else if (ovr_strhas(intent_name, "repeat")) {
             ovc_last_oo_response(ctx, cr.reply, OVR_CMD_MAX);
             if (cr.reply[0] == '\0') ovr_strcpy(cr.reply, "Nothing to repeat yet.", OVR_CMD_MAX);
@@ -663,7 +661,7 @@ OvrContextResult ovr_route_with_persona(OvrEngine        *e,
             ovc_push_turn(ctx, input, input_len, cr.reply, ovr_strlen(cr.reply));
             return cr;
         } else {
-            pr = oo_persona_clarify(persona);
+            pr = oo_persona_clarify(persona, NULL);
         }
 
         ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
@@ -677,11 +675,11 @@ OvrContextResult ovr_route_with_persona(OvrEngine        *e,
 
     // 4. Real REPL command — generate ACK response via persona
     if (cr.route.level != OVR_NO_MATCH && cr.route.cmd[0] != '\0') {
-        OoPersonaResponse pr = oo_persona_ack_success(persona, cr.route.label);
+        OoPersonaResponse pr = oo_persona_ack_success(persona, cr.route.label, cr.route.cmd);
         ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
     } else if (cr.route.level == OVR_NO_MATCH) {
         // No match — ask for clarification
-        OoPersonaResponse pr = oo_persona_clarify(persona);
+        OoPersonaResponse pr = oo_persona_clarify(persona, NULL);
         ovr_strcpy(cr.reply, pr.text, OVR_CMD_MAX);
         cr.is_persona_only = 1;
     }

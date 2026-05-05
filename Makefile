@@ -252,7 +252,7 @@ oo-modules/ghost-engine/core/oo_net_packet.o: oo-modules/ghost-engine/core/oo_ne
 	$(CC) $(CFLAGS) -c oo-modules/ghost-engine/core/oo_net_packet.c -o oo-modules/ghost-engine/core/oo_net_packet.o
 
 $(REPL_SO): $(REPL_OBJS) | oo-subsystems
-	ld $(LDFLAGS) $(REPL_OBJS) \
+	ld $(LDFLAGS) --allow-multiple-definition $(REPL_OBJS) \
 		--start-group $(OO_LINK_ARCHIVES) --end-group \
 		-o $(REPL_SO) $(LIBS)
 

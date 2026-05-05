@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 /* ── Node state ─────────────────────────────────────────────────── */
+#ifndef OO_SWARM_NODE_H   /* avoid conflict with oo_swarm_node.h */
 typedef enum {
     OO_ACTIVE    = 0,   /* cyan    */
     OO_DEGRADED  = 1,   /* amber   */
@@ -12,13 +13,17 @@ typedef enum {
     OO_EMERGENCY = 3,   /* white   */
     OO_SLEEPING  = 4    /* blue    */
 } OoNodeState;
+#else
+/* oo_swarm_node.h defines OO_NODE_* — provide aliases for HUD code */
+#define OO_ACTIVE    OO_NODE_ACTIVE
+#define OO_DEGRADED  OO_NODE_DEGRADED
+#define OO_ISOLATED  OO_NODE_ISOLATED
+#define OO_EMERGENCY 5   /* visual: critical — no swarm equivalent */
+#define OO_SLEEPING  6   /* visual: low-power — no swarm equivalent */
+#endif
 
 /* ── D+ mode ────────────────────────────────────────────────────── */
-typedef enum {
-    DPLUS_SOLAR = 0,
-    DPLUS_LUNAR = 1,
-    DPLUS_SAFE  = 2
-} DplusMode;
+/* DplusMode enum is defined in oo-warden/dplus/dplus.h; uint8_t used here to avoid conflict */
 
 /* ── Arena info ─────────────────────────────────────────────────── */
 typedef struct {
@@ -46,7 +51,7 @@ typedef struct {
 typedef struct {
     char         organism_id[32];
     OoNodeState  node_state;
-    DplusMode    dplus_mode;
+    uint8_t      dplus_mode;        /* 0=SOLAR 1=LUNAR 2=SAFE — matches DplusMode enum */
     uint8_t      warden_pressure;   /* 0-255 */
     uint32_t     swarm_peer_count;
 
@@ -76,7 +81,7 @@ typedef struct {
 } SomaSystemState;
 
 /* ── Declarations ───────────────────────────────────────────────── */
-void soma_uart_init(void);
+/* soma_uart_init is defined as static inline in ssm/soma_uart.h — do not redeclare */
 void soma_uart_poll(SomaSystemState *state);
 void soma_state_demo_fill(SomaSystemState *state, uint32_t tick);
 

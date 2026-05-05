@@ -40,7 +40,7 @@ typedef struct {
 
 // ── Wake pattern template ─────────────────────────────────────────────────────
 typedef struct {
-    const char  *name;                       // "OO", "HEY_OO", etc.
+    char         name[32];                   // "OO", "HEY_OO", etc.
     uint16_t     energy_profile[OWW_PATTERN_FRAMES]; // expected STE profile
     uint8_t      voiced_mask;                // bitmask: which frames must be voiced
     int          min_voiced;                 // minimum voiced frames required

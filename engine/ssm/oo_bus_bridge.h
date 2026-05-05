@@ -120,12 +120,12 @@ static void oo_bus_emit_heartbeat(int tok_total, int mem_mb, const char *mode) {
 }
 
 // D+ verdict change alert
-static void oo_bus_emit_warden_alert(DPlusVerdict verdict, int reason_flags, int pressure) {
+static void oo_bus_emit_warden_alert(OoDplusVerdict verdict, int reason_flags, int pressure) {
     // "verdict=QUARANTINE reason=0x03 pressure=2"
     char pay[128];
     int pos = 0;
     const char *v1 = "verdict="; for (int i=0; v1[i]&&pos<120; i++) pay[pos++]=v1[i];
-    const char *vn = g_dplus_verdict_name[verdict > DPLUS_EMERGENCY ? 0 : verdict];
+    const char *vn = g_dplus_verdict_name[verdict > OO_DPLUS_EMERGENCY ? 0 : verdict];
     for (int i=0; vn[i]&&pos<120; i++) pay[pos++]=vn[i];
     const char *v2 = " reason=0x"; for (int i=0; v2[i]&&pos<120; i++) pay[pos++]=v2[i];
     char hex[] = "0123456789abcdef";

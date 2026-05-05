@@ -53,7 +53,10 @@ typedef struct __attribute__((packed)) {
     float    avg_confidence;     // Running average of confidence scores
 
     // Reserved for future fields
-    uint8_t  _reserved[24];
+    uint8_t  _reserved[20];
+
+    // D+ policy mode (SOLAR=0, LUNAR=1, SAFE=2)
+    uint8_t  dplus_mode;
 } SomaDNA;
 
 // ============================================================

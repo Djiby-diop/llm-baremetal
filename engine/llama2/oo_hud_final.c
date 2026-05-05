@@ -32,6 +32,9 @@ static UINT32  g_sw, g_sh, g_stride;
 #define SOMA_GRID       SOMA_RGB(5,20,35)
 #define SOMA_PANEL_BG   SOMA_RGB(3,8,18)
 #define SOMA_YELLOW     SOMA_RGB(220,220,0)
+#define SOMA_GOLD       SOMA_RGB(255,180,0)
+#define SOMA_PURPLE     SOMA_RGB(120,0,255)
+#define SOMA_WHITE_HOT  SOMA_RGB(255,255,255)
 
 static UINT32 soma_state_color(OoNodeState s) {
     switch (s) {
@@ -53,6 +56,17 @@ static const INT8 k_sin64[64] = {
 };
 #define isin(i) ((INT32)k_sin64[((UINT32)(i))&63u])
 #define icos(i) ((INT32)k_sin64[(((UINT32)(i))+16u)&63u])
+
+static UINT32 lerp_rgb(UINT32 c1, UINT32 c2, int t_pm) {
+    if (t_pm <= 0) return c1;
+    if (t_pm >= 1000) return c2;
+    UINT32 r1 = (c1>>16)&0xFFu, g1 = (c1>>8)&0xFFu, b1 = c1&0xFFu;
+    UINT32 r2 = (c2>>16)&0xFFu, g2 = (c2>>8)&0xFFu, b2 = c2&0xFFu;
+    UINT32 r = (r1 * (1000u - (UINT32)t_pm) + r2 * (UINT32)t_pm) / 1000u;
+    UINT32 g = (g1 * (1000u - (UINT32)t_pm) + g2 * (UINT32)t_pm) / 1000u;
+    UINT32 b = (b1 * (1000u - (UINT32)t_pm) + b2 * (UINT32)t_pm) / 1000u;
+    return SOMA_RGB(r, g, b);
+}
 
 /* ── 5x7 bitmap font (96 chars, ASCII 32-127) ───────────────────── */
 /* Each char: 7 row-bytes; each byte = 5 bits (bit4=leftmost pixel) */
@@ -272,6 +286,14 @@ static void draw_ellipse(INT32 cx, INT32 cy, INT32 rx, INT32 ry, UINT32 col) {
     }
 }
 
+static void draw_ellipse_blend(INT32 cx, INT32 cy, INT32 rx, INT32 ry, UINT32 col, UINT32 alpha) {
+    for (int i = 0; i < 64; i++) {
+        INT32 x = cx + (rx * icos(i)) / 127;
+        INT32 y = cy + (ry * isin(i)) / 127;
+        px_blend(x, y, col, alpha);
+    }
+}
+
 /* ── String utilities ───────────────────────────────────────────── */
 static int soma_strlen(const char *s) {
     int n = 0; while (s[n]) n++; return n;
@@ -332,16 +354,38 @@ static void draw_str_center(INT32 cx, INT32 y, const char *s, UINT32 color, int 
     draw_str(cx - tw/2, y, s, color, scale);
 }
 
+static void draw_title_glitch(INT32 cx, INT32 y, const char *s, UINT32 col, int scale, int intensity) {
+    INT32 tw = (INT32)(soma_strlen(s) * (5+1) * scale);
+    INT32 x = cx - tw/2;
+    if (intensity > 0 && (rng_next() % 10 < (UINT32)intensity)) {
+        INT32 off = (INT32)(rng_next() % 5u) - 2;
+        draw_str(x + off, y, s, SOMA_WHITE, scale);
+    } else {
+        draw_str(x, y, s, col, scale);
+    }
+}
+
 /* ── Animation state ─────────────────────────────────────────────── */
 static UINT32 g_tick = 0;
 
 static struct { INT32 x, y; UINT32 speed; UINT32 col; } g_stars[80];
 static struct { INT32 y; UINT32 col_idx; } g_rain[24];
+static struct { INT16 ang; INT16 r; INT16 spd; UINT32 col; } g_singularity_particles[64];
 static SomaSystemState g_soma;
 
 /* Global Parallax Offsets */
 static INT32 g_plx_x = 0;
 static INT32 g_plx_y = 0;
+
+static void init_singularity_particles(void) {
+    for (int i = 0; i < 64; i++) {
+        g_singularity_particles[i].ang = (INT16)(rng_next() % 64u);
+        g_singularity_particles[i].r   = (INT16)(80 + rng_next() % 100u);
+        g_singularity_particles[i].spd = (INT16)(1 + rng_next() % 3u);
+        UINT32 rc = rng_next() % 3u;
+        g_singularity_particles[i].col = (rc == 0) ? SOMA_GOLD : (rc == 1) ? SOMA_PURPLE : SOMA_WHITE;
+    }
+}
 
 static void init_stars(void) {
     for (int i = 0; i < 80; i++) {
@@ -351,6 +395,7 @@ static void init_stars(void) {
         UINT32 bright    = 120u + rng_next() % 136u;
         g_stars[i].col   = SOMA_RGB(bright, bright, bright);
     }
+    init_singularity_particles();
 }
 
 static void init_rain(void) {
@@ -360,10 +405,27 @@ static void init_rain(void) {
     }
 }
 
+static void render_aurora(UINT32 tick) {
+    /* Aurora waves: 3 bands of sine-modulated pixel vertical lines */
+    UINT32 colors[] = { SOMA_RGB(0,40,20), SOMA_RGB(0,20,40), SOMA_RGB(30,0,50) };
+    for (int b = 0; b < 3; b++) {
+        INT32 base_y = H(200 + b * 100);
+        for (INT32 x = 0; x < (INT32)g_sw; x += 4) {
+            INT32 off = isin((x / 10 + tick / (4 + b)) & 63) * H(40) / 127;
+            INT32 h   = H(60) + isin((x / 20 - tick / 5) & 63) * H(20) / 127;
+            for (INT32 y = 0; y < h; y++) {
+                px_blend(x, base_y + off + y, colors[b], (UINT32)(40 - y * 40 / h));
+            }
+        }
+    }
+}
+
 /* ── LAYER 0: Background ─────────────────────────────────────────── */
 static void render_background(UINT32 tick) {
     /* clear */
     for (UINT32 i = 0; i < g_sh * g_stride; i++) g_fb[i] = SOMA_DEEPSPACE;
+
+    render_aurora(tick);
 
     /* starfield — stars drift left */
     for (int i = 0; i < 80; i++) {
@@ -404,86 +466,93 @@ static void render_background(UINT32 tick) {
     (void)tick;
 }
 
-/* ── LAYER 1: OO Sphere ──────────────────────────────────────────── */
-static void render_sphere(UINT32 tick) {
+/* ── LAYER 1: Singularity (Horizon d'Événements) ────────────────── */
+static void render_singularity(UINT32 tick) {
     INT32 cx = W(500) - g_plx_x;
-    INT32 cy = H(380) - g_plx_y;
-    INT32 base_r = H(120);
-    INT32 pulse   = isin(tick * 4u / 64u % 64u) * H(5) / 127;
-    INT32 r       = base_r + pulse;
-    UINT32 scol   = soma_state_color(g_soma.node_state);
+    INT32 cy = H(440) - g_plx_y;
+    INT32 base_r = H(70);
+    UINT32 wp = (UINT32)g_soma.warden_pressure;
+    int inf = g_soma.tokens_per_sec > 0u;
 
-    /* dim colour variants */
-    UINT32 scol_dim = SOMA_RGB(
-        (((scol>>16)&0xFFu) * 18u) / 255u,
-        (((scol>>8 )&0xFFu) * 18u) / 255u,
-        (((scol    )&0xFFu) * 18u) / 255u);
-    UINT32 scol_med = SOMA_RGB(
-        (((scol>>16)&0xFFu) * 60u) / 255u,
-        (((scol>>8 )&0xFFu) * 60u) / 255u,
-        (((scol    )&0xFFu) * 60u) / 255u);
+    /* 1. Accretion Disk (Ellipses) */
+    for (int i = 0; i < 8; i++) {
+        INT32 ang_off = (INT32)(tick / 2u + i * 8) & 63;
+        INT32 rw = base_r * 3 + isin(ang_off) * H(10) / 127;
+        INT32 rh = base_r / 2 + icos(ang_off) * H(5) / 127;
+        UINT32 col = (i % 2 == 0) ? SOMA_GOLD : SOMA_PURPLE;
+        draw_ellipse_blend(cx, cy, rw, rh, col, 80u - (UINT32)i * 8u);
+    }
 
-    /* outer glow rings */
-    draw_circle(cx, cy, r + H(40), scol_dim);
-    draw_circle(cx, cy, r + H(20), scol_dim);
-    draw_circle(cx, cy, r + H(8),  scol_med);
-
-    /* equator */
-    draw_circle(cx, cy, r, scol);
-
-    /* latitude lines at +-30 deg: ry = r*cos(30) = r*87/100, ry2=r*cos(60)=r/2 */
-    draw_ellipse(cx, cy - r*26/100, r, r*87/100, scol_med);
-    draw_ellipse(cx, cy + r*26/100, r, r*87/100, scol_med);
-    draw_ellipse(cx, cy - r*50/100, r, r*50/100, scol_dim);
-    draw_ellipse(cx, cy + r*50/100, r, r*50/100, scol_dim);
-
-    /* longitude arcs: two vertical great-circle halves, animated tilt */
-    INT32 tilt = icos((int)(tick / 3u) & 63) * r / 127;
+    /* 2. Orbital Particles */
     for (int i = 0; i < 64; i++) {
-        INT32 sx = cx + tilt * isin(i) / 127;
-        INT32 sy = cy + r   * isin(i) / 127;
-        px(sx, sy, scol_med);
-        INT32 sx2 = cx - tilt * isin(i) / 127 + r * icos(i) / 127;
-        INT32 sy2 = cy + r * isin(i) / 127;
-        px(sx2, sy2, scol_dim);
+        g_singularity_particles[i].ang = (g_singularity_particles[i].ang + g_singularity_particles[i].spd) & 63;
+        INT32 r = (INT32)g_singularity_particles[i].r;
+        INT32 px_x = cx + r * icos(g_singularity_particles[i].ang) / 127;
+        INT32 px_y = cy + r * isin(g_singularity_particles[i].ang) * 30 / 127 / 100; // flattened
+        px_blend(px_x, px_y, g_singularity_particles[i].col, 180u);
     }
 
-    /* orbital rings for swarm peers */
-    UINT32 n_rings = g_soma.swarm_peer_count;
-    if (n_rings > 4u) n_rings = 4u;
-    for (UINT32 n = 0; n < n_rings; n++) {
-        INT32 ring_rx = r + H(30) + (INT32)n * H(18);
-        INT32 ring_ry = H(9) + (INT32)n * H(3);
-        INT32 ring_off = (INT32)(tick / 2u + n * 16u) & 63;
-        INT32 ring_cy  = cy - (INT32)n * H(8);
-        UINT32 ring_col = (n < (UINT32)g_soma.peer_count && g_soma.peers[n].active) ?
-            soma_state_color(g_soma.peers[n].state) : SOMA_CYAN_DIM;
-        /* draw tilted orbit ellipse, shifted by ring_off phase */
-        for (int i = 0; i < 64; i++) {
-            int ai = (i + ring_off) & 63;
-            INT32 rx = cx + ring_rx * icos(ai) / 127;
-            INT32 ry = ring_cy + ring_ry * isin(ai) / 127;
-            px_blend(rx, ry, ring_col, 140u);
-        }
+    /* 3. Neural Plasma Core (Gradient) */
+    INT32 pulse = isin((int)(tick * 2u) & 63) * H(4) / 127;
+    INT32 core_r = base_r + pulse;
+    for (INT32 r_step = core_r; r_step > 0; r_step -= 4) {
+        int t_pm = 1000 - (r_step * 1000 / core_r);
+        UINT32 col = lerp_rgb(SOMA_WHITE_HOT, SOMA_CYAN, t_pm);
+        INT32 jitter_x = (isin((int)(tick * 5u + r_step) & 63) * 2) / 127;
+        INT32 jitter_y = (icos((int)(tick * 6u + r_step) & 63) * 2) / 127;
+        draw_circle(cx + jitter_x, cy + jitter_y, r_step, col);
     }
 
-    /* warden pressure arc around sphere */
-    INT32 arc_r = r + H(16);
-    INT32 arc_steps = (INT32)(64 * g_soma.warden_pressure / 255u);
-    UINT32 arc_col = g_soma.warden_pressure > 180u ? SOMA_RED :
-                     g_soma.warden_pressure > 120u ? SOMA_AMBER : SOMA_GREEN;
-    for (INT32 i = -16; i < arc_steps - 16; i++) {
-        INT32 ax = cx + arc_r * icos(i & 63) / 127;
-        INT32 ay = cy + arc_r * isin(i & 63) / 127;
-        px(ax, ay, arc_col);
-        px(ax+1, ay, arc_col);
+    /* 4. Plasma Loops (Prominences) */
+    int n_loops = inf ? 6 : 3;
+    for (int i = 0; i < n_loops; i++) {
+        int ang = (int)(tick / 2u + i * 64 / n_loops) & 63;
+        INT32 ext_r = core_r + H(15) + (isin((int)(tick + i*10) & 63) * H(10) / 127);
+        INT32 lx = cx + ext_r * icos(ang) / 127;
+        INT32 ly = cy + ext_r * isin(ang) * 40 / 127 / 100;
+        draw_line(cx, cy, lx, ly, SOMA_CYAN_DIM);
+        fill_rect(lx-1, ly-1, 3, 3, SOMA_WHITE);
     }
 
-    /* central core dot */
-    INT32 core_r = g_soma.voice_active ? H(12) + isin((int)(tick*4u)&63)*H(4)/127 : H(6);
-    UINT32 core_col = g_soma.voice_active ? SOMA_GREEN : scol;
-    draw_circle(cx, cy, core_r, core_col);
-    fill_rect(cx - H(3), cy - H(3), H(6), H(6), core_col);
+    /* 5. Horizon Rim & Labels */
+    draw_circle(cx, cy, core_r + 2, SOMA_WHITE);
+    draw_str_center(cx, cy - core_r - H(60), "HORIZON D'EVENEMENTS", SOMA_GOLD, 1);
+    draw_str_center(cx, cy - core_r - H(45), "SINGULARITE ACTIVE", SOMA_WHITE, 1);
+}
+
+static void render_vector_scope(UINT32 tick, INT32 cx, INT32 cy, INT32 r) {
+    draw_circle(cx, cy, r, SOMA_CYAN_DIM);
+    /* Simulated green phosphor XY trace */
+    INT32 lx = cx, ly = cy;
+    for (int i = 0; i < 16; i++) {
+        INT32 ang = (INT32)(tick * 2u + i * 4) & 63;
+        INT32 px_x = cx + (isin(ang) * icos(ang*2) / 127) * r / 127;
+        INT32 px_y = cy + (icos(ang) * isin(ang*3) / 127) * r / 127;
+        draw_line(lx, ly, px_x, px_y, SOMA_GREEN);
+        lx = px_x; ly = px_y;
+    }
+}
+
+static void render_lissajous(UINT32 tick, INT32 cx, INT32 cy, INT32 w, INT32 h) {
+    INT32 lx = -1, ly = -1;
+    for (int i = 0; i < 32; i++) {
+        int ang_x = (int)(tick + i) & 63;
+        int ang_y = (int)(tick * 2u + i) & 63;
+        INT32 px_x = cx + icos(ang_x) * w / 127;
+        INT32 px_y = cy + isin(ang_y) * h / 127;
+        if (i > 0) draw_line(lx, ly, px_x, px_y, SOMA_CYAN);
+        lx = px_x; ly = px_y;
+    }
+}
+
+static void render_token_stream(UINT32 tick, INT32 x, INT32 y, INT32 w) {
+    /* Phosphor glow stream of pseudo-tokens */
+    const char *tokens[] = { "EVAL", "DPLUS", "GATE", "PULSE", "WARDEN", "EMBED", "DECODE" };
+    for (int i = 0; i < 4; i++) {
+        int t_idx = (tick / 20u + i) % 7;
+        INT32 tx = x + (i * w / 4) + (isin((int)(tick + i*10) & 63) * 5 / 127);
+        draw_str(tx, y, tokens[t_idx], SOMA_GREEN, 1);
+    }
 }
 
 /* ── LAYER 2: Data rain ──────────────────────────────────────────── */
@@ -911,16 +980,93 @@ static void render_glitch(UINT32 tick) {
     (void)tick;
 }
 
+/* ── LAYER -1: Boot Sequence ─────────────────────────────────────── */
+static void render_boot_sequence(UINT32 tick) {
+    /* clear */
+    for (UINT32 i = 0; i < g_sh * g_stride; i++) g_fb[i] = SOMA_DEEPSPACE;
+
+    INT32 cx = W(500) - g_plx_x;
+    INT32 cy = H(380) - g_plx_y;
+
+    if (tick < 60) {
+        /* Phase 1: BIOS Text (1 second) */
+        INT32 tx = W(5), ty = H(5);
+        draw_str(tx, ty, "DIOP_MIND KERNEL v2.1.0", SOMA_CYAN, 2); ty += 40;
+        if (tick > 10) draw_str(tx, ty, "CPU: X86_64 ... OK", SOMA_WHITE, 1); ty += 16;
+        if (tick > 20) draw_str(tx, ty, "GOP FRAMEBUFFER ... ONLINE", SOMA_GREEN, 1); ty += 16;
+        if (tick > 30) draw_str(tx, ty, "MOUNTING SYNAPTIC FABRIC ...", SOMA_CYAN_DIM, 1); ty += 16;
+        if (tick > 40) draw_str(tx, ty, "FABRIC SYNCED.", SOMA_CYAN, 1); ty += 16;
+        if (tick > 50) draw_str(tx, ty, "AWAKENING OPERATING ORGANISM...", SOMA_MAGENTA, 1); ty += 16;
+        
+        // Add a typing cursor
+        if ((tick / 5) % 2 == 0) fill_rect(tx, ty, 8, 12, SOMA_WHITE);
+    } 
+    else if (tick < 120) {
+        /* Phase 2: Grid and Core Ignition (1 second) */
+        render_background(tick);
+        
+        INT32 max_r = H(120);
+        INT32 current_r = (tick - 60) * max_r / 60; 
+        
+        draw_circle(cx, cy, current_r, SOMA_CYAN);
+        
+        if (tick > 90) {
+            draw_circle(cx, cy, current_r + H(20), SOMA_CYAN_DIM);
+        }
+        
+        // Draw loading bar
+        INT32 bar_w = W(400);
+        INT32 bar_h = H(10);
+        INT32 bar_x = W(500) - bar_w/2;
+        INT32 bar_y = H(800);
+        border_rect(bar_x, bar_y, bar_w, bar_h, 1, SOMA_CYAN_DIM);
+        
+        INT32 fill_w = (tick - 60) * bar_w / 60;
+        fill_rect(bar_x + 2, bar_y + 2, fill_w - 4, bar_h - 4, SOMA_CYAN);
+        draw_str_center(W(500), bar_y + 18, "LOADING NEURAL WEIGHTS", SOMA_WHITE, 1);
+    }
+    else if (tick < 180) {
+        /* Phase 3: Wireframe layout (1 second) */
+        render_background(tick);
+        render_singularity(tick); 
+        
+        INT32 progress = tick - 120; // 0 to 60
+        INT32 h_mult = progress * 100 / 60; // 0 to 100%
+        
+        // Panels wireframes
+        border_rect(W(5) + g_plx_x, H(5) + g_plx_y, W(270), H(250) * h_mult / 100, 1, SOMA_CYAN_DIM);
+        border_rect(W(680) + g_plx_x, H(5) + g_plx_y, W(270), H(250) * h_mult / 100, 1, SOMA_MAGENTA);
+        border_rect(W(2) + g_plx_x, H(350) + g_plx_y, W(290), H(330) * h_mult / 100, 1, SOMA_GREEN);
+        border_rect(W(700) + g_plx_x, H(350) + g_plx_y, W(270), H(330) * h_mult / 100, 1, SOMA_AMBER);
+        border_rect(W(50) + g_plx_x, H(755) + g_plx_y, W(900), H(195) * h_mult / 100, 1, SOMA_CYAN);
+        
+        if (tick % 20 < 10) {
+            draw_str_center(W(500), cy + H(180), "SYSTEM ONLINE", SOMA_WHITE, 2);
+        }
+    }
+}
+
 /* ── Master render ───────────────────────────────────────────────── */
 static void soma_render_frame(void) {
     /* Auto-Parallax "Breathing" Simulation */
     g_plx_x = isin((int)(g_tick / 8u) & 63) * 25 / 127;
     g_plx_y = icos((int)(g_tick / 11u) & 63) * 15 / 127;
 
+    // Boot sequence overlay
+    if (g_tick < 180) {
+        render_boot_sequence(g_tick);
+        g_tick++;
+        return;
+    }
+
     render_background(g_tick);
     render_data_rain(g_tick);
-    render_sphere(g_tick);
+    render_singularity(g_tick);
     render_code_frags(g_tick);
+    render_dna_helix(g_tick, W(300), H(60), H(200));
+    render_vector_scope(g_tick, W(750), H(700), H(40));
+    render_lissajous(g_tick, W(500), H(820), W(100), H(50));
+    render_token_stream(g_tick, W(350), H(680), W(300));
     render_panels(g_tick);
     render_chat(g_tick);
     render_hud_corners(g_tick);
@@ -955,7 +1101,11 @@ void soma_state_demo_fill(SomaSystemState *st, uint32_t tick) {
     st->tokens_generated += st->tokens_per_sec / 60u;
 
     /* D+ mode cycles */
+#ifndef DPLUS_VERSION   /* defined in dplus.h — use uint8_t cast if enum not available */
+    st->dplus_mode = (uint8_t)((tick / 400u) % 3u);
+#else
     st->dplus_mode = (DplusMode)((tick / 400u) % 3u);
+#endif
 
     /* arenas */
     st->arena_count = 5;

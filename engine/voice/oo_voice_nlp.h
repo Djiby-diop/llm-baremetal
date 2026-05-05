@@ -30,6 +30,26 @@
 extern "C" {
 #endif
 
+// ── Intent IDs (used in OoNlpResult.intent) ──────────────────────────────────
+#define OVR_INTENT_UNKNOWN       0
+#define OVR_INTENT_GREETING      1
+#define OVR_INTENT_THANKS        2
+#define OVR_INTENT_ASK_STATE     3
+#define OVR_INTENT_STOP          4
+#define OVR_INTENT_REPEAT        5
+#define OVR_INTENT_INFER         6
+#define OVR_INTENT_BENCH         7
+#define OVR_INTENT_REBOOT        8
+#define OVR_INTENT_WARDEN_STATUS 9
+#define OVR_INTENT_SWARM_STATUS  10
+#define OVR_INTENT_LOAD_MODEL    11
+#define OVR_INTENT_DISPLAY_SOMA  12
+#define OVR_INTENT_VOICE_MODE    13
+#define OVR_INTENT_CALIBRATE     14
+#define OVR_INTENT_WRITE_CODE    15
+#define OVR_INTENT_ANALYZE       16
+#define OVR_INTENT_DREAM         17
+
 // ── Limites ───────────────────────────────────────────────────────────────────
 #define OO_NLP_MAX_INPUT      512   // caractères max en entrée
 #define OO_NLP_MAX_RESPONSE   512   // réponse max générée
@@ -150,7 +170,7 @@ int oo_nlp_init(OoNlpConfig *cfg);
 // Retourne 0 si succès, -1 si LLM non initialisé
 int oo_nlp_analyze(OoNlpConfig *cfg,
                    const char *input, int input_len,
-                   OoVoiceContext *ctx,
+                   OvcContext *ctx,
                    OoNlpResult *result);
 
 // Classifie uniquement l'intent (rapide, sans génération de réponse)
@@ -219,7 +239,7 @@ typedef struct {
 
 int oo_nlp_route(OoNlpConfig *cfg,
                  const char *text, int len,
-                 OoVoiceContext *ctx,
+                 OvcContext *ctx,
                  OoVoiceDecision *decision);
 
 #ifdef __cplusplus

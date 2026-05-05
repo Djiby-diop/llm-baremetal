@@ -2928,6 +2928,10 @@ static void llmk_oo_on_step_gop(int id, int tick, int energy) {
         llmk_tui_redraw_best_effort();
     } else if (!g_tui_enabled) {
         // Mettre à jour l'état mock (pour la démonstration) puis rendre le HUD
+        g_fb = g_gop_fb32;
+        g_sw = g_gop_w;
+        g_sh = g_gop_h;
+        g_stride = g_gop_ppsl;
         soma_state_demo_fill(&g_soma, g_tick);
         soma_render_frame();
         llmk_gop_force_update();

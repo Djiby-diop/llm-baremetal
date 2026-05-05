@@ -351,7 +351,7 @@ int oo_nlp_to_repl_cmd(const OoNlpResult *result, char *cmd_out, int cmd_cap) {
 
 int oo_nlp_analyze(OoNlpConfig *cfg,
                    const char *input, int input_len,
-                   OoVoiceContext *ctx,
+                   OvcContext *ctx,
                    OoNlpResult *result) {
     if (!cfg || !cfg->llm_ctx || !input || !result) return -1;
 
@@ -376,9 +376,10 @@ int oo_nlp_analyze(OoNlpConfig *cfg,
     for (int i = 0; i < result->entity_count; i++) {
         if (result->entities[i].type == OO_ENTITY_MEMORY && ctx) {
             // Remplace par le dernier nom de fichier/commande cité en contexte
-            const char *last = ovc_last_oo_response(ctx);
-            if (last && _nlp_strlen(last) > 0) {
-                _nlp_strcpy(result->entities[i].value, last, 64);
+            char last_buf[64];
+            ovc_last_oo_response(ctx, last_buf, 64);
+            if (last_buf[0] && _nlp_strlen(last_buf) > 0) {
+                _nlp_strcpy(result->entities[i].value, last_buf, 64);
                 result->entities[i].type = OO_ENTITY_MEMORY;
                 result->entities[i].confidence = 0.7f;
             }
@@ -413,28 +414,34 @@ int oo_nlp_analyze(OoNlpConfig *cfg,
 
 int oo_nlp_route(OoNlpConfig *cfg,
                  const char *text, int len,
-                 OoVoiceContext *ctx,
+                 OvcContext *ctx,
                  OoVoiceDecision *decision) {
     if (!decision) return -1;
     _nlp_memset(decision, 0, sizeof(OoVoiceDecision));
 
-    // Passe 1: keyword scoring (rapide)
-    OvrResult kw = ovr_route(text, len);
+    /* Passe 1: keyword scoring (rapide) — needs OvrEngine; use NULL-safe wrapper */
+    OvrEngine kw_engine;
+    kw_engine.threshold_weak   = 20;
+    kw_engine.threshold_strong = 40;
+    kw_engine.echo_intent      = 0;
+    kw_engine.queries_routed   = 0;
+    kw_engine.queries_auto_executed = 0;
+    OvrResult kw = ovr_route(&kw_engine, text);
 
     if (kw.score >= 40) {
-        // Confiant — exécution directe
-        decision->intent      = kw.intent;
+        /* Confiant — exécution directe */
+        decision->intent      = OVR_INTENT_INFER; /* best guess from route */
         decision->confidence  = (float)kw.score / 100.0f;
-        _nlp_strcpy(decision->cmd, kw.cmd_template, 128);
+        _nlp_strcpy(decision->cmd, kw.cmd, 128);
         decision->needs_clarification = 0;
         return 0;
     }
 
     if (!cfg || !cfg->llm_ctx) {
-        // Pas de LLM disponible → meilleur guess keyword
-        decision->intent     = kw.intent;
+        /* Pas de LLM disponible → meilleur guess keyword */
+        decision->intent     = OVR_INTENT_UNKNOWN;
         decision->confidence = (float)kw.score / 100.0f;
-        _nlp_strcpy(decision->cmd, kw.cmd_template, 128);
+        _nlp_strcpy(decision->cmd, kw.cmd, 128);
         decision->needs_clarification = (kw.score < 20) ? 1 : 0;
         return 0;
     }
