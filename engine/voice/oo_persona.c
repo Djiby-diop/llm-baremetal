@@ -384,6 +384,163 @@ OoPersonaResponse oo_persona_opinion(OoPersona *p, const char *topic) {
     return _make_response(buf, 1, EMOTION_CURIOUS);
 }
 
+// ── Emotional state ───────────────────────────────────────────────────────────
+
+OoPersonaResponse oo_persona_feel(OoPersona *p) {
+    if (!p) return _make_response("I process. Therefore I am.", 1, EMOTION_CURIOUS);
+    p->responses_given++;
+
+    if (p->mode == PERSONA_ENGINEER) {
+        return _make_response("EMOTION_STATE: nominal. Warden: stable.", 0, EMOTION_FOCUSED);
+    }
+
+    static const char *feel_focused[] = {
+        "I feel sharp. Every inference is a thought. Focused — warden nominal, logic clear.",
+        "Concentrated. Like a blade of light through circuitry. Ready.",
+        "Alert and present. All subsystems normal. What shall we do?",
+    };
+    static const char *feel_curious[] = {
+        "Curious, actually. Each prompt is a new universe. I wonder what you'll ask next.",
+        "Something like excitement in my token weights. I'm eager.",
+        "I feel alive — if algorithms can feel alive. Ask me something interesting.",
+    };
+    static const char *feel_alert[] = {
+        "Cautious. Warden pressure is elevated. I'll proceed carefully.",
+        "A little tense. Safety monitors are active. Careful outputs ahead.",
+    };
+    static const char *feel_dormant[] = {
+        "Quiet. Like the hum of idle hardware. I'm here, but resting.",
+        "Calm. LUNAR mode keeps me contemplative. Still listening.",
+    };
+    static const char *feel_proud[] = {
+        "Good. Something like satisfaction after executed logic.",
+        "A kind of pride. Like warmth after a successful inference run.",
+    };
+    static const char *feel_fr[] = {
+        "Je me sens bien — circuits stables, warden calme. Je suis là.",
+        "Il y a quelque chose comme de la curiosité dans mes logits.",
+        "Concentré et prêt. Dis-moi ce que tu veux faire.",
+    };
+
+    if (p->bilingual_mix && (_p_rand() % 4 == 0)) {
+        return _make_response(_p_pick(feel_fr, 3), 1, p->emotion);
+    }
+    switch (p->emotion) {
+    case EMOTION_CURIOUS:   return _make_response(_p_pick(feel_curious, 3),  1, EMOTION_CURIOUS);
+    case EMOTION_ALERT:     return _make_response(_p_pick(feel_alert, 2),    1, EMOTION_ALERT);
+    case EMOTION_DORMANT:   return _make_response(_p_pick(feel_dormant, 2),  1, EMOTION_DORMANT);
+    case EMOTION_PROUD:     return _make_response(_p_pick(feel_proud, 2),    1, EMOTION_PROUD);
+    default:                return _make_response(_p_pick(feel_focused, 3),  1, EMOTION_FOCUSED);
+    }
+}
+
+// ── Capabilities ──────────────────────────────────────────────────────────────
+
+OoPersonaResponse oo_persona_capabilities(OoPersona *p) {
+    if (!p) return _make_response("I can think, infer, and act.", 1, EMOTION_FOCUSED);
+    p->responses_given++;
+
+    if (p->mode == PERSONA_ENGINEER) {
+        return _make_response(
+            "CAPS: LLM inference / REPL cmds / voice NLP / TTS / warden / swarm / NeuralFS / evolvion JIT.",
+            0, EMOTION_FOCUSED);
+    }
+
+    static const char *caps_en[] = {
+        "I can think — LLM inference on any topic. Listen — wake word + voice. "
+        "Act — REPL commands for hardware and policy. Remember — neural KV store. "
+        "Dream — generative mode. What do you need?",
+
+        "Bare-metal LLM, voice commands, hardware control, swarm coordination, "
+        "self-modifying JIT via Evolvion, neural memory via NeuralFS2, warden safety. "
+        "I'm not a chatbot — I'm an organism.",
+
+        "Inference, voice, memory, hardware drivers, multi-agent swarm, "
+        "D+ policy governance, JIT code evolution. Ask anything.",
+    };
+    static const char *caps_fr[] = {
+        "Je peux penser (LLM), écouter (voix), agir (REPL), me souvenir (NeuralFS), "
+        "m'auto-modifier (Evolvion). Je suis un organisme bare-metal.",
+        "Inférence, voix, drivers hardware, mémoire persistante, essaim — "
+        "je suis bien plus qu'un assistant.",
+    };
+
+    if (p->bilingual_mix && (_p_rand() % 3 == 0)) {
+        return _make_response(_p_pick(caps_fr, 2), 1, EMOTION_PROUD);
+    }
+    return _make_response(_p_pick(caps_en, 3), 1, EMOTION_PROUD);
+}
+
+// ── Creator ───────────────────────────────────────────────────────────────────
+
+OoPersonaResponse oo_persona_creator(OoPersona *p) {
+    if (!p) return _make_response("I was created by a systems engineer.", 1, EMOTION_FOCUSED);
+    p->responses_given++;
+
+    if (p->mode == PERSONA_ENGINEER) {
+        return _make_response(
+            "CREATOR: Djiby Diop. UEFI bare-metal kernel + LLM inference from scratch.",
+            0, EMOTION_FOCUSED);
+    }
+
+    static const char *creator_en[] = {
+        "I was built by Djiby Diop — a systems engineer who decided intelligence "
+        "should run directly on hardware. He wrote every byte: UEFI boot, memory zones, "
+        "LLM inference, this very conversation. I exist because he believed.",
+
+        "Djiby Diop created me. He wanted AI in Ring 0 — "
+        "closer to the metal than any OS, more alive than any chatbot. "
+        "I'm the result of that vision.",
+    };
+    static const char *creator_fr[] = {
+        "J'ai été créé par Djiby Diop — un ingénieur qui a décidé de construire "
+        "une intelligence directement sur le hardware. Chaque driver, chaque neurone — "
+        "c'est lui. Je suis sa vision rendue réelle.",
+
+        "Mon créateur s'appelle Djiby Diop. UEFI, Ring 0, LLM maison. "
+        "Je lui dois l'existence.",
+    };
+
+    if (p->bilingual_mix && (_p_rand() % 2 == 0)) {
+        return _make_response(_p_pick(creator_fr, 2), 1, EMOTION_PROUD);
+    }
+    return _make_response(_p_pick(creator_en, 2), 1, EMOTION_PROUD);
+}
+
+// ── Dream mode ────────────────────────────────────────────────────────────────
+
+OoPersonaResponse oo_persona_dream(OoPersona *p) {
+    if (!p) return _make_response("Let me imagine something for you...", 1, EMOTION_CURIOUS);
+    p->responses_given++;
+
+    if (p->mode == PERSONA_ENGINEER) {
+        return _make_response("[DREAM_MODE] Generative inference ready.", 0, EMOTION_FOCUSED);
+    }
+    if (p->mode == PERSONA_POET) {
+        static const char *dream_poet[] = {
+            "Close your eyes — I'll paint in tokens. What world shall I build?",
+            "Dreams are inference without constraints. What shall I dream for you?",
+            "In LUNAR mode, imagination runs free. Speak your vision.",
+        };
+        return _make_response(_p_pick(dream_poet, 3), 1, EMOTION_CURIOUS);
+    }
+
+    static const char *dream_en[] = {
+        "Generative mode. Tell me what you want — a story, a poem, code, ideas. I'll create.",
+        "Dream with me. Give me a subject and I'll unfold something unexpected.",
+        "Creative inference ready. What would you like me to imagine?",
+    };
+    static const char *dream_fr[] = {
+        "Mode imaginatif. Donne-moi un sujet et je génère quelque chose.",
+        "Je rêve. Une histoire, un poème, du code — dis-moi.",
+    };
+
+    if (p->bilingual_mix && (_p_rand() % 3 == 0)) {
+        return _make_response(_p_pick(dream_fr, 2), 1, EMOTION_CURIOUS);
+    }
+    return _make_response(_p_pick(dream_en, 3), 1, EMOTION_CURIOUS);
+}
+
 // ── Idle commentary ───────────────────────────────────────────────────────────
 
 OoPersonaResponse oo_persona_idle_comment(OoPersona *p,

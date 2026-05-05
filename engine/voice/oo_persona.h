@@ -149,6 +149,18 @@ const char *oo_persona_emotion_name(const OoPersona *p);
 // Get current persona mode as a string
 const char *oo_persona_mode_name(const OoPersona *p);
 
+// OO talks about its current emotional / system state
+OoPersonaResponse oo_persona_feel(OoPersona *p);
+
+// OO describes its capabilities
+OoPersonaResponse oo_persona_capabilities(OoPersona *p);
+
+// OO talks about its creator
+OoPersonaResponse oo_persona_creator(OoPersona *p);
+
+// OO enters dream/imagination mode (invites LLM to continue)
+OoPersonaResponse oo_persona_dream(OoPersona *p);
+
 #ifdef __cplusplus
 }
 #endif

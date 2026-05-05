@@ -222,6 +222,60 @@ OvlState oo_voice_loop_state(void) { return s_state; }
 const char *oo_voice_loop_last_response(void) { return s_last_response; }
 const char *oo_voice_loop_last_cmd(void)      { return s_last_cmd; }
 
+// Last routing score (exposed for REPL integration)
+static int s_last_score = 0;
+int oo_voice_loop_last_score(void) { return s_last_score; }
+
+// ── Synchronous text processing ───────────────────────────────────────────────
+//
+// Called from REPL when user types text at "You:".
+// Routes through persona + NLP, generates TTS PCM for playback on next ticks.
+// Returns OVL_PROC_LLM / OVL_PROC_DONE / OVL_PROC_CMD.
+
+int oo_voice_loop_process_text(const char *text, int len) {
+    if (!text || !text[0]) return OVL_PROC_LLM;
+    if (len < 0) { len = 0; while (text[len]) len++; }
+
+    // Route through persona + NLP
+    OvrContextResult res = ovr_route_with_persona(
+        &s_router, &s_ctx, &s_persona, text, len
+    );
+
+    // Store results
+    _scpy(s_last_response, res.reply, sizeof(s_last_response));
+    _scpy(s_last_cmd,      res.route.cmd, sizeof(s_last_cmd));
+    s_last_score = res.route.score;
+
+    // Update context log
+    ovc_push_human(&s_ctx, text, res.route.cmd,
+                   res.route.label, res.route.score, (uint32_t)s_state_ctr);
+    ovc_push_oo(&s_ctx, res.reply, (uint32_t)s_state_ctr);
+
+    // UART emit (voice bridge picks this up)
+    _emit_state("FOCUSED", 0, 0, (void*)0, 0);
+
+    // Generate TTS PCM for playback on future ticks
+    oo_tts_pcm_init(&s_tts_buf);
+    if (res.reply[0]) {
+        oo_tts_speak(&s_tts, &s_tts_buf, res.reply, _slen(res.reply));
+        // Queue TTS playback (if HDA available)
+        if (s_hda) {
+            s_state     = OVL_SPEAK;
+            s_state_ctr = 0;
+            _emit_state("SPEAKING", 0, 0, (void*)0, 0);
+            if (s_bridge) {
+                oo_bridge_set_emotion(s_bridge, EMOTION_PROUD);
+                oo_bridge_on_tts_start(s_bridge);
+            }
+        }
+    }
+
+    // Routing classification
+    if (res.route.cmd[0] == '/')             return OVL_PROC_CMD;
+    if (res.is_persona_only && s_last_score >= 20) return OVL_PROC_DONE;
+    return OVL_PROC_LLM;
+}
+
 // ── Main tick (call ~60Hz) ────────────────────────────────────────────────────
 
 OvlState oo_voice_loop_tick(void) {

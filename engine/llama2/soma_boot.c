@@ -1942,6 +1942,10 @@ snap_autoload_done:
     while (1) { // SAFE: intentional long-running organism loop; terminates only via explicit operator command/shutdown.
         conversation_count++;
 
+        // Voice pipeline tick (~60Hz cadence): drain TTS PCM buffer → HDA playback,
+        // and keep wakeword engine fed with live audio. Non-blocking.
+        oo_voice_loop_tick();
+
         // capture-mode state (per-turn)
         // capture_kind: 0=none, 1=/draw, 2=/oo_think, 3=/oo_auto, 4=/oo_exec
         int capture_kind = 0;
@@ -2273,6 +2277,48 @@ snap_autoload_done:
                 // Convert to char
                 char16_to_char(prompt, user_input, 512);
                 if (prompt[0]) llmk_tr_push_prefixed("YOU: ", prompt);
+            }
+
+            // ── Voice NLP: route natural language through persona engine ──────
+            // Any non-command input goes through the voice persona/NLP router.
+            // This lets OO respond naturally to greetings, questions, state queries
+            // BEFORE deciding whether to run a REPL command or LLM inference.
+            if (prompt[0] && prompt[0] != '/' && prompt[0] != '#') {
+                int vr = oo_voice_loop_process_text(prompt, -1);
+                const char *vr_reply = oo_voice_loop_last_response();
+                const char *vr_cmd   = oo_voice_loop_last_cmd();
+
+                if (vr_reply && vr_reply[0]) {
+                    Print(L"\r\nOO: ");
+                    // Print response (ASCII safe)
+                    const char *rp = vr_reply;
+                    while (*rp) {
+                        CHAR16 ch16[2];
+                        ch16[0] = (CHAR16)(unsigned char)(*rp);
+                        ch16[1] = 0;
+                        Print(L"%s", ch16);
+                        rp++;
+                    }
+                    Print(L"\r\n");
+                }
+
+                if (vr == OVL_PROC_CMD && vr_cmd && vr_cmd[0] == '/') {
+                    // Voice matched a REPL command — override prompt
+                    int _vi = 0;
+                    for (; vr_cmd[_vi] && _vi + 1 < (int)sizeof(prompt); _vi++)
+                        prompt[_vi] = vr_cmd[_vi];
+                    prompt[_vi] = '\0';
+                    Print(L"[OO] Executing: ");
+                    CHAR16 cmd16[256];
+                    ascii_to_char16(cmd16, prompt, 256);
+                    Print(L"%s\r\n\r\n", cmd16);
+                } else if (vr == OVL_PROC_DONE) {
+                    // Persona handled it fully (greeting, thanks, state, etc.)
+                    // Clear prompt so we loop back to "You:" without LLM inference
+                    llmk_tr_push_prefixed("OO: ", vr_reply ? vr_reply : "");
+                    prompt[0] = '\0';
+                }
+                // OVL_PROC_LLM: fall through to normal LLM inference below
             }
         }
 

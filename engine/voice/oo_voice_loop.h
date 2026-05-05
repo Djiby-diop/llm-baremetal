@@ -68,6 +68,23 @@ const char *oo_voice_loop_last_response(void);
 // Get last REPL command (null-terminated, may be empty).
 const char *oo_voice_loop_last_cmd(void);
 
+// ── Synchronous text processing (REPL integration) ────────────────────────────
+//
+// Process text through the voice persona + NLP router WITHOUT audio input.
+// Used when user types at "You:" — routes through persona, generates TTS.
+//
+// Return values:
+#define OVL_PROC_LLM   0  // No match — caller should route to LLM inference
+#define OVL_PROC_DONE  1  // Persona handled fully — show reply, no LLM needed
+#define OVL_PROC_CMD   2  // REPL command found — show reply + execute cmd
+//
+// After calling: use oo_voice_loop_last_response() for the reply text
+//                use oo_voice_loop_last_cmd()      for the REPL command (if OVL_PROC_CMD)
+int oo_voice_loop_process_text(const char *text, int len);
+
+// Last routing score (0-100, from keyword matching)
+int oo_voice_loop_last_score(void);
+
 #ifdef __cplusplus
 }
 #endif

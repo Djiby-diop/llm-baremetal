@@ -415,6 +415,51 @@ static const OvrIntent g_ovr_intents[] = {
         KWS("new","different","autre","bigger","better"),
         25, "EXTRACT_GET:/load_model "
     },
+
+    // ── Human-like introspection (new v3) ─────────────────────────────────────
+
+    {   "WHO_ARE_YOU",
+        KWS("qui","who","quel","what"),
+        KWS("tu es","you are","es-tu","are you","toi","vous","oo","ton nom","your name","c'est quoi","yourself"),
+        KWS("vraiment","really","exactly","exactement","baremetal","kernel"),
+        30, "PERSONA:introduce"
+    },
+    {   "HOW_DO_YOU_FEEL",
+        KWS("ressens","feels","feel","tu te sens","comment vas","how are","emouvant","etat","state","emotion","humeur","mood"),
+        (const char*[]){ (const char*)0 },
+        KWS("maintenant","now","today","aujourd","toi","you","internal","interne"),
+        25, "PERSONA:feel"
+    },
+    {   "CAPABILITIES",
+        KWS("peux","can","sais","know","capable","faire","do","quoi","what"),
+        KWS("tu faire","you do","tu peux","you can","capacites","skills","abilities","ta liste","ton role"),
+        (const char*[]){ (const char*)0 },
+        25, "PERSONA:caps"
+    },
+    {   "WHO_MADE_YOU",
+        KWS("cree","made","construit","built","programme","invented","invente","developpe","qui","who","ton createur","your creator"),
+        KWS("toi","you","oo","kernel","system","ton pere","father","maker","auteur","author"),
+        KWS("comment","how","pourquoi","why","when","quand"),
+        25, "PERSONA:creator"
+    },
+    {   "WHAT_TIME",
+        KWS("heure","time","date","timestamp","horloge","clock","moment","quand"),
+        (const char*[]){ (const char*)0 },
+        KWS("maintenant","now","today","actuelle","current","quel","what"),
+        30, "/rtc_status"
+    },
+    {   "DREAM_MODE",
+        KWS("reve","dream","imagine","invente","fantasme","cree","creer","genere","generate","compose","ecris","write","fabrique"),
+        (const char*[]){ (const char*)0 },
+        KWS("moi","me","pour","for","quelque","something","histoire","story","poeme","poem","monde","world"),
+        20, "PERSONA:dream"
+    },
+    {   "THINK_DEEP",
+        KWS("penses","think","crois","believe","ton avis","your thoughts","reflechis","ponder","philosophe","philosophy","analyse"),
+        KWS("a propos","about","sur","of","this","cela","ca","life","vie","intelligence","consciousness","conscience"),
+        (const char*[]){ (const char*)0 },
+        20, "PERSONA:think"
+    },
 };
 
 #define OVR_INTENT_COUNT ((int)(sizeof(g_ovr_intents)/sizeof(g_ovr_intents[0])))
@@ -654,6 +699,16 @@ OvrContextResult ovr_route_with_persona(OvrEngine        *e,
             pr = oo_persona_ack_success(persona, "voice", NULL);
         } else if (ovr_strhas(intent_name, "wake_ack")) {
             pr = oo_persona_greet(persona, NULL);
+        } else if (ovr_strhas(intent_name, "feel")) {
+            pr = oo_persona_feel(persona);
+        } else if (ovr_strhas(intent_name, "caps")) {
+            pr = oo_persona_capabilities(persona);
+        } else if (ovr_strhas(intent_name, "creator")) {
+            pr = oo_persona_creator(persona);
+        } else if (ovr_strhas(intent_name, "dream")) {
+            pr = oo_persona_dream(persona);
+        } else if (ovr_strhas(intent_name, "think")) {
+            pr = oo_persona_opinion(persona, NULL);
         } else if (ovr_strhas(intent_name, "repeat")) {
             ovc_last_oo_response(ctx, cr.reply, OVR_CMD_MAX);
             if (cr.reply[0] == '\0') ovr_strcpy(cr.reply, "Nothing to repeat yet.", OVR_CMD_MAX);
