@@ -255,7 +255,7 @@ SmHaltReason sm_tick(SomaMindV1 *sm, const float *logits, int vocab_size,
     sm_ssm_step(&sm->ssm, x, (float *)0);
 
     /* ── 5. Halting conditions (checked in priority order) ───────────── */
-    if (conf8 >= SOMAMIND_HALT_THRESH) {
+    if (sm->halt.tokens_generated >= SOMAMIND_MIN_TOKENS && conf8 >= SOMAMIND_HALT_THRESH) {
         sm->halt.last_halt = SM_HALT_CONFIDENT;
         sm->total_halts_confident++;
         /* Count tokens saved vs budget */

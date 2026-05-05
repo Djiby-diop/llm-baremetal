@@ -9,6 +9,7 @@
 #define SOMAMIND_HIDDEN_DIM   64    /* compact hidden state dimension          */
 #define SOMAMIND_MAX_TOKENS   512   /* max tokens in one inference pass        */
 #define SOMAMIND_HALT_THRESH  220   /* halt when conf8 >= this (0-255 scale)   */
+#define SOMAMIND_MIN_TOKENS   16    /* min tokens before confidence halt fires  */
 #define SOMAMIND_TOOL_MAX_LEN 128   /* max tool name + args length             */
 #define SOMAMIND_N_TOOLS      8     /* max registered tools                    */
 
