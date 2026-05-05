@@ -429,7 +429,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     // [DNS] OO DNS4 resolver (Phase 3)
     oo_dns_init(&g_oo_dns, ImageHandle, SystemTable);
-    llmk_boot_mark(L"dns_init");
+    llmk_boot_mark(L"dns_init");    // [mbedTLS] TCP4 transport glue (Phase 4A)
+    oo_mbedtls_init(ImageHandle, SystemTable);
+    llmk_boot_mark(L"mbedtls_init");    // [DIOP] Custom model engine (Phase 4D)
+    oo_diop_init(&g_diop);
+    llmk_boot_mark(L"diop_init");    // [Federation] Peer mesh (Phase 4E)
+    oo_fed_init(&g_federation, (const CHAR8*)g_netboot.node_id);
+    llmk_boot_mark(L"fed_init");
 
     // Show diagnostic info if requested via repl.cfg: boot_diag=1
     if (g_boot_diag) {
@@ -7303,6 +7309,15 @@ snap_autoload_done:
                 continue;
             } else if (my_strncmp(prompt, "/dns_", 5) == 0) {
                 oo_dns_repl_cmd(&g_oo_dns, prompt);
+                continue;            // ── Phase 4A: mbedTLS commands ───────────────────────────────────
+            } else if (my_strncmp(prompt, "/mbedtls_", 9) == 0) {
+                oo_mbedtls_repl_cmd(prompt);
+                continue;            // ── Phase 4D: DIOP model commands ──────────────────────────────
+            } else if (my_strncmp(prompt, "/diop_", 6) == 0) {
+                oo_diop_repl_cmd(&g_diop, prompt, g_root);
+                continue;            // ── Phase 4E: Federation commands ───────────────────────────────
+            } else if (my_strncmp(prompt, "/fed_", 5) == 0) {
+                oo_fed_repl_cmd(&g_federation, prompt);
                 continue;
 
             // ── Phase NB: Network Boot commands ──────────────────────────────

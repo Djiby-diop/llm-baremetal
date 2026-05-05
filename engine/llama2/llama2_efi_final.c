@@ -180,7 +180,13 @@
 #include "../network/oo_dns.h"
 #include "../network/oo_dns.c"
 
-// Phase SI: OO Self-Improvement Engine — human-in-the-loop patch pipeline
+// Phase 4A: mbedTLS TCP4 transport glue + TLS stub
+#include "../network/oo_mbedtls.h"
+#include "../network/oo_mbedtls.c"// Phase 4D: DIOP custom model loader + inference bridge
+#include "../models/oo_diop_model.h"
+#include "../models/oo_diop_model.c"// Phase 4E: Federation protocol — peer discovery + patch sharing
+#include "../network/oo_federation.h"
+#include "../network/oo_federation.c"// Phase SI: OO Self-Improvement Engine — human-in-the-loop patch pipeline
 #include "../self_improve/oo_self_improve.h"
 #include "../self_improve/oo_self_improve.c"
 
