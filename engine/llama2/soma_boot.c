@@ -419,6 +419,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     // [SI] OO Self-Improvement Engine — observe/propose/review/apply pipeline
     oo_si_init(&g_self_improve);
+    oo_si_boot_verify(&g_self_improve, Root);
     llmk_boot_mark(L"si_init");
 
     // Show diagnostic info if requested via repl.cfg: boot_diag=1
@@ -2284,7 +2285,14 @@ snap_autoload_done:
 
                 // Convert to char
                 char16_to_char(prompt, user_input, 512);
-                if (prompt[0]) llmk_tr_push_prefixed("YOU: ", prompt);
+                if (prompt[0]) {
+                    llmk_tr_push_prefixed("YOU: ", prompt);
+                    /* Feed to self-improve session log for oracle analysis */
+                    oo_si_log_append((const CHAR8*)"> ", 2);
+                    oo_si_log_append((const CHAR8*)prompt, (UINTN)(
+                        (UINTN)__builtin_strlen(prompt) < 256 ? __builtin_strlen(prompt) : 256));
+                    oo_si_log_append((const CHAR8*)"\n", 1);
+                }
             }
 
             // ── Voice NLP: route natural language through persona engine ──────
@@ -7328,9 +7336,7 @@ snap_autoload_done:
 
             // ── Phase SI: Self-Improvement commands ───────────────────────────
             } else if (my_strncmp(prompt, "/patch_status", 13) == 0) {
-                Print(L"\r\n[SI] Self-Improve Engine: %s | %d patch(es) in queue\r\n\r\n",
-                      g_self_improve.initialized ? L"ready" : L"not initialized",
-                      g_self_improve.count);
+                oo_si_print_status(&g_self_improve);
                 continue;
             } else if (my_strncmp(prompt, "/patch_list", 11) == 0) {
                 oo_si_print_list(&g_self_improve);
@@ -7340,33 +7346,64 @@ snap_autoload_done:
                 int np = oo_si_generate_proposals(&g_self_improve, PATCH_SRC_LOCAL_LLM, (const CHAR8*)"session audit");
                 Print(L"[SI] %d proposal(s) generated. Use /patch_list to view.\r\n\r\n", np);
                 continue;
+            } else if (my_strncmp(prompt, "/patch_oracle", 13) == 0) {
+                /* /patch_oracle [gpt4|claude|gemini] [extra] */
+                const char *oargs = prompt + 13;
+                while (*oargs == ' ') oargs++;
+                int oid = 0;
+                if (my_strncmp(oargs, "claude", 6) == 0) { oid = 1; oargs += 6; }
+                else if (my_strncmp(oargs, "gemini", 6) == 0) { oid = 2; oargs += 6; }
+                else if (my_strncmp(oargs, "gpt4", 4) == 0)   { oargs += 4; }
+                while (*oargs == ' ') oargs++;
+                Print(L"\r\n[SI] Requesting oracle improvement proposals...\r\n");
+                int np = oo_si_ask_oracle(&g_self_improve, oid, (const CHAR8*)oargs);
+                Print(L"[SI] %d oracle proposal(s) added. Use /patch_list to view.\r\n\r\n", np);
+                continue;
+            } else if (my_strncmp(prompt, "/patch_show ", 12) == 0) {
+                oo_si_repl_cmd(&g_self_improve, prompt, g_root);
+                continue;
             } else if (my_strncmp(prompt, "/patch_approve ", 15) == 0) {
                 const char *pid = prompt + 15;
                 while (*pid == ' ') pid++;
                 int ok = oo_si_approve(&g_self_improve, (const CHAR8*)pid);
-                if (ok >= 0) {
-                    Print(L"\r\n[SI] Patch approved — use /patch_apply to execute.\r\n\r\n");
+                if (ok > 0) {
+                    oo_si_journal_write(&g_self_improve, g_root,
+                        (const CHAR8*)"APPROVED",
+                        &g_self_improve.patches[g_self_improve.count - 1]);
+                    Print(L"\r\n[SI] Approved — use /patch_apply to execute.\r\n\r\n");
                 } else {
-                    Print(L"\r\n[SI] Patch not found or blocked by D+ policy. Check /patch_list.\r\n\r\n");
+                    Print(L"\r\n[SI] Not found or blocked by D+ policy.\r\n\r\n");
                 }
                 continue;
             } else if (my_strncmp(prompt, "/patch_reject ", 14) == 0) {
                 const char *pid = prompt + 14;
                 while (*pid == ' ') pid++;
-                int ok = oo_si_reject(&g_self_improve, (const CHAR8*)pid);
-                Print(L"\r\n[SI] Patch %s\r\n\r\n", ok >= 0 ? L"rejected" : L"not found");
+                oo_si_reject(&g_self_improve, (const CHAR8*)pid);
                 continue;
             } else if (my_strncmp(prompt, "/patch_apply", 12) == 0) {
                 Print(L"\r\n[SI] Applying approved patches...\r\n");
                 int na = oo_si_apply_approved(&g_self_improve, g_root);
-                Print(L"[SI] %d patch(es) applied. Reboot to activate changes if required.\r\n\r\n", na);
+                Print(L"[SI] %d patch(es) applied.\r\n\r\n", na);
                 continue;
             } else if (my_strncmp(prompt, "/patch_rollback ", 16) == 0) {
                 const char *pid = prompt + 16;
                 while (*pid == ' ') pid++;
                 int ok = oo_si_rollback(&g_self_improve, (const CHAR8*)pid);
                 Print(L"\r\n[SI] Rollback: %s\r\n\r\n",
-                      ok >= 0 ? L"OK" : L"failed — patch not found or not in applied state");
+                      ok > 0 ? L"OK" : L"failed — not found or not applied");
+                continue;
+            } else if (my_strncmp(prompt, "/patch_propose ", 15) == 0) {
+                oo_si_repl_cmd(&g_self_improve, prompt, g_root);
+                continue;
+            } else if (my_strncmp(prompt, "/patch_log", 10) == 0 &&
+                       (prompt[10] == 0 || prompt[10] == ' ')) {
+                oo_si_repl_cmd(&g_self_improve, prompt, g_root);
+                continue;
+            } else if (my_strncmp(prompt, "/patch_log_clear", 16) == 0) {
+                oo_si_repl_cmd(&g_self_improve, prompt, g_root);
+                continue;
+            } else if (my_strncmp(prompt, "/patch_export", 13) == 0) {
+                oo_si_repl_cmd(&g_self_improve, prompt, g_root);
                 continue;
 
             }
