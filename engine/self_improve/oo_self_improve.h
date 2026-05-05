@@ -119,5 +119,23 @@ void oo_si_print_patch(const OoPatch *p);
 void oo_si_print_list(OoSelfImprove *si);
 void oo_si_print_status(OoSelfImprove *si);
 
+/* ── Phase 3: Diff, source reader, confidence evolution, federation ──────── */
+/* Read target source file from ESP and produce a unified diff preview */
+int  oo_si_patch_diff(OoSelfImprove *si, const CHAR8 *patch_id, EFI_FILE_HANDLE Root);
+int  oo_si_patch_read_src(OoSelfImprove *si, const CHAR8 *patch_id, EFI_FILE_HANDLE Root);
+/* Evolve confidence scores: +5 for applied, -20 for failed */
+void oo_si_evolve_confidence(OoSelfImprove *si);
+/* Auto-rebuild flag: write/read oo_rebuild.flag on ESP */
+int  oo_si_check_rebuild_flag(EFI_FILE_HANDLE Root);
+/* Federation: share patch delta with peer OO node (net = OoNetContext*) */
+int  oo_si_federate_patch(OoSelfImprove *si, void *net_ctx,
+                          const CHAR8 *patch_id,
+                          const CHAR8 *peer_ip, UINT16 peer_port);
+/* Receive a federated patch JSON body from another OO node */
+int  oo_si_recv_federated(OoSelfImprove *si, const CHAR8 *json_body, UINTN body_len);
+/* Phase 3 REPL commands dispatcher (call from soma_boot.c REPL loop) */
+int  oo_si_repl_cmd_p3(OoSelfImprove *si, const char *cmd,
+                       EFI_FILE_HANDLE Root, void *net_ctx);
+
 /* Global singleton (defined in oo_self_improve.c) */
 extern OoSelfImprove g_self_improve;

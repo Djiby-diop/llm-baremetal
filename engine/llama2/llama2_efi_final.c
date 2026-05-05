@@ -172,6 +172,14 @@
 #include "../network/oo_netboot.h"
 #include "../network/oo_netboot.c"
 
+// Phase 3: TLS abstraction layer (proxy mode / mbedTLS stub)
+#include "../network/oo_tls.h"
+#include "../network/oo_tls.c"
+
+// Phase 3: DNS4 resolver (EFI_DNS4_PROTOCOL + static cache)
+#include "../network/oo_dns.h"
+#include "../network/oo_dns.c"
+
 // Phase SI: OO Self-Improvement Engine — human-in-the-loop patch pipeline
 #include "../self_improve/oo_self_improve.h"
 #include "../self_improve/oo_self_improve.c"

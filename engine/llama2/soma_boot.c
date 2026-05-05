@@ -420,7 +420,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // [SI] OO Self-Improvement Engine — observe/propose/review/apply pipeline
     oo_si_init(&g_self_improve);
     oo_si_boot_verify(&g_self_improve, Root);
+    oo_si_check_rebuild_flag(Root);   /* Phase 3: warn if rebuild needed */
     llmk_boot_mark(L"si_init");
+
+    // [TLS] OO TLS abstraction layer (Phase 3)
+    oo_tls_init(&g_oo_tls, OO_TLS_MODE_PROXY);
+    llmk_boot_mark(L"tls_init");
+
+    // [DNS] OO DNS4 resolver (Phase 3)
+    oo_dns_init(&g_oo_dns, ImageHandle, SystemTable);
+    llmk_boot_mark(L"dns_init");
 
     // Show diagnostic info if requested via repl.cfg: boot_diag=1
     if (g_boot_diag) {
@@ -7288,6 +7297,14 @@ snap_autoload_done:
                 llmk_guardrails_print_status(temperature, top_p, top_k, max_gen_tokens);
                 continue;
 
+            // ── Phase 3: TLS + DNS commands ───────────────────────────────────
+            } else if (my_strncmp(prompt, "/tls_", 5) == 0) {
+                oo_tls_repl_cmd(&g_oo_tls, prompt);
+                continue;
+            } else if (my_strncmp(prompt, "/dns_", 5) == 0) {
+                oo_dns_repl_cmd(&g_oo_dns, prompt);
+                continue;
+
             // ── Phase NB: Network Boot commands ──────────────────────────────
             } else if (my_strncmp(prompt, "/net_pull ", 10) == 0) {
                 const char *url = prompt + 10;
@@ -7404,6 +7421,17 @@ snap_autoload_done:
                 continue;
             } else if (my_strncmp(prompt, "/patch_export", 13) == 0) {
                 oo_si_repl_cmd(&g_self_improve, prompt, g_root);
+                continue;
+
+            // ── Phase SI-P3: Diff, evolution, federation ──────────────────
+            } else if (my_strncmp(prompt, "/patch_diff ", 12) == 0 ||
+                       my_strncmp(prompt, "/patch_read_src ", 16) == 0 ||
+                       my_strncmp(prompt, "/patch_evolve", 13) == 0 ||
+                       my_strncmp(prompt, "/patch_rebuild_check", 20) == 0 ||
+                       my_strncmp(prompt, "/patch_federate ", 16) == 0 ||
+                       my_strncmp(prompt, "/patch_mark_reboot ", 19) == 0 ||
+                       my_strncmp(prompt, "/patch_apply_p3", 15) == 0) {
+                oo_si_repl_cmd_p3(&g_self_improve, prompt, g_root, (void*)&g_netboot);
                 continue;
 
             }

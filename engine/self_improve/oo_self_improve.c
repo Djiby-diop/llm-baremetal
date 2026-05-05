@@ -1,4 +1,4 @@
-/* oo_self_improve.c — OO Self-Improvement Engine  Phase 2
+/* oo_self_improve.c — OO Self-Improvement Engine  Phase 3
  * =========================================================
  * Phase 2 adds:
  *   - Session log ring buffer (8 KB static)
@@ -8,6 +8,13 @@
  *   - Boot-time patch verification (oo_si_boot_verify)
  *   - /patch_oracle, /patch_status, /patch_log, /patch_export REPL commands
  *   - D+ scoring refinement per category + source
+ * Phase 3 adds:
+ *   - Source file reader (EFI): read target_file from ESP, attach to patch
+ *   - Unified diff generator (in-memory, no libc): produce context diff
+ *   - Confidence evolution: update score based on boot verification results
+ *   - Federation share: push patch delta to peer OO nodes via HTTP POST
+ *   - Auto-rebuild marker: write oo_rebuild.flag at apply time
+ *   - /patch_diff, /patch_read_src, /patch_federate, /patch_evolve REPL cmds
  * Freestanding C11. No libc. Static pool only.
  */
 #include "oo_self_improve.h"
@@ -881,5 +888,472 @@ int oo_si_repl_cmd(OoSelfImprove *si, const char *cmd, EFI_FILE_HANDLE Root) {
         Print(L"[si] Exported %d patch(es) to oo_patches_export.txt\r\n", si->count);
         return 1;
     }
+    return 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  PHASE 3 — Diff, Source Reader, Confidence Evolution, Federation
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Phase 3 limits ──────────────────────────────────────────────────────── */
+#define OO_P3_SRC_CAP    16384    /* max source file we read into RAM (16 KB) */
+#define OO_P3_DIFF_CAP   8192     /* max unified diff output buffer  (8 KB)  */
+#define OO_P3_FEED_MAX   8        /* max peer federation targets             */
+
+/* ── Static buffers (Phase 3) ───────────────────────────────────────────── */
+static CHAR8 g_p3_src_buf[OO_P3_SRC_CAP];   /* source file content         */
+static CHAR8 g_p3_diff_buf[OO_P3_DIFF_CAP]; /* generated diff              */
+
+/* ── EFI path helper: ASCII → CHAR16 (for EFI file open) ────────────────── */
+static void _p3_a2u(CHAR16 *dst, const CHAR8 *src, UINTN cap) {
+    UINTN i = 0;
+    while (i + 1 < cap && src[i]) {
+        dst[i] = (src[i] == '/') ? L'\\' : (CHAR16)src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
+/* ── Source file reader ──────────────────────────────────────────────────── */
+/*
+ * Read the target source file of a patch from the EFI volume.
+ * Returns byte count read, 0 on failure.
+ * File path is relative to ESP root (e.g. "engine/llama2/soma_boot.c").
+ */
+static UINTN _p3_read_source(EFI_FILE_HANDLE Root, const CHAR8 *path,
+                              CHAR8 *buf, UINTN cap) {
+    if (!Root || !path || !path[0] || !buf) return 0;
+    CHAR16 path16[256];
+    _p3_a2u(path16, path, 256);
+    EFI_FILE_HANDLE fh = NULL;
+    EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &fh, path16,
+                                      EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(st) || !fh) return 0;
+    UINTN read_sz = cap - 1;
+    st = uefi_call_wrapper(fh->Read, 3, fh, &read_sz, (void*)buf);
+    uefi_call_wrapper(fh->Close, 1, fh);
+    if (EFI_ERROR(st)) return 0;
+    buf[read_sz] = 0;
+    return read_sz;
+}
+
+/* ── Minimal unified diff (line-level context diff, no POSIX) ────────────── */
+/*
+ * Produces a unified diff between `orig` and `new_text`.
+ * Algorithm: scan lines of orig, find first mismatch with code snippet,
+ * emit -/+ lines. Context: 2 lines before + after.
+ * This is not a full Myers diff — it's a targeted patch preview.
+ */
+static UINTN _p3_build_diff(const CHAR8 *orig, UINTN orig_len,
+                             const CHAR8 *patch_code, UINTN patch_len,
+                             const CHAR8 *filename,
+                             CHAR8 *out, UINTN out_cap) {
+    UINTN op = 0;  /* output position */
+
+    /* Header */
+    const CHAR8 *hdr1 = (const CHAR8*)"--- a/";
+    const CHAR8 *hdr2 = (const CHAR8*)"\n+++ b/";
+    const CHAR8 *hdr3 = (const CHAR8*)"\n@@ -1 +1 @@\n";
+    UINTN l;
+    l=_si_strlen(hdr1); if(op+l<out_cap){_si_memcpy(out+op,hdr1,l);op+=l;}
+    l=_si_strlen(filename); if(op+l<out_cap){_si_memcpy(out+op,filename,l);op+=l;}
+    l=_si_strlen(hdr2); if(op+l<out_cap){_si_memcpy(out+op,hdr2,l);op+=l;}
+    l=_si_strlen(filename); if(op+l<out_cap){_si_memcpy(out+op,filename,l);op+=l;}
+    l=_si_strlen(hdr3); if(op+l<out_cap){_si_memcpy(out+op,hdr3,l);op+=l;}
+
+    /* Emit original lines as context (-) up to 8 lines */
+    UINTN oi = 0, lines = 0;
+    while (oi < orig_len && lines < 8 && op + 2 < out_cap) {
+        out[op++] = '-'; out[op++] = ' ';
+        while (oi < orig_len && op + 1 < out_cap) {
+            CHAR8 c = orig[oi++];
+            out[op++] = c;
+            if (c == '\n') break;
+        }
+        lines++;
+    }
+
+    /* Emit patch code as new lines (+) */
+    UINTN pi = 0;
+    lines = 0;
+    while (pi < patch_len && lines < 16 && op + 2 < out_cap) {
+        out[op++] = '+'; out[op++] = ' ';
+        while (pi < patch_len && op + 1 < out_cap) {
+            CHAR8 c = patch_code[pi++];
+            out[op++] = c;
+            if (c == '\n') break;
+        }
+        /* ensure newline */
+        if (op > 0 && out[op-1] != '\n' && op + 1 < out_cap) out[op++] = '\n';
+        lines++;
+    }
+
+    if (op < out_cap) out[op] = 0;
+    return op;
+}
+
+/* ── Phase 3: /patch_diff <id> ──────────────────────────────────────────── */
+int oo_si_patch_diff(OoSelfImprove *si, const CHAR8 *patch_id, EFI_FILE_HANDLE Root) {
+    if (!si || !patch_id) return 0;
+    OoPatch *p = NULL;
+    for (int i = 0; i < si->count; i++)
+        if (_si_strncmp(si->patches[i].id, patch_id, OO_PATCH_ID_LEN) == 0)
+            { p = &si->patches[i]; break; }
+    if (!p) { Print(L"[si/p3] Patch not found: %a\r\n", patch_id); return 0; }
+    if (!p->code[0]) {
+        Print(L"[si/p3] Patch %a has no code snippet\r\n", patch_id);
+        return 0;
+    }
+
+    /* Read source file */
+    UINTN src_len = 0;
+    if (Root && p->target_file[0] &&
+        _si_strncmp(p->target_file,(const CHAR8*)"(",1)!=0) {
+        src_len = _p3_read_source(Root, p->target_file, g_p3_src_buf, OO_P3_SRC_CAP);
+        if (src_len > 0)
+            Print(L"[si/p3] Read %u bytes from %a\r\n", (UINT32)src_len, p->target_file);
+        else
+            Print(L"[si/p3] Source not on ESP (file diff only)\r\n");
+    }
+
+    UINTN diff_len = _p3_build_diff(
+        g_p3_src_buf, src_len,
+        p->code, _si_strlen(p->code),
+        p->target_file,
+        g_p3_diff_buf, OO_P3_DIFF_CAP);
+
+    Print(L"\r\n[si/p3] Diff for patch %a:\r\n", patch_id);
+    for (UINTN i = 0; i < diff_len; i++) Print(L"%c", (CHAR16)g_p3_diff_buf[i]);
+    Print(L"\r\n");
+    return 1;
+}
+
+/* ── Phase 3: /patch_read_src <id> ─────────────────────────────────────── */
+int oo_si_patch_read_src(OoSelfImprove *si, const CHAR8 *patch_id, EFI_FILE_HANDLE Root) {
+    if (!si || !Root || !patch_id) return 0;
+    OoPatch *p = NULL;
+    for (int i = 0; i < si->count; i++)
+        if (_si_strncmp(si->patches[i].id, patch_id, OO_PATCH_ID_LEN) == 0)
+            { p = &si->patches[i]; break; }
+    if (!p) { Print(L"[si/p3] Patch not found\r\n"); return 0; }
+
+    UINTN len = _p3_read_source(Root, p->target_file, g_p3_src_buf, OO_P3_SRC_CAP);
+    if (!len) { Print(L"[si/p3] Cannot read source: %a\r\n", p->target_file); return 0; }
+
+    Print(L"[si/p3] Source %a (%u bytes, first 512):\r\n", p->target_file, (UINT32)len);
+    UINTN show = len > 512 ? 512 : len;
+    for (UINTN i = 0; i < show; i++) Print(L"%c", (CHAR16)g_p3_src_buf[i]);
+    Print(L"\r\n");
+    return 1;
+}
+
+/* ── Phase 3: Confidence evolution ──────────────────────────────────────── */
+/*
+ * After a patch is verified (boot_verify found the file) its confidence
+ * rises by +5 (max 100). If it failed, it drops by -20 (min 0).
+ * D+ score is recomputed from new confidence.
+ */
+void oo_si_evolve_confidence(OoSelfImprove *si) {
+    if (!si) return;
+    int evolved = 0;
+    for (int i = 0; i < si->count; i++) {
+        OoPatch *p = &si->patches[i];
+        if (p->status == PATCH_ST_APPLIED) {
+            if (p->confidence_pct < 100) p->confidence_pct += 5;
+            if (p->confidence_pct > 100) p->confidence_pct = 100;
+            p->dplus_score = _dplus_score(p->category, p->source, p->confidence_pct);
+            evolved++;
+        } else if (p->status == PATCH_ST_FAILED) {
+            if (p->confidence_pct >= 20) p->confidence_pct -= 20;
+            else p->confidence_pct = 0;
+            p->dplus_score = _dplus_score(p->category, p->source, p->confidence_pct);
+            evolved++;
+        }
+    }
+    Print(L"[si/p3] Confidence evolved for %d patch(es)\r\n", evolved);
+}
+
+/* ── Phase 3: Auto-rebuild marker ───────────────────────────────────────── */
+/*
+ * Write a flag file `oo_rebuild.flag` on the ESP.
+ * On next boot the REPL can detect this and suggest a rebuild.
+ * Content: comma-separated patch IDs that need rebuild.
+ */
+static void _p3_write_rebuild_flag(OoSelfImprove *si, EFI_FILE_HANDLE Root) {
+    if (!si || !Root) return;
+    EFI_FILE_HANDLE fh = NULL;
+    EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &fh,
+        L"oo_rebuild.flag",
+        EFI_FILE_MODE_CREATE|EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE, 0);
+    if (EFI_ERROR(st) || !fh) return;
+
+    static CHAR8 flag_buf[256];
+    UINTN fp = 0;
+    for (int i = 0; i < si->count && fp < 240; i++) {
+        OoPatch *p = &si->patches[i];
+        if (p->status == PATCH_ST_APPLIED && p->requires_reboot) {
+            UINTN il = _si_strlen(p->id);
+            if (fp + il + 1 < 254) {
+                _si_memcpy(flag_buf + fp, p->id, il); fp += il;
+                flag_buf[fp++] = ',';
+            }
+        }
+    }
+    if (fp > 0) { flag_buf[fp++] = '\n'; flag_buf[fp] = 0; }
+    else {
+        const CHAR8 *none = (const CHAR8*)"none\n";
+        _si_strlcpy(flag_buf, none, 256); fp = 5;
+    }
+    uefi_call_wrapper(fh->Write, 3, fh, &fp, (void*)flag_buf);
+    uefi_call_wrapper(fh->Flush, 1, fh);
+    uefi_call_wrapper(fh->Close, 1, fh);
+    Print(L"[si/p3] Rebuild flag written: %a\r\n", flag_buf);
+}
+
+/* Check for rebuild flag on boot */
+int oo_si_check_rebuild_flag(EFI_FILE_HANDLE Root) {
+    if (!Root) return 0;
+    EFI_FILE_HANDLE fh = NULL;
+    EFI_STATUS st = uefi_call_wrapper(Root->Open, 5, Root, &fh,
+        L"oo_rebuild.flag", EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(st) || !fh) return 0;
+    CHAR8 buf[64] = {0};
+    UINTN sz = sizeof(buf) - 1;
+    uefi_call_wrapper(fh->Read, 3, fh, &sz, (void*)buf);
+    uefi_call_wrapper(fh->Close, 1, fh);
+    if (sz > 0 && _si_strncmp(buf,(const CHAR8*)"none",4) != 0) {
+        Print(L"[si/p3] Rebuild flag detected: patches %a need source rebuild\r\n", buf);
+        Print(L"[si/p3] Tip: rebuild from host with 'make' and reflash EFI\r\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* ── Phase 3: Federation — share patch delta with peer OO node ───────────── */
+/*
+ * HTTP POST to a peer OO node (another machine running OO).
+ * Endpoint: http://<peer_ip>:<peer_port>/oo/patch_recv
+ * Body format (JSON):
+ *   { "node_id": "oo-XXXX", "patch_id": "PA-000000",
+ *     "category": 0, "confidence": 70,
+ *     "description": "...", "target_file": "...", "code": "..." }
+ * Peer can call oo_si_add_proposal() on receipt.
+ */
+int oo_si_federate_patch(OoSelfImprove *si, void *net_ctx,
+                         const CHAR8 *patch_id,
+                         const CHAR8 *peer_ip, UINT16 peer_port) {
+    OoNetContext *net = (OoNetContext*)net_ctx;
+    if (!si || !net || !patch_id || !peer_ip) return 0;
+    OoPatch *p = NULL;
+    for (int i = 0; i < si->count; i++)
+        if (_si_strncmp(si->patches[i].id, patch_id, OO_PATCH_ID_LEN) == 0)
+            { p = &si->patches[i]; break; }
+    if (!p) { Print(L"[si/p3] Patch not found for federation: %a\r\n", patch_id); return 0; }
+
+    /* Build JSON payload */
+    static CHAR8 json[OO_PATCH_CODE_LEN + 512];
+    UINTN jp = 0;
+
+    /* Helper: append string literal */
+#define _JP(lit) do { \
+    const CHAR8 *_s=(const CHAR8*)(lit); \
+    UINTN _l=_si_strlen(_s); \
+    if(jp+_l<sizeof(json)-1){_si_memcpy(json+jp,_s,_l);jp+=_l;} \
+} while(0)
+
+    _JP("{\"node_id\":\""); _JP(net->node_id);
+    _JP("\",\"patch_id\":\""); _JP(p->id);
+    _JP("\",\"category\":"); json[jp++]='0'+(int)p->category;
+    _JP(",\"confidence\":"); {
+        UINT32 c=p->confidence_pct;
+        if(c>=100){json[jp++]='1';json[jp++]='0';json[jp++]='0';}
+        else{json[jp++]='0'+(c/10)%10;json[jp++]='0'+(c%10);}
+    }
+    _JP(",\"dplus\":"); {
+        UINT32 d=p->dplus_score;
+        if(d>=100){json[jp++]='1';json[jp++]='0';json[jp++]='0';}
+        else{json[jp++]='0'+(d/10)%10;json[jp++]='0'+(d%10);}
+    }
+    _JP(",\"description\":\"");
+    /* JSON-escape description */
+    for (UINTN i=0; p->description[i] && jp+2<sizeof(json)-1; i++) {
+        CHAR8 c=p->description[i];
+        if(c=='"'||c=='\\'){json[jp++]='\\';} json[jp++]=c;
+    }
+    _JP("\",\"target_file\":\""); _JP(p->target_file);
+    _JP("\",\"code\":\"");
+    for (UINTN i=0; p->code[i] && jp+2<sizeof(json)-1; i++) {
+        CHAR8 c=p->code[i];
+        if(c=='"'||c=='\\'){json[jp++]='\\';} else if(c=='\n'){json[jp++]='\\';c='n';}
+        json[jp++]=c;
+    }
+    _JP("\"}");
+    json[jp]=0;
+
+#undef _JP
+
+    /* Build URL: http://<peer_ip>:<peer_port>/oo/patch_recv */
+    static CHAR8 url[128];
+    UINTN up=0;
+    const CHAR8 *pref=(const CHAR8*)"http://";
+    UINTN pl=_si_strlen(pref); _si_memcpy(url,pref,pl); up+=pl;
+    UINTN il=_si_strlen(peer_ip); _si_memcpy(url+up,peer_ip,il); up+=il;
+    url[up++]=':';
+    /* port as decimal */
+    UINT16 port=peer_port?peer_port:8181;
+    CHAR8 portbuf[8]; int pi=6; portbuf[7]=0;
+    do{portbuf[pi--]='0'+(port%10);port/=10;}while(port&&pi>=0);
+    UINTN portlen=_si_strlen(portbuf+pi+1);
+    _si_memcpy(url+up,portbuf+pi+1,portlen); up+=portlen;
+    const CHAR8 *path=(const CHAR8*)"/oo/patch_recv";
+    UINTN pathlen=_si_strlen(path); _si_memcpy(url+up,path,pathlen); up+=pathlen;
+    url[up]=0;
+
+    Print(L"[si/p3] Federating patch %a to %a...\r\n", patch_id, url);
+
+    /* Use netboot HTTP POST */
+    static CHAR8 resp[256];
+    resp[0]=0;
+    /* Temporarily store peer server in netboot context */
+    CHAR8 saved_ip[64]; UINT16 saved_port;
+    _si_strlcpy(saved_ip, net->server_ip, 64);
+    saved_port = net->server_port;
+
+    _si_strlcpy(net->server_ip, peer_ip, 64);
+    net->server_port = peer_port ? peer_port : 8181;
+
+    EFI_STATUS st = oo_netboot_oracle_query(net, OO_ORACLE_CUSTOM,
+                                            json, resp, sizeof(resp)-1);
+
+    /* Restore */
+    _si_strlcpy(net->server_ip, saved_ip, 64);
+    net->server_port = saved_port;
+
+    if (!EFI_ERROR(st)) {
+        Print(L"[si/p3] Federation OK — peer responded: %a\r\n", resp);
+        return 1;
+    }
+    Print(L"[si/p3] Federation failed: %r\r\n", st);
+    return 0;
+}
+
+/* ── Phase 3: Patch receiver (called when OO receives federated patch) ───── */
+int oo_si_recv_federated(OoSelfImprove *si, const CHAR8 *json_body, UINTN body_len) {
+    if (!si || !json_body || body_len == 0) return 0;
+    /* Extract fields from JSON — minimal parser */
+    CHAR8 desc[OO_PATCH_DESC_LEN]={0}, target[128]={0}, code[OO_PATCH_CODE_LEN]={0};
+    UINT32 conf=50;
+    int cat=PATCH_CAT_FEATURE;
+
+    /* Helper: extract string field */
+    const CHAR8 *p = json_body;
+#define _JSTR(key, dst, dstsz) do { \
+    const CHAR8 *hit=_si_memmem(p,body_len,(const CHAR8*)("\"" key "\":\""),\
+                                  sizeof("\"" key "\":\"") - 1); \
+    if(hit){hit+=sizeof("\"" key "\":\"") - 1; \
+        int _k=0; while(hit[_k]&&hit[_k]!='"'&&_k<(dstsz)-1)_k++; \
+        _si_memcpy(dst,hit,_k); dst[_k]=0; } \
+} while(0)
+
+    _JSTR("description", desc, OO_PATCH_DESC_LEN);
+    _JSTR("target_file", target, 128);
+    _JSTR("code", code, OO_PATCH_CODE_LEN);
+
+#undef _JSTR
+
+    /* Extract numeric fields */
+    const CHAR8 *ch = _si_memmem(p, body_len, (const CHAR8*)"\"category\":", 11);
+    if (ch) { ch+=11; cat=(*ch>='0'&&*ch<='6')?(*ch-'0'):0; }
+    const CHAR8 *co = _si_memmem(p, body_len, (const CHAR8*)"\"confidence\":", 13);
+    if (co) { co+=13; conf=_si_atou(co); }
+
+    if (!desc[0]) _si_strlcpy(desc,(const CHAR8*)"Federated patch (no description)",OO_PATCH_DESC_LEN);
+
+    Print(L"[si/p3] Received federated patch — cat=%d conf=%d\r\n", cat, conf);
+    return oo_si_add_proposal(si,(PatchCategory)cat,PATCH_SRC_EVOLUTION,
+                              desc,target,code,conf);
+}
+
+/* ── Phase 3: REPL extensions ────────────────────────────────────────────── */
+int oo_si_repl_cmd_p3(OoSelfImprove *si, const char *cmd,
+                      EFI_FILE_HANDLE Root, void *net_ctx) {
+    OoNetContext *net = (OoNetContext*)net_ctx;
+    if (!cmd) return 0;
+
+#define _CMP(s,n) (_cstrcmp(cmd,(s),(n))==0)
+#define _CMPN(s,n) (_cstrcmp(cmd,(s),(n))==0 && (cmd[(n)]==' '||cmd[(n)]==0))
+
+    /* /patch_diff <id> */
+    if (_cstrcmp(cmd, "/patch_diff ", 12) == 0) {
+        oo_si_patch_diff(si, (const CHAR8*)(cmd+12), Root);
+        return 1;
+    }
+    /* /patch_read_src <id> */
+    if (_cstrcmp(cmd, "/patch_read_src ", 16) == 0) {
+        oo_si_patch_read_src(si, (const CHAR8*)(cmd+16), Root);
+        return 1;
+    }
+    /* /patch_evolve — update confidence for all applied/failed patches */
+    if (_CMPN("/patch_evolve", 13)) {
+        oo_si_evolve_confidence(si);
+        return 1;
+    }
+    /* /patch_rebuild_check — check rebuild flag on ESP */
+    if (_CMPN("/patch_rebuild_check", 20)) {
+        int has = oo_si_check_rebuild_flag(Root);
+        if (!has) Print(L"[si/p3] No rebuild flag present\r\n");
+        return 1;
+    }
+    /* /patch_federate <id> <peer_ip> [port] */
+    if (_cstrcmp(cmd, "/patch_federate ", 16) == 0) {
+        const char *rest = cmd + 16;
+        while (*rest == ' ') rest++;
+        /* extract patch ID (first token) */
+        CHAR8 pid[OO_PATCH_ID_LEN]; int pi=0;
+        while (*rest && *rest != ' ' && pi < OO_PATCH_ID_LEN-1)
+            pid[pi++] = (CHAR8)*rest++;
+        pid[pi] = 0;
+        while (*rest == ' ') rest++;
+        /* extract peer IP */
+        CHAR8 peer_ip[64]; int ii=0;
+        while (*rest && *rest != ' ' && ii < 63)
+            peer_ip[ii++] = (CHAR8)*rest++;
+        peer_ip[ii] = 0;
+        while (*rest == ' ') rest++;
+        UINT16 port = 8181;
+        if (*rest >= '0' && *rest <= '9') {
+            port = (UINT16)_si_atou((const CHAR8*)rest);
+        }
+        if (!pid[0] || !peer_ip[0]) {
+            Print(L"[si/p3] Usage: /patch_federate <id> <peer_ip> [port]\r\n");
+            return 1;
+        }
+        oo_si_federate_patch(si, net, pid, peer_ip, port);
+        return 1;
+    }
+    /* /patch_mark_reboot <id> — mark patch as requiring reboot */
+    if (_cstrcmp(cmd, "/patch_mark_reboot ", 19) == 0) {
+        const CHAR8 *pid = (const CHAR8*)(cmd + 19);
+        int found = 0;
+        for (int i = 0; i < si->count; i++) {
+            if (_si_strncmp(si->patches[i].id, pid, OO_PATCH_ID_LEN) == 0) {
+                si->patches[i].requires_reboot = 1;
+                Print(L"[si/p3] Patch %a marked as requires_reboot=1\r\n", pid);
+                found = 1; break;
+            }
+        }
+        if (!found) Print(L"[si/p3] Patch not found: %a\r\n", pid);
+        return 1;
+    }
+    /* /patch_apply_p3 — apply + write rebuild flag if any patch needs reboot */
+    if (_CMPN("/patch_apply_p3", 15)) {
+        int na = oo_si_apply_approved(si, Root);
+        if (na > 0) _p3_write_rebuild_flag(si, Root);
+        Print(L"[si/p3] %d patch(es) applied\r\n", na);
+        return 1;
+    }
+
+#undef _CMP
+#undef _CMPN
     return 0;
 }
