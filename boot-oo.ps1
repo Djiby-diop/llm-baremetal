@@ -1,10 +1,17 @@
-# boot-oo.ps1 - Launch OO in QEMU (serial log mode or interactive)
-# Usage:  .\boot-oo.ps1              -- serial only, 60s timeout
-#         .\boot-oo.ps1 -Interactive -- open graphical window
-#         .\boot-oo.ps1 -TimeoutSec 120
+# boot-oo.ps1 - Launch OO in QEMU
+# Usage:  .\boot-oo.ps1                      -- headless, 90s timeout, shows UART on exit
+#         .\boot-oo.ps1 -Interactive          -- graphical window (type in UEFI console)
+#         .\boot-oo.ps1 -TimeoutSec 180
+#
+# Boot image: llm-baremetal-boot.img (512MB GPT/FAT32)
+#   - EFI/BOOT/BOOTX64.EFI  (llama2.efi  ~28MB)
+#   - models/stories15M.q8_0.gguf (~15MB)
+#   - tokenizer.bin          (~0.4MB)
+#
+# To rebuild:  wsl -e bash tools/scripts/make-boot-img.sh
 
 param(
-    [int]$TimeoutSec = 60,
+    [int]$TimeoutSec = 90,
     [switch]$Interactive = $false
 )
 
@@ -21,17 +28,15 @@ $UART     = "$PSScriptRoot\OO_UART.log"
 $LOG      = "$PSScriptRoot\OO_BOOT.log"
 
 if (Test-Path $UART) { try { Remove-Item $UART -Force -ErrorAction SilentlyContinue } catch {} }
-if (Test-Path $LOG)  { try { Remove-Item $LOG  -Force -ErrorAction SilentlyContinue } catch {} }
 
 $qemu_args = @(
     "-machine", "q35,accel=tcg",
     "-cpu",     "max",
-    "-m",       "4096",
+    "-m",       "2048",
     "-drive",   "if=pflash,format=raw,readonly=on,file=$OVMF",
     "-drive",   "if=pflash,format=raw,file=$VARS_TMP",
-    "-drive",   "format=raw,file=$IMG",
+    "-drive",   "format=raw,file=$IMG,if=ide",
     "-serial",  "file:$UART",
-    "-serial",  "file:$LOG",
     "-no-reboot"
 )
 
@@ -41,21 +46,28 @@ Write-Host "    UART log      : $UART"  -ForegroundColor Gray
 
 if ($Interactive) {
     $qemu_args += @("-vga", "std")
-    Write-Host "==> Launching QEMU (interactive window)..." -ForegroundColor Green
-    & $QEMU @qemu_args
-    $exit_code = $LASTEXITCODE
+    Write-Host "==> Launching QEMU (interactive graphical window)..." -ForegroundColor Green
+    Write-Host "    Type commands in the QEMU window UEFI console." -ForegroundColor Gray
+    $p = Start-Process -FilePath $QEMU -ArgumentList $qemu_args -PassThru
+    Write-Host "    PID $($p.Id). Close window or press Ctrl+C to stop."
+    $p.WaitForExit()
+    $exit_code = $p.ExitCode
 } else {
-    $qemu_args += @("-nographic", "-vga", "none")
-    Write-Host "==> Launching QEMU (nographic, ${TimeoutSec}s timeout)..." -ForegroundColor Green
+    $qemu_args += @("-display", "none")
+    Write-Host "==> Launching QEMU (headless, ${TimeoutSec}s timeout)..." -ForegroundColor Green
     $p = Start-Process -FilePath $QEMU -ArgumentList $qemu_args -PassThru -NoNewWindow
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $spinner = @('|','/','-','\')
+    $i = 0
     while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds 2
+        Start-Sleep -Milliseconds 500
+        Write-Host -NoNewline "`r    Booting $($spinner[$i % 4]) "
+        $i++
     }
+    Write-Host ""
     if (-not $p.HasExited) {
         Write-Host "==> Timeout reached - stopping QEMU (PID $($p.Id))" -ForegroundColor Yellow
-        $pid_to_kill = $p.Id
-        Stop-Process -Id $pid_to_kill -ErrorAction SilentlyContinue
+        Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
     }
     $exit_code = $p.ExitCode
 }
