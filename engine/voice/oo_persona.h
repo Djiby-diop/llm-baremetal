@@ -49,6 +49,14 @@ typedef enum {
     EMOTION_CAUTIOUS  = 5,
 } OoEmotion;
 
+// Aliases with OO_ prefix (used by oo_voice_desktop_bridge.c)
+#define OO_EMOTION_FOCUSED   EMOTION_FOCUSED
+#define OO_EMOTION_CURIOUS   EMOTION_CURIOUS
+#define OO_EMOTION_ALERT     EMOTION_ALERT
+#define OO_EMOTION_DORMANT   EMOTION_DORMANT
+#define OO_EMOTION_PROUD     EMOTION_PROUD
+#define OO_EMOTION_CAUTIOUS  EMOTION_CAUTIOUS
+
 // ── Response verbosity ────────────────────────────────────────────────────────
 typedef enum {
     VERBOSITY_SILENT   = 0,  // no spoken confirmation

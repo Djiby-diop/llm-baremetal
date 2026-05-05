@@ -101,6 +101,7 @@ REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	engine/voice/oo_voice_desktop_bridge.o \
 	engine/voice/oo_voice_nlp.o \
 	engine/voice/oo_voice_state_writer.o \
+	engine/voice/oo_voice_loop.o \
 	engine/drivers/oo_rtc.o \
 	engine/drivers/oo_audio_hda.o \
 	engine/drivers/oo_usb_msc.o \

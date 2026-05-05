@@ -24,6 +24,9 @@
 #include "oo_wakeword.h"
 #include "oo_tts_phoneme.h"
 
+// Alias OoPersonaEmotion → OoEmotion (defined in oo_persona.h)
+typedef OoEmotion OoPersonaEmotion;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
