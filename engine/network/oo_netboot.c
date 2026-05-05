@@ -1,4 +1,4 @@
-/* oo_netboot.c — OO Network Boot Implementation
+﻿/* oo_netboot.c — OO Network Boot Implementation
  * ================================================
  * Phase 1: stubs + UEFI SimpleNetwork probe
  * Phase 2: real HTTP GET via EFI_HTTP_PROTOCOL
@@ -10,6 +10,9 @@
 #include "oo_netboot.h"
 #include <efi.h>
 #include <efilib.h>
+
+/* Global singleton — accessible from soma_boot.c via extern */
+OoNetContext g_netboot;
 
 /* ── Internal helpers ────────────────────────────────────────────────────── */
 static void net_serial(const CHAR16 *msg) {
@@ -29,7 +32,7 @@ EFI_STATUS oo_netboot_init(OoNetContext *ctx, EFI_HANDLE ImageHandle, EFI_SYSTEM
 
     /* Zero-init */
     for (UINTN i = 0; i < sizeof(*ctx); i++) ((UINT8*)ctx)[i] = 0;
-    ctx->state       = OO_NET_PROBING;
+    ctx->state       = OO_NB_PROBING;
     ctx->server_port = 8080;
 
     net_serial(L"[netboot] Probing UEFI network stack...\r\n");
@@ -44,7 +47,7 @@ EFI_STATUS oo_netboot_init(OoNetContext *ctx, EFI_HANDLE ImageHandle, EFI_SYSTEM
     if (EFI_ERROR(st) || n_handles == 0) {
         net_serial(L"[netboot] No network adapter found (EFI_SIMPLE_NETWORK not available)\r\n");
         net_serial(L"[netboot] Network boot disabled — offline mode\r\n");
-        ctx->state = OO_NET_ERROR;
+        ctx->state = OO_NB_ERROR;
         return EFI_NOT_FOUND;
     }
 
@@ -59,14 +62,14 @@ EFI_STATUS oo_netboot_init(OoNetContext *ctx, EFI_HANDLE ImageHandle, EFI_SYSTEM
     uefi_call_wrapper(ST->RuntimeServices->GetTime, 2, NULL, NULL);
     Print(L"[netboot] Node ready. IP: %a  Node-ID: %a\r\n", ctx->ip, ctx->node_id);
 
-    ctx->state = OO_NET_READY;
+    ctx->state = OO_NB_READY;
     uefi_call_wrapper(BS->FreePool, 1, handles);
     return EFI_SUCCESS;
 }
 
 void oo_netboot_shutdown(OoNetContext *ctx) {
     if (!ctx) return;
-    ctx->state = OO_NET_UNINIT;
+    ctx->state = OO_NB_UNINIT;
     net_serial(L"[netboot] Shutdown\r\n");
 }
 
@@ -75,7 +78,7 @@ EFI_STATUS oo_netboot_pull_model(OoNetContext *ctx,
                                  const CHAR8  *url,
                                  void        **buf_out,
                                  UINTN        *size_out) {
-    if (!ctx || ctx->state < OO_NET_READY) return EFI_NOT_READY;
+    if (!ctx || ctx->state < OO_NB_READY) return EFI_NOT_READY;
     if (!url || !buf_out || !size_out) return EFI_INVALID_PARAMETER;
 
     CHAR16 url16[256] = {0};
@@ -86,7 +89,7 @@ EFI_STATUS oo_netboot_pull_model(OoNetContext *ctx,
     net_serial(L"[netboot] HTTP pull: EFI_HTTP_PROTOCOL not yet wired (Phase 2)\r\n");
     net_serial(L"[netboot] To enable: compile with OO_NET_HTTP=1 in Makefile\r\n");
 
-    ctx->state = OO_NET_READY; /* remain ready */
+    ctx->state = OO_NB_READY; /* remain ready */
     return EFI_UNSUPPORTED;
 }
 
@@ -96,7 +99,7 @@ EFI_STATUS oo_netboot_oracle_query(OoNetContext *ctx,
                                    const CHAR8  *prompt,
                                    CHAR8        *resp_buf,
                                    UINTN         resp_max) {
-    if (!ctx || ctx->state < OO_NET_READY) return EFI_NOT_READY;
+    if (!ctx || ctx->state < OO_NB_READY) return EFI_NOT_READY;
     if (!prompt || !resp_buf || resp_max < 2) return EFI_INVALID_PARAMETER;
 
     const CHAR16 *oracle_names[] = {
@@ -130,7 +133,7 @@ EFI_STATUS oo_netboot_push_delta(OoNetContext *ctx,
                                  const void   *delta_buf,
                                  UINTN         delta_size,
                                  const CHAR8  *model_id) {
-    if (!ctx || ctx->state < OO_NET_READY) return EFI_NOT_READY;
+    if (!ctx || ctx->state < OO_NB_READY) return EFI_NOT_READY;
     Print(L"[netboot] Push delta: %a  size=%u bytes\r\n", model_id, (UINT32)delta_size);
     net_serial(L"[netboot] Delta push: Phase 4 (federated learning) — not yet wired\r\n");
     return EFI_UNSUPPORTED;

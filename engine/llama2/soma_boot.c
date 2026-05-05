@@ -413,6 +413,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     llmk_boot_mark(L"net_init");
 
+    // [NETBOOT] OO Network Boot — HTTP model pull + oracle queries
+    oo_netboot_init(&g_netboot, ImageHandle, SystemTable);
+    llmk_boot_mark(L"netboot_init");
+
+    // [SI] OO Self-Improvement Engine — observe/propose/review/apply pipeline
+    oo_si_init(&g_self_improve);
+    llmk_boot_mark(L"si_init");
+
     // Show diagnostic info if requested via repl.cfg: boot_diag=1
     if (g_boot_diag) {
         llmk_print_diag();
@@ -7271,6 +7279,96 @@ snap_autoload_done:
             } else if (my_strncmp(prompt, "/guard_status", 13) == 0) {
                 llmk_guardrails_print_status(temperature, top_p, top_k, max_gen_tokens);
                 continue;
+
+            // ── Phase NB: Network Boot commands ──────────────────────────────
+            } else if (my_strncmp(prompt, "/net_pull ", 10) == 0) {
+                const char *url = prompt + 10;
+                while (*url == ' ') url++;
+                Print(L"\r\n[netboot] Pulling model from: ");
+                { CHAR16 u16[256]; ascii_to_char16(u16, url, 256); Print(L"%s\r\n", u16); }
+                void *nbuf = NULL; UINTN nsz = 0;
+                EFI_STATUS nbst = oo_netboot_pull_model(&g_netboot, (const CHAR8*)url, &nbuf, &nsz);
+                if (!EFI_ERROR(nbst)) {
+                    Print(L"[netboot] Pulled %lu bytes\r\n\r\n", (UINTN)nsz);
+                } else {
+                    Print(L"[netboot] Pull failed (Phase 2 TODO — needs EFI_HTTP_PROTOCOL)\r\n\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/net_oracle ", 12) == 0) {
+                const char *oargs = prompt + 12;
+                while (*oargs == ' ') oargs++;
+                OoOracleId oid = OO_ORACLE_GPT4;
+                if (my_strncmp(oargs, "claude", 6) == 0) { oid = OO_ORACLE_CLAUDE; oargs += 6; }
+                else if (my_strncmp(oargs, "gemini", 6) == 0) { oid = OO_ORACLE_GEMINI; oargs += 6; }
+                else if (my_strncmp(oargs, "gpt4", 4) == 0) { oargs += 4; }
+                while (*oargs == ' ') oargs++;
+                CHAR8 oresp[1024]; oresp[0] = 0;
+                Print(L"\r\n[netboot] Oracle query...\r\n");
+                EFI_STATUS qst = oo_netboot_oracle_query(&g_netboot, oid, (const CHAR8*)oargs, oresp, sizeof(oresp));
+                if (!EFI_ERROR(qst) && oresp[0]) {
+                    Print(L"[oracle] ");
+                    for (const CHAR8 *rp = oresp; *rp; rp++) Print(L"%c", (CHAR16)*rp);
+                    Print(L"\r\n\r\n");
+                } else {
+                    Print(L"[netboot] Oracle stub — Phase 3 TODO (needs TLS + API key)\r\n\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/net_oracle_key ", 16) == 0) {
+                const char *okey = prompt + 16;
+                while (*okey == ' ') okey++;
+                UINTN ki = 0;
+                while (ki < 63 && okey[ki]) { g_netboot.oracle_api_key[ki] = (CHAR8)okey[ki]; ki++; }
+                g_netboot.oracle_api_key[ki] = 0;
+                Print(L"\r\n[netboot] API key stored in RAM (%lu chars). Never written to disk.\r\n\r\n", (UINTN)ki);
+                continue;
+            } else if (my_strncmp(prompt, "/net_push", 9) == 0) {
+                Print(L"\r\n[netboot] Push delta to federation: Phase 4 TODO\r\n\r\n");
+                oo_netboot_print_status(&g_netboot);
+                continue;
+
+            // ── Phase SI: Self-Improvement commands ───────────────────────────
+            } else if (my_strncmp(prompt, "/patch_status", 13) == 0) {
+                Print(L"\r\n[SI] Self-Improve Engine: %s | %d patch(es) in queue\r\n\r\n",
+                      g_self_improve.initialized ? L"ready" : L"not initialized",
+                      g_self_improve.count);
+                continue;
+            } else if (my_strncmp(prompt, "/patch_list", 11) == 0) {
+                oo_si_print_list(&g_self_improve);
+                continue;
+            } else if (my_strncmp(prompt, "/patch_analyze", 14) == 0) {
+                Print(L"\r\n[SI] Analyzing session for improvement proposals...\r\n");
+                int np = oo_si_generate_proposals(&g_self_improve, PATCH_SRC_LOCAL_LLM, (const CHAR8*)"session audit");
+                Print(L"[SI] %d proposal(s) generated. Use /patch_list to view.\r\n\r\n", np);
+                continue;
+            } else if (my_strncmp(prompt, "/patch_approve ", 15) == 0) {
+                const char *pid = prompt + 15;
+                while (*pid == ' ') pid++;
+                int ok = oo_si_approve(&g_self_improve, (const CHAR8*)pid);
+                if (ok >= 0) {
+                    Print(L"\r\n[SI] Patch approved — use /patch_apply to execute.\r\n\r\n");
+                } else {
+                    Print(L"\r\n[SI] Patch not found or blocked by D+ policy. Check /patch_list.\r\n\r\n");
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/patch_reject ", 14) == 0) {
+                const char *pid = prompt + 14;
+                while (*pid == ' ') pid++;
+                int ok = oo_si_reject(&g_self_improve, (const CHAR8*)pid);
+                Print(L"\r\n[SI] Patch %s\r\n\r\n", ok >= 0 ? L"rejected" : L"not found");
+                continue;
+            } else if (my_strncmp(prompt, "/patch_apply", 12) == 0) {
+                Print(L"\r\n[SI] Applying approved patches...\r\n");
+                int na = oo_si_apply_approved(&g_self_improve, g_root);
+                Print(L"[SI] %d patch(es) applied. Reboot to activate changes if required.\r\n\r\n", na);
+                continue;
+            } else if (my_strncmp(prompt, "/patch_rollback ", 16) == 0) {
+                const char *pid = prompt + 16;
+                while (*pid == ' ') pid++;
+                int ok = oo_si_rollback(&g_self_improve, (const CHAR8*)pid);
+                Print(L"\r\n[SI] Rollback: %s\r\n\r\n",
+                      ok >= 0 ? L"OK" : L"failed — patch not found or not in applied state");
+                continue;
+
             }
         }
         

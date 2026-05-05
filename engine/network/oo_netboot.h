@@ -26,13 +26,13 @@
 
 /* ── Network state ───────────────────────────────────────────────────────── */
 typedef enum {
-    OO_NET_UNINIT    = 0,
-    OO_NET_PROBING,        /* searching for NIC + DHCP */
-    OO_NET_READY,          /* IP obtained, HTTP stack up */
-    OO_NET_PULLING,        /* downloading model weights */
-    OO_NET_CONNECTED,      /* registered to federation */
-    OO_NET_ERROR
-} OoNetState;
+    OO_NB_UNINIT    = 0,
+    OO_NB_PROBING,         /* searching for NIC + DHCP */
+    OO_NB_READY,           /* IP obtained, HTTP stack up */
+    OO_NB_PULLING,         /* downloading model weights */
+    OO_NB_CONNECTED,       /* registered to federation */
+    OO_NB_ERROR
+} OoNbState;
 
 /* Oracle identity — external AI model used as knowledge source */
 typedef enum {
@@ -45,7 +45,7 @@ typedef enum {
 } OoOracleId;
 
 typedef struct {
-    OoNetState   state;
+    OoNbState    state;
     CHAR8        ip[16];          /* our IPv4 as string */
     CHAR8        server_ip[64];   /* federation server */
     UINT16       server_port;
@@ -97,3 +97,6 @@ int  oo_netboot_repl_cmd(OoNetContext *ctx, const char *cmd);
  *   /net_push               — push delta to federation
  *   /net_oracle_key <key>   — set API key (in-memory, not persisted)
  */
+
+/* Global singleton (defined in oo_netboot.c) */
+extern OoNetContext g_netboot;

@@ -91,3 +91,6 @@ int  oo_si_apply_approved(OoSelfImprove *si, EFI_FILE_HANDLE Root);
 int  oo_si_repl_cmd(OoSelfImprove *si, const char *cmd, EFI_FILE_HANDLE Root);
 void oo_si_print_patch(const OoPatch *p);
 void oo_si_print_list(OoSelfImprove *si);
+
+/* Global singleton (defined in oo_self_improve.c) */
+extern OoSelfImprove g_self_improve;

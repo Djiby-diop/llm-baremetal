@@ -6,6 +6,9 @@
 #include <efi.h>
 #include <efilib.h>
 
+/* Global singleton — accessible from soma_boot.c via extern */
+OoSelfImprove g_self_improve;
+
 /* ── String helpers (no libc) ───────────────────────────────────────────── */
 static UINTN _si_strlen(const CHAR8 *s) {
     UINTN n = 0; if (!s) return 0; while (s[n]) n++; return n;

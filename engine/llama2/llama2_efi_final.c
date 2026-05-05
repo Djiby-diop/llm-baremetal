@@ -168,6 +168,14 @@
 #include "../ssm/oo_somamind_v1.h"
 #include "../ssm/oo_somamind_v1.c"
 
+// Phase NB: OO Network Boot — HTTP model pull + oracle queries (GPT/Claude/Gemini)
+#include "../network/oo_netboot.h"
+#include "../network/oo_netboot.c"
+
+// Phase SI: OO Self-Improvement Engine — human-in-the-loop patch pipeline
+#include "../self_improve/oo_self_improve.h"
+#include "../self_improve/oo_self_improve.c"
+
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 
