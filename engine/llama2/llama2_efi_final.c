@@ -184,7 +184,13 @@
 #include "../network/oo_mbedtls.h"
 #include "../network/oo_mbedtls.c"// Phase 4D: DIOP custom model loader + inference bridge
 #include "../models/oo_diop_model.h"
-#include "../models/oo_diop_model.c"// Phase 4E: Federation protocol — peer discovery + patch sharing
+#include "../models/oo_diop_model.c"// Phase 5F: Model self-expansion engine
+#include "../models/oo_model_growth.h"
+#include "../models/oo_model_growth.c"// Phase 5A: ExitBootServices + IDT + GDT (full CPU takeover)
+#include "../kernel/oo_exit_boot.h"
+#include "../kernel/oo_exit_boot.c"// Phase 5C: NVMe bare-metal PCI driver
+#include "../kernel/oo_nvme.h"
+#include "../kernel/oo_nvme.c"// Phase 4E: Federation protocol — peer discovery + patch sharing
 #include "../network/oo_federation.h"
 #include "../network/oo_federation.c"// Phase SI: OO Self-Improvement Engine — human-in-the-loop patch pipeline
 #include "../self_improve/oo_self_improve.h"

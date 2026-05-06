@@ -433,7 +433,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     oo_mbedtls_init(ImageHandle, SystemTable);
     llmk_boot_mark(L"mbedtls_init");    // [DIOP] Custom model engine (Phase 4D)
     oo_diop_init(&g_diop);
-    llmk_boot_mark(L"diop_init");    // [Federation] Peer mesh (Phase 4E)
+    llmk_boot_mark(L"diop_init");    // [Growth] Model self-expansion engine (Phase 5F)
+    oo_growth_init(&g_growth);
+    llmk_boot_mark(L"growth_init");    // [NVMe] Bare-metal NVMe driver (Phase 5C)
+    oo_nvme_init(&g_nvme);
+    llmk_boot_mark(L"nvme_init");// [Federation] Peer mesh (Phase 4E)
     oo_fed_init(&g_federation, (const CHAR8*)g_netboot.node_id);
     llmk_boot_mark(L"fed_init");
 
@@ -7318,6 +7322,15 @@ snap_autoload_done:
                 continue;            // ── Phase 4E: Federation commands ───────────────────────────────
             } else if (my_strncmp(prompt, "/fed_", 5) == 0) {
                 oo_fed_repl_cmd(&g_federation, prompt);
+                continue;            // ── Phase 5A: ExitBootServices (full CPU takeover) ─────────────
+            } else if (my_strncmp(prompt, "/ebs_", 5) == 0) {
+                oo_ebs_repl_cmd(&g_oo_boot, prompt, ImageHandle, SystemTable);
+                continue;            // ── Phase 5C: NVMe storage ──────────────────────────────────────
+            } else if (my_strncmp(prompt, "/nvme_", 6) == 0) {
+                oo_nvme_repl_cmd(&g_nvme, prompt);
+                continue;            // ── Phase 5F: Model growth pipeline ─────────────────────────────
+            } else if (my_strncmp(prompt, "/growth_", 8) == 0) {
+                oo_growth_repl_cmd(&g_growth, &g_diop, prompt, g_root);
                 continue;
 
             // ── Phase NB: Network Boot commands ──────────────────────────────
