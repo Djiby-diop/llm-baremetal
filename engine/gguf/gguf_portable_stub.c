@@ -1,4 +1,6 @@
 #include "gguf_portable.h"
+#include "gguf_kquant.h"
+#include "../djiblas/oo_safe_arith.h"
 
 typedef enum {
     GGUF_TYPE_UINT8 = 0,
@@ -23,7 +25,10 @@ typedef enum {
     GGML_TYPE_Q4_1 = 3,
     GGML_TYPE_Q5_0 = 6,
     GGML_TYPE_Q5_1 = 7,
-    GGML_TYPE_Q8_0 = 8
+    GGML_TYPE_Q8_0 = 8,
+    GGML_TYPE_Q4_K = 12,  /* K-quant: 4-bit, block 256, dequant via oo_dequant_q4_k */
+    GGML_TYPE_Q5_K = 13,  /* K-quant: 5-bit, block 256, dequant via oo_dequant_q5_k */
+    GGML_TYPE_Q6_K = 14   /* K-quant: 6-bit, block 256, dequant via oo_dequant_q6_k */
 } ggml_type;
 
 typedef enum {
@@ -176,7 +181,10 @@ static int portable_type_supported_for_llama(uint32_t tensor_type) {
            tensor_type == GGML_TYPE_Q4_1 ||
            tensor_type == GGML_TYPE_Q5_0 ||
            tensor_type == GGML_TYPE_Q5_1 ||
-           tensor_type == GGML_TYPE_Q8_0;
+           tensor_type == GGML_TYPE_Q8_0 ||
+           tensor_type == GGML_TYPE_Q4_K ||
+           tensor_type == GGML_TYPE_Q5_K ||
+           tensor_type == GGML_TYPE_Q6_K;
 }
 
 static void portable_register_tensor_role(

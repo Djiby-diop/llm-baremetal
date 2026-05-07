@@ -1,4 +1,6 @@
 #include "gguf_infer.h"
+#include "gguf_kquant.h"
+#include "../djiblas/oo_safe_arith.h"
 
 // GGUF tensor types (ggml_type)
 // Phase 2: support common quant types by dequantizing to float32 at load.
@@ -10,6 +12,9 @@ typedef enum {
     GGML_TYPE_Q5_0 = 6,
     GGML_TYPE_Q5_1 = 7,
     GGML_TYPE_Q8_0 = 8,
+    GGML_TYPE_Q4_K = 12,  /* K-quant: dequant via oo_dequant_q4_k, block 256 */
+    GGML_TYPE_Q5_K = 13,  /* K-quant: dequant via oo_dequant_q5_k, block 256 */
+    GGML_TYPE_Q6_K = 14,  /* K-quant: dequant via oo_dequant_q6_k, block 256 */
 } ggml_type;
 
 // Quant block sizes (as in llama.cpp ggml-common.h)
@@ -893,7 +898,8 @@ static int llmk_type_supported(UINT32 t) {
     return t == GGML_TYPE_F32 || t == GGML_TYPE_F16 ||
            t == GGML_TYPE_Q4_0 || t == GGML_TYPE_Q4_1 ||
            t == GGML_TYPE_Q5_0 || t == GGML_TYPE_Q5_1 ||
-           t == GGML_TYPE_Q8_0;
+           t == GGML_TYPE_Q8_0 ||
+           t == GGML_TYPE_Q4_K || t == GGML_TYPE_Q5_K || t == GGML_TYPE_Q6_K;
 }
 
 static EFI_STATUS llmk_row_raw_bytes(UINT32 t, UINT64 cols, UINT64 *out_bytes) {
@@ -901,11 +907,11 @@ static EFI_STATUS llmk_row_raw_bytes(UINT32 t, UINT64 cols, UINT64 *out_bytes) {
     *out_bytes = 0;
 
     if (t == GGML_TYPE_F32) {
-        *out_bytes = cols * 4ULL;
+        if (oo_gguf_tensor_bytes(cols, 4u, out_bytes)) return EFI_OUT_OF_RESOURCES;
         return EFI_SUCCESS;
     }
     if (t == GGML_TYPE_F16) {
-        *out_bytes = cols * 2ULL;
+        if (oo_gguf_tensor_bytes(cols, 2u, out_bytes)) return EFI_OUT_OF_RESOURCES;
         return EFI_SUCCESS;
     }
 
@@ -914,23 +920,30 @@ static EFI_STATUS llmk_row_raw_bytes(UINT32 t, UINT64 cols, UINT64 *out_bytes) {
     UINT64 nb = cols / 32ULL;
 
     if (t == GGML_TYPE_Q4_0) {
-        *out_bytes = nb * (UINT64)sizeof(llmk_block_q4_0);
+        if (oo_gguf_tensor_bytes(nb, (UINT32)sizeof(llmk_block_q4_0), out_bytes)) return EFI_OUT_OF_RESOURCES;
         return EFI_SUCCESS;
     }
     if (t == GGML_TYPE_Q4_1) {
-        *out_bytes = nb * (UINT64)sizeof(llmk_block_q4_1);
+        if (oo_gguf_tensor_bytes(nb, (UINT32)sizeof(llmk_block_q4_1), out_bytes)) return EFI_OUT_OF_RESOURCES;
         return EFI_SUCCESS;
     }
     if (t == GGML_TYPE_Q5_0) {
-        *out_bytes = nb * (UINT64)sizeof(llmk_block_q5_0);
+        if (oo_gguf_tensor_bytes(nb, (UINT32)sizeof(llmk_block_q5_0), out_bytes)) return EFI_OUT_OF_RESOURCES;
         return EFI_SUCCESS;
     }
     if (t == GGML_TYPE_Q5_1) {
-        *out_bytes = nb * (UINT64)sizeof(llmk_block_q5_1);
+        if (oo_gguf_tensor_bytes(nb, (UINT32)sizeof(llmk_block_q5_1), out_bytes)) return EFI_OUT_OF_RESOURCES;
         return EFI_SUCCESS;
     }
     if (t == GGML_TYPE_Q8_0) {
-        *out_bytes = nb * (UINT64)sizeof(llmk_block_q8_0);
+        if (oo_gguf_tensor_bytes(nb, (UINT32)sizeof(llmk_block_q8_0), out_bytes)) return EFI_OUT_OF_RESOURCES;
+        return EFI_SUCCESS;
+    }
+
+    // K_* quants: block size 256, cols must be multiple of 256
+    if (t == GGML_TYPE_Q4_K || t == GGML_TYPE_Q5_K || t == GGML_TYPE_Q6_K) {
+        if (cols == 0 || (cols % 256ULL) != 0) return EFI_INCOMPATIBLE_VERSION;
+        if (oo_gguf_kquant_bytes(cols, 256u, oo_kquant_block_bytes((UINT32)t), out_bytes)) return EFI_OUT_OF_RESOURCES;
         return EFI_SUCCESS;
     }
 
@@ -1045,6 +1058,23 @@ static EFI_STATUS llmk_read_row_as_f32(
                 out_f32[bi * 32ULL + (UINT64)j] = (float)x[bi].qs[j] * d;
             }
         }
+        return EFI_SUCCESS;
+    }
+
+    // K_* quants: block size 256
+    if (type == GGML_TYPE_Q4_K) {
+        UINT64 nb256 = cols / 256ULL;
+        oo_dequant_q4_k((const OoQ4KBlock *)raw_buf, (size_t)nb256, out_f32);
+        return EFI_SUCCESS;
+    }
+    if (type == GGML_TYPE_Q5_K) {
+        UINT64 nb256 = cols / 256ULL;
+        oo_dequant_q5_k((const OoQ5KBlock *)raw_buf, (size_t)nb256, out_f32);
+        return EFI_SUCCESS;
+    }
+    if (type == GGML_TYPE_Q6_K) {
+        UINT64 nb256 = cols / 256ULL;
+        oo_dequant_q6_k((const OoQ6KBlock *)raw_buf, (size_t)nb256, out_f32);
         return EFI_SUCCESS;
     }
 

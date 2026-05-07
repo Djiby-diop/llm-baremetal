@@ -42,6 +42,13 @@ Djiby Diop (@Djiby-diop)
   - llama2.c by Andrej Karpathy (MIT) — base transformer inference
   - gnu-efi (BSD) — UEFI application framework
   - ARM optimized-routines (MIT) — expf() math functions
+  - bestline by Justine Tunney (ISC) — REPL line editor with history
+    Source: external/synapticion-line | Adapter: synaption-engine/core/oo_repl_line.h
+  - jtckdint by Justine Tunney (ISC) — C23 checked arithmetic (ckd_add/sub/mul)
+    Source: external/arithmion-safe | Adapter: engine/djiblas/oo_safe_arith.h
+  - K-quant dequantisation math (MIT / Apache-2.0) — Q4_K/Q5_K/Q6_K formulas
+    Adapted from GGUF spec + ggml paper into engine/gguf/gguf_kquant.{h,c}
+    Original: llama.cpp / ggml-org | OO adaptation: Djiby Diop
 
 ## Contributors:
 

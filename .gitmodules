@@ -1,0 +1,18 @@
+[submodule "external/neurion-runtime"]
+	path = external/neurion-runtime
+	url = https://github.com/ggml-org/llama.cpp.git
+[submodule "external/portabilion-core"]
+	path = external/portabilion-core
+	url = https://github.com/jart/cosmopolitan.git
+[submodule "external/bootion-loader"]
+	path = external/bootion-loader
+	url = https://github.com/Limine-Bootloader/Limine.git
+[submodule "external/modelion-packager"]
+	path = external/modelion-packager
+	url = https://github.com/Mozilla-Ocho/llamafile.git
+[submodule "external/synapticion-line"]
+	path = external/synapticion-line
+	url = https://github.com/jart/bestline.git
+[submodule "external/arithmion-safe"]
+	path = external/arithmion-safe
+	url = https://github.com/jart/jtckdint.git

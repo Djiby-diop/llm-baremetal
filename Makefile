@@ -89,7 +89,7 @@ SOMA_OBJS = engine/ssm/soma_router.o engine/ssm/soma_dna.o engine/ssm/soma_dual.
 
 REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	llmk_stubs.o \
-	djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
+	djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o gguf_kquant.o \
 	ssm_infer.o mamba_block.o mamba_weights.o bpe_tokenizer.o \
 	oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o \
 	$(SOMA_OBJS) \
@@ -184,6 +184,9 @@ gguf_loader.o: engine/gguf/gguf_loader.c engine/gguf/gguf_loader.h
 
 gguf_infer.o: engine/gguf/gguf_infer.c engine/gguf/gguf_infer.h
 	$(CC) $(CFLAGS) -c engine/gguf/gguf_infer.c -o gguf_infer.o
+
+gguf_kquant.o: engine/gguf/gguf_kquant.c engine/gguf/gguf_kquant.h
+	$(CC) $(CFLAGS) -c engine/gguf/gguf_kquant.c -o gguf_kquant.o
 
 oo-modules/djibion-engine/core/djibion.o: oo-modules/djibion-engine/core/djibion.c oo-modules/djibion-engine/core/djibion.h
 	$(CC) $(CFLAGS) -c oo-modules/djibion-engine/core/djibion.c -o oo-modules/djibion-engine/core/djibion.o
