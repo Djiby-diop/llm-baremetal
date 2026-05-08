@@ -367,8 +367,14 @@ clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
 	rm -f oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o llmk_oo_infer.o
 	rm -f engine/ssm/core/soma_mind.o
+	@echo "OK: Clean complete (oo-subsystems cache preserved; use 'make clean-all' to also wipe worktree)"
+
+clean-all:
+	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
+	rm -f oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o llmk_oo_infer.o
+	rm -f engine/ssm/core/soma_mind.o
 	rm -rf $(OO_BUILD_DIR)
-	@echo "OK: Clean complete"
+	@echo "OK: Full clean complete"
 
 rebuild: clean all
 

@@ -252,7 +252,9 @@ $bash = @(
 	'set -e'
 	("cd '{0}'" -f $wslRepo)
 	'chmod +x scripts/create-boot-mtools.sh'
+	'chmod +x scripts/make-oo-stubs.sh'
 	'make clean'
+	'./scripts/make-oo-stubs.sh'
 	("make repl METABION_PROFILE='{0}'" -f $MetabionProfile)
 	# Force the EFI payload used by the image builder to be the freshly built one.
 	# Force NO_MODEL explicitly to avoid inheriting from the user's environment.

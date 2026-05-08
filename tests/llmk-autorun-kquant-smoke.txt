@@ -1,0 +1,10 @@
+# llmk autorun - K_* quant smoke test
+# Model is loaded at boot via repl.cfg (no runtime /gguf_load command).
+# This script validates REPL liveness and model-backed OO consult flow.
+
+/help oo_consult
+/cfg
+/oo_status
+/oo_consult
+/oo_log
+/oo_status
