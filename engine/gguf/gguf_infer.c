@@ -195,9 +195,9 @@ static int llmk_str_eq_n(const char *a, const char *b, UINT32 n) {
     return 1;
 }
 
-static int llmk_key_eq(const char *key, UINT32 key_len, const char *lit) {
+static int llmk_key_eq(const char *key, UINTN key_len, const char *lit) {
     if (!key || !lit) return 0;
-    UINT32 i = 0;
+    UINTN i = 0;
     for (; lit[i] && i < key_len; i++) {
         if (key[i] != lit[i]) return 0;
     }
@@ -1226,24 +1226,24 @@ EFI_STATUS llmk_gguf_build_plan(
     }
 
     // KV section
-    // NOTE: GGUF key length is a uint32 (see gguf_loader.c). Only string lengths are uint64.
+    // GGUF v3 stores metadata keys as gguf_string, which uses a u64 length.
     for (UINT64 i = 0; i < n_kv; i++) {
-        UINT32 key_len32 = 0;
-        st = gguf_read_u32(f, &key_len32);
+        UINT64 key_len64 = 0;
+        st = gguf_read_u64(f, &key_len64);
         if (EFI_ERROR(st)) return st;
-        if (key_len32 == 0 || key_len32 > 4096) {
+        if (key_len64 == 0 || key_len64 > 4096) {
             UINT64 pos = 0;
             (void)gguf_get_pos(f, &pos);
             CHAR16 msg[256];
             SPrint(msg, sizeof(msg), L"GGUF: COMPROMISED_DATA: bad key_len=%u at kv[%lu] (pos=%lu)\r\n",
-                   (unsigned)key_len32, i, pos);
+                   (unsigned)key_len64, i, pos);
             llmk_dbg_print_both(msg);
             return EFI_COMPROMISED_DATA;
         }
 
         char key_buf[192];
-        UINT32 keep = key_len32;
-        if (keep > (UINT32)(sizeof(key_buf) - 1)) keep = (UINT32)(sizeof(key_buf) - 1);
+        UINTN keep = (UINTN)key_len64;
+        if (keep > sizeof(key_buf) - 1) keep = sizeof(key_buf) - 1;
 
         if (keep > 0) {
             st = gguf_read_exact(f, key_buf, (UINTN)keep);
@@ -1251,8 +1251,8 @@ EFI_STATUS llmk_gguf_build_plan(
         }
         key_buf[keep] = 0;
 
-        if (key_len32 > keep) {
-            st = gguf_skip(f, (UINT64)(key_len32 - keep));
+        if (key_len64 > keep) {
+            st = gguf_skip(f, key_len64 - (UINT64)keep);
             if (EFI_ERROR(st)) return st;
         }
 
@@ -1366,31 +1366,30 @@ EFI_STATUS llmk_gguf_build_plan(
     int all_supported_types = 1;
 
     for (UINT64 ti = 0; ti < n_tensors; ti++) {
-        // NOTE: GGUF tensor name length is a uint32 (see gguf_loader.c).
-        UINT32 name_len32 = 0;
-        st = gguf_read_u32(f, &name_len32);
+        UINT64 name_len64 = 0;
+        st = gguf_read_u64(f, &name_len64);
         if (EFI_ERROR(st)) { llmk_gguf_free_plan(plan); return st; }
-        if (name_len32 == 0 || name_len32 > 1024U * 1024U) {
+        if (name_len64 == 0 || name_len64 > 1024U * 1024U) {
             UINT64 pos = 0;
             (void)gguf_get_pos(f, &pos);
             CHAR16 msg[320];
             SPrint(msg, sizeof(msg), L"GGUF: COMPROMISED_DATA: bad tensor name_len=%u at tensor[%lu] (pos=%lu)\r\n",
-                   (unsigned)name_len32, ti, pos);
+                   (unsigned)name_len64, ti, pos);
             llmk_dbg_print_both(msg);
             llmk_gguf_free_plan(plan);
             return EFI_COMPROMISED_DATA;
         }
 
         char name_buf[160];
-        UINT32 keep = name_len32;
-        if (keep > (UINT32)(sizeof(name_buf) - 1)) keep = (UINT32)(sizeof(name_buf) - 1);
+        UINTN keep = (UINTN)name_len64;
+        if (keep > sizeof(name_buf) - 1) keep = sizeof(name_buf) - 1;
         if (keep > 0) {
             st = gguf_read_exact(f, name_buf, (UINTN)keep);
             if (EFI_ERROR(st)) { llmk_gguf_free_plan(plan); return st; }
         }
         name_buf[keep] = 0;
-        if (name_len32 > keep) {
-            st = gguf_skip(f, (UINT64)(name_len32 - keep));
+        if (name_len64 > keep) {
+            st = gguf_skip(f, name_len64 - (UINT64)keep);
             if (EFI_ERROR(st)) { llmk_gguf_free_plan(plan); return st; }
         }
 

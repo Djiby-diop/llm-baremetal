@@ -36,6 +36,7 @@ CFLAGS = -ffreestanding -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
 BUILD_ID ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILD_ID := $(BUILD_ID)
 CFLAGS += -DLLMB_BUILD_ID=L\"$(BUILD_ID)\"
+CFLAGS += -DLLMK_SKIP_EXPERIMENTAL_UNITY=1
 
 LDFLAGS = -nostdlib -znocombreloc -T $(EFI_LDS) \
 		  -shared -Bsymbolic -L$(EFI_LIBDIR) $(EFI_CRT0)
@@ -62,10 +63,15 @@ OO_LINK_ARCHIVES = \
 	$(OO_BUILD_DIR)/liboo-bus.a \
 	$(OO_BUILD_DIR)/librust_guard.a
 
-# P1 split build: no god-file object (efi_phases.c inside liboo-kernel.a)
+# P1 split build: build efi_phases/efi_entry locally because cached OO archives
+# may be placeholder stubs during host-only iteration.
 TARGET = llama2.efi
-REPL_SRC = engine/llama2/llama2_efi_final.c
-REPL_OBJ = llama2_repl.o
+EFI_PHASES_SRC = $(OO_WORKTREE)/oo-kernel/boot/efi_phases.c
+EFI_PHASES_OBJ = efi_phases.o
+EFI_ENTRY_SRC = $(OO_WORKTREE)/oo-kernel/boot/efi_entry.c
+EFI_ENTRY_OBJ = efi_entry.o
+OO_STUBS_SRC = core/worktree_archive_stubs.c
+OO_STUBS_OBJ = worktree_archive_stubs.o
 
 # Phase 5 (Zig): metabolism profile selection
 METABION_PROFILE ?= balanced
@@ -123,7 +129,8 @@ REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	oo-modules/pheromion-engine/core/pheromion.o \
 	oo-modules/evolvion-engine/core/evolvion.o \
 	oo-modules/evolvion-engine/core/oo_driver_probe.o \
-	oo-modules/ghost-engine/core/oo_net_packet.o
+	oo-modules/ghost-engine/core/oo_net_packet.o \
+	$(EFI_PHASES_OBJ) $(EFI_ENTRY_OBJ) $(OO_STUBS_OBJ)
 REPL_SO  = llama2_repl.so
 
 all: repl
@@ -161,8 +168,14 @@ $(METABION_PROFILE_HDR): $(METABION_PROFILE_DEFAULT)
 	fi
 
 # Rebuild when key headers change (Make doesn't auto-detect includes).
-$(REPL_OBJ): $(REPL_SRC) engine/djiblas/djiblas.h engine/ssm/interface.h $(METABION_PROFILE_HDR)
-	$(CC) $(CFLAGS) -c $(REPL_SRC) -o $(REPL_OBJ)
+$(EFI_PHASES_OBJ): $(EFI_PHASES_SRC) engine/llama2/llama2_efi_final.c $(METABION_PROFILE_HDR)
+	$(CC) -I$(OO_WORKTREE) $(CFLAGS) -c $(EFI_PHASES_SRC) -o $(EFI_PHASES_OBJ)
+
+$(EFI_ENTRY_OBJ): $(EFI_ENTRY_SRC)
+	$(CC) -I$(OO_WORKTREE) $(CFLAGS) -c $(EFI_ENTRY_SRC) -o $(EFI_ENTRY_OBJ)
+
+$(OO_STUBS_OBJ): $(OO_STUBS_SRC)
+	$(CC) $(CFLAGS) -c $(OO_STUBS_SRC) -o $(OO_STUBS_OBJ)
 
 llmk_zones.o: core/llmk_zones.c core/llmk_zones.h core/llmk_log.h
 	$(CC) $(CFLAGS) -c core/llmk_zones.c -o llmk_zones.o
