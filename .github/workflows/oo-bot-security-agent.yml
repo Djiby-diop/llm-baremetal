@@ -1,0 +1,50 @@
+name: OO Bot Security Agent
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security-agent:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run oo-bot unit tests
+        working-directory: oo-bot
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Run security agent gate
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/logs | Out-Null
+          Push-Location oo-bot
+          python -m oo_prime.cli --root .. --security-agent | Tee-Object -FilePath ../artifacts/logs/oo-bot-security-agent.txt
+          $exitCode = $LASTEXITCODE
+          Pop-Location
+          if ($exitCode -ne 0) {
+            exit $exitCode
+          }
+
+      - name: Upload security artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oo-bot-security-agent-${{ github.sha }}
+          path: |
+            artifacts/logs/oo-bot-security-agent.txt
+          retention-days: 30

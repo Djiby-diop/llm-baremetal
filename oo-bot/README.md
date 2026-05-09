@@ -204,6 +204,18 @@ Enable all strict checks at once:
 python -m oo_prime.cli --root .. --strict-all
 ```
 
+Run publication readiness gate (git clean + public preflight):
+
+```powershell
+python -m oo_prime.cli --root .. --public-ready
+```
+
+Run as security agent mode (alias):
+
+```powershell
+python -m oo_prime.cli --root .. --security-agent
+```
+
 Cooldown and anti-repetition are controlled in `config/policy.json` with:
 
 - `target_cooldown_cycles`

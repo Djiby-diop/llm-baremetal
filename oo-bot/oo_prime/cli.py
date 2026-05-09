@@ -1,10 +1,64 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 from pathlib import Path
 
 from .config import load_policy
 from .engine import run_cycles, write_report
+
+
+def _run_host_command(cmd: list[str], cwd: Path) -> tuple[int, str]:
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return int(proc.returncode), str(proc.stdout)
+    except FileNotFoundError as exc:
+        return 127, f"command not found: {cmd[0]} ({exc})\n"
+
+
+def run_public_ready_gate(root: Path) -> int:
+    status_code, status_out = _run_host_command(["git", "status", "--porcelain"], root)
+    if status_code != 0:
+        print("[ERROR] git status --porcelain failed")
+        print(status_out.strip())
+        return 1
+
+    dirty_rows = [ln for ln in status_out.splitlines() if ln.strip()]
+    if dirty_rows:
+        print(f"[FAIL] Git clean: {len(dirty_rows)} dirty entries")
+    else:
+        print("[PASS] Git clean")
+
+    preflight = root / "scripts" / "public-preflight.ps1"
+    if not preflight.exists():
+        print(f"[ERROR] Missing preflight script: {preflight}")
+        return 1
+
+    shell = "powershell" if os.name == "nt" else "pwsh"
+    pre_code, pre_out = _run_host_command(
+        [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(preflight)],
+        root,
+    )
+    print(pre_out.strip())
+
+    ok = (len(dirty_rows) == 0) and (pre_code == 0)
+    if ok:
+        print("Public-ready gate: PASS")
+        return 0
+
+    print("Public-ready gate: FAIL")
+    print("Actions (FR): commit/stash/supprime les changements puis relance le gate.")
+    print("Actions (EN): commit/stash/discard changes, then rerun the gate.")
+    return 2
 
 
 def parse_action_cooldown_overrides(values: list[str]) -> dict[str, int]:
@@ -193,6 +247,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable all strict checks (simulation gate, apply, risk, health)",
     )
+    parser.add_argument(
+        "--public-ready",
+        action="store_true",
+        help="Run publication readiness gate (git clean + scripts/public-preflight.ps1) and exit",
+    )
+    parser.add_argument(
+        "--security-agent",
+        action="store_true",
+        help="Run security gate mode (alias of --public-ready) and exit",
+    )
     return parser
 
 
@@ -200,6 +264,10 @@ def main() -> int:
     args = build_parser().parse_args()
 
     root = Path(args.root).resolve()
+
+    if bool(args.public_ready) or bool(args.security_agent):
+        return run_public_ready_gate(root)
+
     policy_path = Path(args.policy).resolve()
     output_path = Path(args.output).resolve()
     log_path = Path(args.log).resolve()
