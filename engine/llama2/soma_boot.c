@@ -1,3 +1,5 @@
+#include "../drivers/oo_acpi.h"
+
 #ifndef LLM_SPLIT_EFI_MAIN
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     /* Enable OSXSAVE + YMM state (CR4 bit 18 + XCR0 bits 1:2) so that VZEROUPPER
@@ -67,7 +69,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     /* Novel engines — Phase 2 */
     limbion_init(&g_limbion);
-    chronion_init(&g_chronion, 0, 0);  /* boot_count + dna_generation filled after persist load */
+    chronion_init(&g_chronion, 0, 0, 0);  /* boot_count + dna_generation filled after persist load */
     trophion_init(&g_trophion);
     mirrorion_init(&g_mirrorion);
     thanatosion_init(&g_thanatosion, NULL);  /* g_root not yet open; rebind after volume open */
@@ -433,10 +435,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     oo_mbedtls_init(ImageHandle, SystemTable);
     llmk_boot_mark(L"mbedtls_init");    // [DIOP] Custom model engine (Phase 4D)
     oo_diop_init(&g_diop);
+#ifndef LLMK_SKIP_EXPERIMENTAL_UNITY
     llmk_boot_mark(L"diop_init");    // [Growth] Model self-expansion engine (Phase 5F)
     oo_growth_init(&g_growth);
     llmk_boot_mark(L"growth_init");    // [NVMe] Bare-metal NVMe driver (Phase 5C)
     oo_nvme_init(&g_nvme);
+#endif
     llmk_boot_mark(L"nvme_init");// [Federation] Peer mesh (Phase 4E)
     oo_fed_init(&g_federation, (const CHAR8*)g_netboot.node_id);
     llmk_boot_mark(L"fed_init");
@@ -473,7 +477,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 (_pd->device_id == 0x2668 ||   /* QEMU HDA */
                  _pd->device_id == 0x1C20 ||   /* Intel 6-series */
                  _pd->device_id == 0x8C20)) {  /* Intel 8-series */
-                hda_bdf = (uint32_t)((_pd->bus << 8) | (_pd->device << 3) | _pd->func);
+                hda_bdf = (uint32_t)((_pd->bus << 8) | (_pd->dev << 3) | _pd->fn);
                 break;
             }
         }
@@ -1755,6 +1759,7 @@ gguf_fallback_done:
     // Phase Q: Apply DNA-driven sampler bias (after config/profile, before autotune).
     // Soft blend: 80% config + 20% DNA. Warden pressure reduces temperature further.
     if (g_soma_initialized && g_soma_dna.generation > 0) {
+        int soma_domain_used = SOMA_DOMAIN_CHAT;
         temperature = soma_dna_blend_temperature(&g_soma_dna, soma_domain_used, temperature);
         top_p       = soma_dna_blend_top_p     (&g_soma_dna, soma_domain_used, top_p);
         temperature = soma_dna_pressure_temperature(temperature, g_soma_warden.pressure_level);
@@ -4361,10 +4366,10 @@ snap_autoload_done:
                     char lbuf[64]; limbion_format_context(&g_limbion, lbuf, sizeof(lbuf));
                     Print(L"  limbion    %a\r\n", lbuf);
                 }
-                Print(L"  chronion   boot=%u steps=%lu tokens=%lu\r\n",
-                      (unsigned)g_chronion.boot_count,
-                      (unsigned long)g_chronion.steps_this_boot,
-                      (unsigned long)g_chronion.tokens_lifetime);
+                    Print(L"  chronion   boot=%u steps=%lu tokens=%lu\r\n",
+                        (unsigned)g_chronion.epoch.boot_count,
+                        (unsigned long)g_chronion.epoch.steps_this_boot,
+                        (unsigned long)g_chronion.epoch.tokens_lifetime);
                 {
                     const char *tstate[] = {"starved","hungry","satiated","gorged"};
                     unsigned ts = (unsigned)g_trophion.state;
@@ -7326,13 +7331,16 @@ snap_autoload_done:
             } else if (my_strncmp(prompt, "/ebs_", 5) == 0) {
                 oo_ebs_repl_cmd(&g_oo_boot, prompt, ImageHandle, SystemTable);
                 continue;            // ── Phase 5C: NVMe storage ──────────────────────────────────────
-            } else if (my_strncmp(prompt, "/nvme_", 6) == 0) {
+            }
+#ifndef LLMK_SKIP_EXPERIMENTAL_UNITY
+            else if (my_strncmp(prompt, "/nvme", 5) == 0) {
                 oo_nvme_repl_cmd(&g_nvme, prompt);
                 continue;            // ── Phase 5F: Model growth pipeline ─────────────────────────────
             } else if (my_strncmp(prompt, "/growth_", 8) == 0) {
                 oo_growth_repl_cmd(&g_growth, &g_diop, prompt, g_root);
                 continue;
 
+#endif
             // ── Phase NB: Network Boot commands ──────────────────────────────
             } else if (my_strncmp(prompt, "/net_pull ", 10) == 0) {
                 const char *url = prompt + 10;

@@ -180,7 +180,7 @@ EFI_STATUS oo_growth_find_candidates(OoModelGrowth *g,
     }
 
     /* Also ask oracle for recommendations */
-    if (g_netboot.initialized) {
+    if (g_netboot.state != OO_NB_UNINIT && g_netboot.state != OO_NB_ERROR) {
         static CHAR8 prompt[256];
         UINTN pp = 0;
         const CHAR8 *pre = (const CHAR8*)

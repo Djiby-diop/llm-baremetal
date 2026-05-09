@@ -247,14 +247,17 @@ static void _oo_panic(UINT32 vector, UINT64 error_code) {
     while(1) __asm__ volatile("hlt");
 }
 
+/* GCC rejects interrupt handlers that may touch SIMD registers. */
+#define OO_ISR_ATTR __attribute__((interrupt, target("general-regs-only")))
+
 /* Exception stubs — generated via macro to keep it compact */
 #define DEFINE_EXC_NOERR(vec) \
-__attribute__((interrupt)) \
+OO_ISR_ATTR \
 static void _exc_##vec(struct __attribute__((packed)){UINT64 ip,cs,fl,sp,ss;} *f) { \
     (void)f; _oo_panic(vec, 0); }
 
 #define DEFINE_EXC_ERR(vec) \
-__attribute__((interrupt)) \
+OO_ISR_ATTR \
 static void _exc_##vec(struct __attribute__((packed)){UINT64 ip,cs,fl,sp,ss;} *f, UINT64 err) { \
     (void)f; _oo_panic(vec, err); }
 
@@ -278,7 +281,7 @@ DEFINE_EXC_NOERR(18)  /* #MC */
 DEFINE_EXC_NOERR(19)  /* #XF */
 
 /* LAPIC timer stub (will be replaced by scheduler in Phase 5E) */
-__attribute__((interrupt))
+OO_ISR_ATTR
 static void _lapic_timer_stub(struct __attribute__((packed)){
     UINT64 ip,cs,fl,sp,ss;} *f) {
     (void)f;
@@ -287,7 +290,7 @@ static void _lapic_timer_stub(struct __attribute__((packed)){
     *lapic_eoi = 0;
 }
 
-__attribute__((interrupt))
+OO_ISR_ATTR
 static void _spurious_stub(struct __attribute__((packed)){
     UINT64 ip,cs,fl,sp,ss;} *f) { (void)f; }
 

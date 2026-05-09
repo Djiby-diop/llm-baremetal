@@ -1,7 +1,18 @@
-﻿/* orchestrion_ci types needed at file scope for orchestrion_ci.c unity inclusion */
+/* orchestrion_ci types needed at file scope for orchestrion_ci.c unity inclusion */
 #include "orchestrion_ci.h"
 
 static OrchestrionCI g_ci;
+
+static void llmk_repl_no_model_loop(void);
+
+void llmk_repl(EFI_SYSTEM_TABLE *SystemTable, EFI_BOOT_SERVICES *BootServices,
+               EFI_FILE_HANDLE Root, EFI_HANDLE ImageHandle) {
+    (void)SystemTable;
+    (void)BootServices;
+    (void)Root;
+    (void)ImageHandle;
+    llmk_repl_no_model_loop();
+}
 
 static void llmk_repl_no_model_loop(void) {
     // Minimal repl.cfg parsing for autorun in no-model mode.
