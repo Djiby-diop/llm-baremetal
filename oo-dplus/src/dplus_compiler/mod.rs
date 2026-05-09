@@ -10,6 +10,7 @@ pub mod vm;
 pub mod executor;
 pub mod state_machine;
 pub mod auto_heal;
+pub mod polyglot;
 
 pub use lexer::Lexer;
 pub use parser::Parser;
@@ -18,6 +19,7 @@ pub use bytecode::*;
 pub use compiler::Compiler;
 pub use state_machine::*;
 pub use auto_heal::*;
+pub use polyglot::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompileError {
