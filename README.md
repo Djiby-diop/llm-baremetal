@@ -7,6 +7,15 @@ Part of the [Operating Organism](https://github.com/Djiby-diop/oo-system) ecosys
 
 By Djiby Diop
 
+## Public release readiness
+
+Before making this repository public, run the documented release gates:
+
+- Playbook (EN + FR): [docs/PUBLIC_RELEASE_PLAYBOOK.md](docs/PUBLIC_RELEASE_PLAYBOOK.md)
+- Third-party license audit template: [docs/THIRD_PARTY_LICENSE_AUDIT.md](docs/THIRD_PARTY_LICENSE_AUDIT.md)
+- Translation policy (EN + FR + others): [docs/TRANSLATIONS.md](docs/TRANSLATIONS.md)
+- Automated preflight script: `./scripts/public-preflight.ps1`
+
 ## Architectural role
 
 `llm-baremetal` is the **sovereign runtime** of the larger Operating Organism vision.
