@@ -10,6 +10,8 @@ pub mod sentinel;
 pub mod soma;
 pub mod types;
 pub mod warden;
+#[cfg(feature = "std")]
+pub mod dplus_compiler;
 
 pub use types::{Access, CapHandle, CellId, MemIntent, Rights, Zone};
 pub use warden::{CapMeta, MemError, MemoryWarden, WardenSnapshot};

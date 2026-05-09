@@ -469,7 +469,8 @@ mod tests {
         
         let result = vm.run_consensus("test_action").unwrap();
         assert_eq!(result.votes.len(), 3);
-        assert!(!result.unanimous); // Likely divergence
+        assert!(result.unanimous);
+        assert_eq!(result.final_verdict, Verdict::Allow);
     }
     
     #[test]

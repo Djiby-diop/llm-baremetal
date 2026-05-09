@@ -8,12 +8,16 @@ pub mod bytecode;
 pub mod compiler;
 pub mod vm;
 pub mod executor;
+pub mod state_machine;
+pub mod auto_heal;
 
 pub use lexer::Lexer;
 pub use parser::Parser;
 pub use ast::*;
 pub use bytecode::*;
 pub use compiler::Compiler;
+pub use state_machine::*;
+pub use auto_heal::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompileError {

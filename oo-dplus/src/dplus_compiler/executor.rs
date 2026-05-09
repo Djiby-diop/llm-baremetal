@@ -3,6 +3,8 @@
 
 use super::vm::*;
 use super::bytecode::*;
+use super::state_machine::{RuntimeEvent, RuntimeEventKind, RuntimeState, StateMachine};
+use super::auto_heal::{AutoHealer, HealingPatch};
 use super::CompileError;
 use std::collections::HashMap;
 
@@ -12,6 +14,9 @@ pub struct PolicyExecutor {
     policy_name: String,
     action_counter: u64,
     divergence_log: Vec<DivergenceEvent>,
+    state_machine: StateMachine,
+    auto_healer: AutoHealer,
+    recent_events: Vec<RuntimeEvent>,
 }
 
 /// Divergence event (when judges disagree)
@@ -41,6 +46,9 @@ impl PolicyExecutor {
             policy_name,
             action_counter: 0,
             divergence_log: Vec::new(),
+            state_machine: StateMachine::new(RuntimeState::Idle),
+            auto_healer: AutoHealer::new(),
+            recent_events: Vec::new(),
         })
     }
     
@@ -69,6 +77,10 @@ impl PolicyExecutor {
                 error: Some(e.to_string()),
             });
         }
+
+        // Drive to NORMAL once runtime metrics are sane.
+        self.push_event(RuntimeEventKind::MetricsGreen, 1.0, "startup");
+        self.process_events();
         
         // Phase 2: Consensus voting
         let consensus_result = match self.vm.run_consensus(action_id) {
@@ -93,7 +105,11 @@ impl PolicyExecutor {
         // Phase 3: Divergence handling
         if consensus_result.divergence {
             self.handle_divergence(action_id, &consensus_result);
+            self.push_event(RuntimeEventKind::DivergenceDetected, 1.0, action_id);
         }
+
+        self.detect_resource_events();
+        self.process_events();
         
         // Phase 4: Action execution (if allowed)
         let success = if consensus_result.final_verdict.is_allowed() {
@@ -110,6 +126,11 @@ impl PolicyExecutor {
         
         // Phase 6: Health check
         self.update_health(&consensus_result);
+
+        if self.get_context().health < 0.30 {
+            self.push_event(RuntimeEventKind::HealthDrop, self.get_context().health, action_id);
+            self.process_events();
+        }
         
         Ok(ExecutionResult {
             action_id: action_id.to_string(),
@@ -123,6 +144,8 @@ impl PolicyExecutor {
     
     fn pre_execution_checks(&self) -> Result<(), CompileError> {
         let ctx = self.vm.get_context();
+
+        self.state_machine.ensure_viable()?;
         
         // Check CPU budget
         if ctx.cpu_remaining < 1000 {
@@ -168,6 +191,12 @@ impl PolicyExecutor {
         };
         
         self.divergence_log.push(event);
+
+        // Learn a better patch proposal when divergence pattern is known.
+        self.auto_healer.learn_patch(
+            RuntimeEventKind::DivergenceDetected,
+            format!("patch:{}:tighten_consensus_threshold", action_id),
+        );
     }
     
     fn update_health(&mut self, consensus: &ConsensusResult) {
@@ -207,17 +236,79 @@ impl PolicyExecutor {
     pub fn get_context(&self) -> &ExecutionContext {
         self.vm.get_context()
     }
+
+    pub fn get_state(&self) -> RuntimeState {
+        self.state_machine.current()
+    }
+
+    pub fn get_recent_events(&self) -> &[RuntimeEvent] {
+        &self.recent_events
+    }
+
+    pub fn get_healing_history(&self) -> &[HealingPatch] {
+        self.auto_healer.history()
+    }
+
+    fn push_event(&mut self, kind: RuntimeEventKind, value: f32, source: &str) {
+        self.recent_events.push(RuntimeEvent {
+            kind,
+            value,
+            source: source.to_string(),
+        });
+    }
+
+    fn detect_resource_events(&mut self) {
+        let ctx = self.vm.get_context();
+        let cpu_ratio = if ctx.cpu_budget == 0 {
+            0.0
+        } else {
+            1.0 - (ctx.cpu_remaining as f32 / ctx.cpu_budget as f32)
+        };
+
+        let mem_ratio = if ctx.memory_quota == 0 {
+            0.0
+        } else {
+            ctx.memory_used as f32 / ctx.memory_quota as f32
+        };
+
+        if cpu_ratio > 0.85 {
+            self.push_event(RuntimeEventKind::CpuSpike, cpu_ratio, "resource_monitor");
+        }
+        if mem_ratio > 0.85 {
+            self.push_event(RuntimeEventKind::MemoryPressure, mem_ratio, "resource_monitor");
+        }
+        if cpu_ratio < 0.35 && mem_ratio < 0.60 {
+            self.push_event(RuntimeEventKind::LatencyReduced, cpu_ratio, "resource_monitor");
+            self.push_event(RuntimeEventKind::MetricsGreen, 1.0, "resource_monitor");
+        }
+    }
+
+    fn process_events(&mut self) {
+        if self.recent_events.is_empty() {
+            return;
+        }
+
+        let events = std::mem::take(&mut self.recent_events);
+        for event in &events {
+            self.state_machine.apply_event(event);
+            let _ = self.auto_healer.apply_patch(event.kind, self.vm.get_context_mut());
+        }
+
+        // Keep a compact rolling event window.
+        let keep = events.into_iter().rev().take(32).collect::<Vec<_>>();
+        self.recent_events = keep.into_iter().rev().collect();
+    }
     
     pub fn get_stats(&self) -> ExecutorStats {
         let journal = self.vm.get_journal();
         let ctx = self.vm.get_context();
         
-        let verdicts: HashMap<&str, usize> = journal
+        let verdicts: HashMap<String, usize> = journal
             .entries()
             .iter()
             .fold(HashMap::new(), |mut acc, entry| {
                 let key = format!("{:?}", entry.verdict);
-                let counter = acc.entry(&key).or_insert(0);
+                let counter = acc.entry(key).or_insert(0);
                 *counter += 1;
                 acc
             });
@@ -311,5 +402,15 @@ mod tests {
         let stats = executor.get_stats();
         assert_eq!(stats.actions_executed, 0);
         assert_eq!(stats.divergences_detected, 0);
+    }
+
+    #[test]
+    fn test_state_machine_reacts_to_events() {
+        let module = BytecodeModule::new("test");
+        let mut executor = PolicyExecutor::new("Test".to_string(), &module).unwrap();
+
+        executor.push_event(RuntimeEventKind::MetricsGreen, 1.0, "test");
+        executor.process_events();
+        assert_eq!(executor.get_state(), RuntimeState::Normal);
     }
 }

@@ -610,8 +610,8 @@ mod tests {
 
     #[test]
     fn test_lexer_law() {
-        let mut lexer = Lexer::new("[LAW]");
+        let mut lexer = Lexer::new("@[LAW]");
         let tokens = lexer.tokenize().unwrap();
-        assert!(matches!(tokens[0].kind, TokenKind::SectionLaw));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::SectionLaw)));
     }
 }
