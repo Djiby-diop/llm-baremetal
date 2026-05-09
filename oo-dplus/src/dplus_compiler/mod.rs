@@ -6,6 +6,8 @@ pub mod parser;
 pub mod ast;
 pub mod bytecode;
 pub mod compiler;
+pub mod vm;
+pub mod executor;
 
 pub use lexer::Lexer;
 pub use parser::Parser;
