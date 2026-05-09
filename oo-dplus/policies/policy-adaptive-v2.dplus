@@ -1,0 +1,135 @@
+# D+ v2 Example: Adaptive OO Policy
+
+[GENOME]
+  hash: "sha256_adaptive_001"
+  version: "2.0.0"
+  author: "oo_core"
+  locked: "true"
+
+[RIGHTS]
+  right.compute = permit any if cpu_budget_remaining > 0
+  right.allocate = permit any if memory_quota > 0 and zone != frozen
+  right.observe = permit auditors and self
+  right.network = forbid unless in_approved_mode
+  right.create_cap = forbid
+
+[DUTIES]
+  duty.immutable_frozen = require always
+  duty.log_all_actions = require always
+  duty.heal_divergence = require in_adaptive_mode
+  duty.respect_consensus = require always
+
+[VERDICTS]
+  v0.ALLOW
+  v1.ALLOW_WARN
+  v2.DEFER
+  v3.THROTTLE
+  v4.MONITOR
+  v5.QUARANTINE
+  v6.COMPENSATE
+  v7.FORBID
+  v8.EMERGENCY
+
+[LAW]
+  # Core memory allocation rules
+  can_allocate(BYTES, TTL, ZONE) :-
+    bytes <= quota_remaining,
+    ttl <= max_ttl_ms,
+    zone \= frozen,
+    zone \= sentinel.
+
+  # CPU budget rules
+  can_compute(TOKENS, PRIORITY) :-
+    tokens <= cpu_budget_remaining,
+    priority >= min_priority,
+    \+ cpu_overheating.
+
+  # Network access (restricted)
+  can_network(TARGET, PROTOCOL) :-
+    approved_targets(TARGET),
+    approved_protocols(PROTOCOL),
+    in_normal_mode.
+
+  # Observer access
+  can_observe(OBSERVER, RESOURCE) :-
+    has_capability(OBSERVER, observe),
+    is_public(RESOURCE) || is_owner(OBSERVER, RESOURCE).
+
+[PROOF]
+  # Memory safety invariants
+  invariant: ∀ allocation, ∃ deallocation_time
+  invariant: frozen_zone ⟹ no_write ∧ immutable
+  invariant: quarantine ⟹ no_network ∧ limited_io
+  
+  # Consensus invariants
+  invariant: ∀ action_requiring_consensus, verdicts_from_all_judges_present
+  invariant: divergence ⟹ escalate_to_human
+  
+  # Mode invariants
+  invariant: emergency ⟹ all_async_threads_suspended
+  invariant: recovery ⟹ self_healing_enabled
+
+[JUDGE]
+  pub fn judge(action: &Action) -> Verdict {
+    // Check against laws
+    if !self.evaluate_law(action) {
+      return Verdict::Forbid;
+    }
+    
+    // Check invariants (proofs)
+    if !self.verify_proof(action) {
+      return Verdict::Quarantine;
+    }
+    
+    // Consensus mode: ask all judges
+    if self.consensus_enabled {
+      let votes = self.consensus.vote(action);
+      if votes.unanimous() {
+        return Verdict::Allow;
+      } else if votes.majority_forbid() {
+        return Verdict::Forbid;
+      } else {
+        return Verdict::Defer; // escalate to human
+      }
+    }
+    
+    // Default: allow
+    Verdict::Allow
+  }
+
+[HEAL]
+  // Auto-healing when divergence detected
+  pub fn heal_divergence(expected: &State, actual: &State) {
+    let diff = expected.diff(actual);
+    
+    if diff.magnitude() > THRESHOLD_MAJOR {
+      self.log_critical(diff.clone());
+      self.propose_patch(diff.clone());
+      
+      // If patch is good, apply it
+      if diff.merit() > 0.7 {
+        self.apply_patch(diff);
+        self.increment_heals();
+      } else {
+        // Otherwise escalate
+        self.escalate_to_human(diff);
+      }
+    } else if diff.magnitude() > THRESHOLD_MINOR {
+      self.log_warning(diff);
+      // Monitor for pattern
+    }
+  }
+
+[EMERGENCY]
+  pub fn handle_emergency() {
+    // When health < threshold
+    self.mode = Mode::Safe;
+    self.suspend_all_async();
+    self.write_journal(self.state.clone());
+    self.broadcast_alert_to_human();
+    
+    // Rollback to last safe checkpoint
+    if let Some(checkpoint) = self.last_safe_checkpoint() {
+      self.load_checkpoint(checkpoint);
+    }
+  }
