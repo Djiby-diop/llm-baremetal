@@ -75,6 +75,7 @@ pub enum TokenKind {
     SectionJudge,
     SectionHeal,
     SectionEmergency,
+    SectionLang,
 
     // Special
     Eof,
@@ -239,6 +240,7 @@ impl Lexer {
             "JUDGE" => Some(TokenKind::SectionJudge),
             "HEAL" => Some(TokenKind::SectionHeal),
             "EMERGENCY" => Some(TokenKind::SectionEmergency),
+            "LANG" => Some(TokenKind::SectionLang),
             _ => None,
         }
     }
@@ -613,5 +615,12 @@ mod tests {
         let mut lexer = Lexer::new("@[LAW]");
         let tokens = lexer.tokenize().unwrap();
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::SectionLaw)));
+    }
+
+    #[test]
+    fn test_lexer_lang_section() {
+        let mut lexer = Lexer::new("@[LANG] python { print('ok'); }");
+        let tokens = lexer.tokenize().unwrap();
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::SectionLang)));
     }
 }

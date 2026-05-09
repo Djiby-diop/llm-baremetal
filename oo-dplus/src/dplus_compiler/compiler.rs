@@ -55,6 +55,10 @@ impl Compiler {
                 Section::Emergency { body } => {
                     self.compile_emergency(body)?;
                 }
+                Section::Polyglot { block: _ } => {
+                    // Phase 4 foundation: parser accepts polyglot blocks.
+                    // Backend codegen for each foreign language will be added in next step.
+                }
             }
         }
 

@@ -2,6 +2,7 @@
 //! D+ AST (Abstract Syntax Tree)
 
 use std::collections::HashMap;
+use super::polyglot::ForeignBlock;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -127,6 +128,9 @@ pub enum Section {
     },
     Emergency {
         body: String, // Rust code block
+    },
+    Polyglot {
+        block: ForeignBlock,
     },
 }
 
