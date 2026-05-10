@@ -2,6 +2,7 @@
 //! D++ Bytecode Virtual Machine - Stack-based executor with consensus
 
 use super::bytecode::*;
+use super::polyglot::{EmbeddedLanguage, ForeignBlock};
 use super::CompileError;
 use std::collections::HashMap;
 
@@ -124,6 +125,9 @@ pub struct DppVM {
     
     /// Function table
     functions: HashMap<String, BytecodeFunction>,
+
+    /// Embedded foreign code blocks captured at compile time
+    foreign_blocks: Vec<ForeignBlock>,
     
     /// Execution context (quotas, zones, state)
     context: ExecutionContext,
@@ -204,6 +208,7 @@ impl DppVM {
             locals: Vec::with_capacity(256),
             bytecode: Vec::new(),
             functions: module.functions.clone(),
+            foreign_blocks: module.foreign_blocks.clone(),
             context: ExecutionContext {
                 cpu_budget: 1_000_000,
                 cpu_remaining: 1_000_000,
@@ -339,8 +344,71 @@ impl DppVM {
         // Returns true if all invariants hold
         Ok(true)
     }
+
+    fn evaluate_foreign_runtime_policy(&self) -> (Verdict, String) {
+        if self.foreign_blocks.is_empty() {
+            return (Verdict::Allow, "No embedded foreign blocks".into());
+        }
+
+        let mut has_python = false;
+        for block in &self.foreign_blocks {
+            match block.language {
+                EmbeddedLanguage::Prolog => {
+                    // Prolog blocks are accepted by default in this phase.
+                }
+                EmbeddedLanguage::Python => {
+                    has_python = true;
+                }
+                EmbeddedLanguage::Rust
+                | EmbeddedLanguage::CudaKernel
+                | EmbeddedLanguage::OpenClKernel
+                | EmbeddedLanguage::AsmX86_64 => {
+                    return (
+                        Verdict::Forbid,
+                        format!(
+                            "Embedded {} block has no runtime backend yet",
+                            block.language.as_str()
+                        ),
+                    )
+                }
+            }
+        }
+
+        if has_python {
+            (
+                Verdict::Throttle,
+                "Python block accepted in constrained mode".into(),
+            )
+        } else {
+            (
+                Verdict::Allow,
+                "Embedded blocks are runtime-compatible".into(),
+            )
+        }
+    }
     
     pub fn run_consensus(&mut self, _action_id: &str) -> Result<ConsensusResult, CompileError> {
+        let (foreign_policy_verdict, foreign_policy_reason) = self.evaluate_foreign_runtime_policy();
+        if foreign_policy_verdict == Verdict::Forbid {
+            return Ok(ConsensusResult::new(vec![
+                Vote {
+                    judge: JudgeType::Law,
+                    verdict: Verdict::Forbid,
+                    reasoning: foreign_policy_reason.clone(),
+                },
+                Vote {
+                    judge: JudgeType::Proof,
+                    verdict: Verdict::Forbid,
+                    reasoning: foreign_policy_reason.clone(),
+                },
+                Vote {
+                    judge: JudgeType::Cortex,
+                    verdict: Verdict::Forbid,
+                    reasoning: foreign_policy_reason,
+                },
+            ]));
+        }
+
         let mut votes = Vec::new();
         
         // Judge 1: Law evaluator
@@ -368,15 +436,20 @@ impl DppVM {
         });
         
         // Judge 3: Cortex heuristic
-        let cortex_verdict = if self.context.thermal_state < 80 {
+        let thermal_verdict = if self.context.thermal_state < 80 {
             Verdict::Allow
         } else {
             Verdict::Throttle
         };
+        let cortex_verdict = if thermal_verdict.severity() >= foreign_policy_verdict.severity() {
+            thermal_verdict
+        } else {
+            foreign_policy_verdict
+        };
         votes.push(Vote {
             judge: JudgeType::Cortex,
             verdict: cortex_verdict,
-            reasoning: "Heuristic analysis".into(),
+            reasoning: format!("Heuristic analysis; {}", foreign_policy_reason),
         });
         
         Ok(ConsensusResult::new(votes))
@@ -482,5 +555,36 @@ mod tests {
         assert!(result.is_ok());
         
         assert_eq!(vm.context.memory_used, 1024);
+    }
+
+    #[test]
+    fn test_consensus_python_foreign_block_is_constrained() {
+        let mut module = BytecodeModule::new("main");
+        module
+            .add_foreign_block(ForeignBlock::new(EmbeddedLanguage::Python, "print('hello')").unwrap());
+
+        let mut vm = DppVM::new(&module).unwrap();
+        let result = vm.run_consensus("python_action").unwrap();
+
+        assert_eq!(result.final_verdict, Verdict::AllowWarn);
+        assert!(result.divergence);
+    }
+
+    #[test]
+    fn test_consensus_rust_foreign_block_is_forbidden() {
+        let mut module = BytecodeModule::new("main");
+        module.add_foreign_block(
+            ForeignBlock::new(EmbeddedLanguage::Rust, "fn run() {} ").unwrap(),
+        );
+
+        let mut vm = DppVM::new(&module).unwrap();
+        let result = vm.run_consensus("rust_action").unwrap();
+
+        assert_eq!(result.final_verdict, Verdict::Forbid);
+        assert!(result.unanimous);
+        assert!(result
+            .votes
+            .iter()
+            .all(|v| v.verdict == Verdict::Forbid));
     }
 }
