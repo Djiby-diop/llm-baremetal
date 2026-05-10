@@ -11,14 +11,31 @@ struct Options {
     runs: usize,
     action_filter: Option<String>,
     verdict_filter: Option<Verdict>,
+    json_output: bool,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: dplus_audit <policy.dplus> [--runs N] [--action-filter ID] [--verdict-filter VERDICT]"
+        "usage: dplus_audit <policy.dplus> [--runs N] [--action-filter ID] [--verdict-filter VERDICT] [--json]"
     );
     eprintln!("verdict values: allow|allowwarn|defer|throttle|monitor|quarantine|compensate|forbid|emergency");
     std::process::exit(2);
+}
+
+fn escape_json(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 8);
+    for ch in raw.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn parse_verdict(raw: &str) -> Option<Verdict> {
@@ -43,6 +60,7 @@ fn parse_options() -> Options {
     let mut runs = 3usize;
     let mut action_filter = None;
     let mut verdict_filter = None;
+    let mut json_output = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -63,6 +81,9 @@ fn parse_options() -> Options {
                     usage();
                 });
             }
+            "--json" => {
+                json_output = true;
+            }
             "-h" | "--help" => usage(),
             _ => {
                 eprintln!("unknown argument: {}", arg);
@@ -76,6 +97,7 @@ fn parse_options() -> Options {
         runs,
         action_filter,
         verdict_filter,
+        json_output,
     }
 }
 
@@ -123,11 +145,32 @@ fn main() {
         executor.get_journal().entries().iter().collect()
     };
 
-    println!("policy={} runs={} matched_entries={}", opts.path, opts.runs, entries.len());
-    for entry in entries {
-        println!(
-            "action={} verdict={:?} zone={:?} reason={}",
-            entry.action_id, entry.verdict, entry.zone, entry.reasoning
-        );
+    if opts.json_output {
+        println!("{{");
+        println!("  \"policy\": \"{}\",", escape_json(&opts.path));
+        println!("  \"runs\": {},", opts.runs);
+        println!("  \"matched_entries\": {},", entries.len());
+        println!("  \"entries\": [");
+        for (idx, entry) in entries.iter().enumerate() {
+            let comma = if idx + 1 < entries.len() { "," } else { "" };
+            println!(
+                "    {{\"action\":\"{}\",\"verdict\":\"{:?}\",\"zone\":\"{:?}\",\"reason\":\"{}\"}}{}",
+                escape_json(&entry.action_id),
+                entry.verdict,
+                entry.zone,
+                escape_json(&entry.reasoning),
+                comma
+            );
+        }
+        println!("  ]");
+        println!("}}");
+    } else {
+        println!("policy={} runs={} matched_entries={}", opts.path, opts.runs, entries.len());
+        for entry in entries {
+            println!(
+                "action={} verdict={:?} zone={:?} reason={}",
+                entry.action_id, entry.verdict, entry.zone, entry.reasoning
+            );
+        }
     }
 }
