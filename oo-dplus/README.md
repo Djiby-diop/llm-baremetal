@@ -57,6 +57,7 @@ the CLI tools:
 cargo test
 cargo run --features std --bin dplus_check -- policy-strict.dplus
 cargo run --features std --bin dplus_judge -- policy-strict.dplus
+cargo run --features std --bin dplus_audit -- policy-strict.dplus --summary
 pwsh ./test-smoke.ps1
 pwsh ./test-smoke.ps1 -Configuration release
 ```
@@ -69,6 +70,8 @@ Notes:
 - `test-smoke.ps1` accepts `-Configuration debug|release`, `-SkipBuild`,
 	`-PositivePolicy`, and `-NegativePolicy` so the same script can validate
 	custom policy files without editing the repo script.
+
+See the full CLI usage guide at [DPLUS_AUDIT_CLI.md](DPLUS_AUDIT_CLI.md).
 
 ## Related
 
