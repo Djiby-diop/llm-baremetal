@@ -56,12 +56,41 @@ impl ForeignBlock {
         Ok(block)
     }
 
+    fn contains_forbidden_fragment(lowered: &str) -> Option<&'static str> {
+        const FORBIDDEN_FRAGMENTS: [&str; 10] = [
+            "import os",
+            "os.system",
+            "subprocess",
+            "__import__",
+            "eval(",
+            "exec(",
+            "std::process",
+            "command::new(",
+            "socket",
+            "syscall",
+        ];
+
+        FORBIDDEN_FRAGMENTS
+            .iter()
+            .find(|fragment| lowered.contains(**fragment))
+            .copied()
+    }
+
     pub fn validate(&self) -> Result<(), CompileError> {
         let trimmed = self.code.trim();
         if trimmed.is_empty() {
             return Err(CompileError::ParseError(format!(
                 "empty foreign code block for {}",
                 self.language.as_str()
+            )));
+        }
+
+        let lowered = trimmed.to_ascii_lowercase();
+        if let Some(fragment) = Self::contains_forbidden_fragment(&lowered) {
+            return Err(CompileError::TypeError(format!(
+                "foreign block for {} contains forbidden fragment: {}",
+                self.language.as_str(),
+                fragment
             )));
         }
 
@@ -108,5 +137,14 @@ mod tests {
     fn accepts_valid_block() {
         let ok = ForeignBlock::new(EmbeddedLanguage::Prolog, "can_allocate(X) :- X > 0.");
         assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn rejects_obvious_escape_hatch() {
+        let err = ForeignBlock::new(
+            EmbeddedLanguage::Python,
+            "import os\nos.system('id')",
+        );
+        assert!(err.is_err());
     }
 }
