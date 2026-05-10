@@ -97,98 +97,179 @@ impl BytecodeModule {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        // Minimal text format focused on preserving foreign blocks.
+        // Compact binary format (DPP2), preserving foreign blocks.
         // Functions are still not serialized in this phase.
-        let mut out = String::new();
-        out.push_str("DPP1\n");
-        out.push_str("entrypoint:");
-        out.push_str(&self.entrypoint);
-        out.push('\n');
-        out.push_str("foreign_blocks:");
-        out.push_str(&self.foreign_blocks.len().to_string());
-        out.push('\n');
+        let mut out = Vec::new();
+        out.extend_from_slice(b"DPP2");
 
+        write_u16(&mut out, self.entrypoint.len() as u16);
+        out.extend_from_slice(self.entrypoint.as_bytes());
+
+        write_u32(&mut out, self.foreign_blocks.len() as u32);
         for block in &self.foreign_blocks {
-            out.push_str("fb|");
-            out.push_str(block.language.as_str());
-            out.push('|');
-            out.push_str(&hex_encode(block.code.as_bytes()));
-            out.push('\n');
+            out.push(language_to_u8(block.language));
+            write_u32(&mut out, block.code.len() as u32);
+            out.extend_from_slice(block.code.as_bytes());
         }
 
-        out.into_bytes()
+        out
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self, String> {
-        let text = std::str::from_utf8(data).map_err(|e| format!("Invalid utf8 payload: {}", e))?;
-        let mut lines = text.lines();
+        if data.len() >= 4 && &data[0..4] == b"DPP2" {
+            let mut cursor = 4usize;
 
-        let header = lines.next().ok_or_else(|| "Missing bytecode header".to_string())?;
-        if header != "DPP1" {
-            return Err(format!("Unsupported bytecode header: {}", header));
-        }
+            let entry_len = read_u16(data, &mut cursor)? as usize;
+            let entry_bytes = read_bytes(data, &mut cursor, entry_len)?;
+            let entrypoint = std::str::from_utf8(entry_bytes)
+                .map_err(|e| format!("Invalid utf8 entrypoint: {}", e))?;
 
-        let entrypoint_line = lines
-            .next()
-            .ok_or_else(|| "Missing entrypoint line".to_string())?;
-        let entrypoint = entrypoint_line
-            .strip_prefix("entrypoint:")
-            .ok_or_else(|| "Malformed entrypoint line".to_string())?;
+            let foreign_count = read_u32(data, &mut cursor)? as usize;
+            let mut module = BytecodeModule::new(entrypoint);
 
-        let foreign_count_line = lines
-            .next()
-            .ok_or_else(|| "Missing foreign_blocks line".to_string())?;
-        let expected_foreign = foreign_count_line
-            .strip_prefix("foreign_blocks:")
-            .ok_or_else(|| "Malformed foreign_blocks line".to_string())?
-            .parse::<usize>()
-            .map_err(|e| format!("Invalid foreign block count: {}", e))?;
-
-        let mut module = BytecodeModule::new(entrypoint);
-        for line in lines {
-            if line.trim().is_empty() {
-                continue;
+            for _ in 0..foreign_count {
+                let lang_tag = read_u8(data, &mut cursor)?;
+                let language = u8_to_language(lang_tag)?;
+                let code_len = read_u32(data, &mut cursor)? as usize;
+                let code_bytes = read_bytes(data, &mut cursor, code_len)?;
+                let code = String::from_utf8(code_bytes.to_vec())
+                    .map_err(|e| format!("Invalid utf8 code payload: {}", e))?;
+                let block = ForeignBlock::new(language, code)
+                    .map_err(|e| format!("Invalid foreign block: {}", e))?;
+                module.add_foreign_block(block);
             }
 
-            let rest = line
-                .strip_prefix("fb|")
-                .ok_or_else(|| format!("Malformed foreign block line: {}", line))?;
-            let mut parts = rest.splitn(2, '|');
-            let lang_raw = parts
-                .next()
-                .ok_or_else(|| format!("Missing language in line: {}", line))?;
-            let code_hex = parts
-                .next()
-                .ok_or_else(|| format!("Missing payload in line: {}", line))?;
-
-            let lang = EmbeddedLanguage::parse(lang_raw)
-                .ok_or_else(|| format!("Unknown embedded language: {}", lang_raw))?;
-            let code_bytes = hex_decode(code_hex)?;
-            let code = String::from_utf8(code_bytes)
-                .map_err(|e| format!("Invalid utf8 code payload: {}", e))?;
-            let block = ForeignBlock::new(lang, code)
-                .map_err(|e| format!("Invalid foreign block: {}", e))?;
-            module.add_foreign_block(block);
+            return Ok(module);
         }
 
-        if module.foreign_blocks.len() != expected_foreign {
-            return Err(format!(
-                "Foreign block count mismatch: expected {}, got {}",
-                expected_foreign,
-                module.foreign_blocks.len()
-            ));
-        }
-
-        Ok(module)
+        deserialize_legacy_dpp1(data)
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push_str(&format!("{:02x}", b));
+fn language_to_u8(language: EmbeddedLanguage) -> u8 {
+    match language {
+        EmbeddedLanguage::Python => 1,
+        EmbeddedLanguage::Rust => 2,
+        EmbeddedLanguage::Prolog => 3,
+        EmbeddedLanguage::CudaKernel => 4,
+        EmbeddedLanguage::OpenClKernel => 5,
+        EmbeddedLanguage::AsmX86_64 => 6,
     }
-    out
+}
+
+fn u8_to_language(tag: u8) -> Result<EmbeddedLanguage, String> {
+    match tag {
+        1 => Ok(EmbeddedLanguage::Python),
+        2 => Ok(EmbeddedLanguage::Rust),
+        3 => Ok(EmbeddedLanguage::Prolog),
+        4 => Ok(EmbeddedLanguage::CudaKernel),
+        5 => Ok(EmbeddedLanguage::OpenClKernel),
+        6 => Ok(EmbeddedLanguage::AsmX86_64),
+        _ => Err(format!("Unknown embedded language tag: {}", tag)),
+    }
+}
+
+fn write_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn read_u8(data: &[u8], cursor: &mut usize) -> Result<u8, String> {
+    if *cursor >= data.len() {
+        return Err("Unexpected EOF while reading u8".into());
+    }
+    let v = data[*cursor];
+    *cursor += 1;
+    Ok(v)
+}
+
+fn read_u16(data: &[u8], cursor: &mut usize) -> Result<u16, String> {
+    let bytes = read_bytes(data, cursor, 2)?;
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32(data: &[u8], cursor: &mut usize) -> Result<u32, String> {
+    let bytes = read_bytes(data, cursor, 4)?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_bytes<'a>(data: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8], String> {
+    let end = cursor.saturating_add(len);
+    if end > data.len() {
+        return Err(format!(
+            "Unexpected EOF while reading {} bytes at offset {}",
+            len, *cursor
+        ));
+    }
+    let slice = &data[*cursor..end];
+    *cursor = end;
+    Ok(slice)
+}
+
+fn deserialize_legacy_dpp1(data: &[u8]) -> Result<BytecodeModule, String> {
+    let text = std::str::from_utf8(data).map_err(|e| format!("Invalid utf8 payload: {}", e))?;
+    let mut lines = text.lines();
+
+    let header = lines.next().ok_or_else(|| "Missing bytecode header".to_string())?;
+    if header != "DPP1" {
+        return Err(format!("Unsupported bytecode header: {}", header));
+    }
+
+    let entrypoint_line = lines
+        .next()
+        .ok_or_else(|| "Missing entrypoint line".to_string())?;
+    let entrypoint = entrypoint_line
+        .strip_prefix("entrypoint:")
+        .ok_or_else(|| "Malformed entrypoint line".to_string())?;
+
+    let foreign_count_line = lines
+        .next()
+        .ok_or_else(|| "Missing foreign_blocks line".to_string())?;
+    let expected_foreign = foreign_count_line
+        .strip_prefix("foreign_blocks:")
+        .ok_or_else(|| "Malformed foreign_blocks line".to_string())?
+        .parse::<usize>()
+        .map_err(|e| format!("Invalid foreign block count: {}", e))?;
+
+    let mut module = BytecodeModule::new(entrypoint);
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let rest = line
+            .strip_prefix("fb|")
+            .ok_or_else(|| format!("Malformed foreign block line: {}", line))?;
+        let mut parts = rest.splitn(2, '|');
+        let lang_raw = parts
+            .next()
+            .ok_or_else(|| format!("Missing language in line: {}", line))?;
+        let code_hex = parts
+            .next()
+            .ok_or_else(|| format!("Missing payload in line: {}", line))?;
+
+        let lang = EmbeddedLanguage::parse(lang_raw)
+            .ok_or_else(|| format!("Unknown embedded language: {}", lang_raw))?;
+        let code_bytes = hex_decode(code_hex)?;
+        let code = String::from_utf8(code_bytes)
+            .map_err(|e| format!("Invalid utf8 code payload: {}", e))?;
+        let block = ForeignBlock::new(lang, code)
+            .map_err(|e| format!("Invalid foreign block: {}", e))?;
+        module.add_foreign_block(block);
+    }
+
+    if module.foreign_blocks.len() != expected_foreign {
+        return Err(format!(
+            "Foreign block count mismatch: expected {}, got {}",
+            expected_foreign,
+            module.foreign_blocks.len()
+        ));
+    }
+
+    Ok(module)
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
@@ -273,5 +354,16 @@ mod tests {
         assert_eq!(restored.foreign_blocks[0].language, EmbeddedLanguage::Python);
         assert!(restored.foreign_blocks[0].code.contains("again"));
         assert_eq!(restored.foreign_blocks[1].language, EmbeddedLanguage::Prolog);
+    }
+
+    #[test]
+    fn test_deserialize_legacy_dpp1_payload() {
+        let legacy = b"DPP1\nentrypoint:main\nforeign_blocks:1\nfb|python|7072696e74282768692729\n";
+        let restored = BytecodeModule::deserialize(legacy).unwrap();
+
+        assert_eq!(restored.entrypoint, "main");
+        assert_eq!(restored.foreign_blocks.len(), 1);
+        assert_eq!(restored.foreign_blocks[0].language, EmbeddedLanguage::Python);
+        assert_eq!(restored.foreign_blocks[0].code, "print('hi')");
     }
 }

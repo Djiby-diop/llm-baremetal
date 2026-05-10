@@ -486,12 +486,22 @@ impl DppVM {
     }
     
     pub fn log_action(&mut self, action_id: &str, verdict: Verdict, zone: MemoryZone) {
+        self.log_action_with_reason(action_id, verdict, zone, format!("Verdict: {:?}", verdict));
+    }
+
+    pub fn log_action_with_reason(
+        &mut self,
+        action_id: &str,
+        verdict: Verdict,
+        zone: MemoryZone,
+        reasoning: String,
+    ) {
         let entry = JournalEntry {
             timestamp: 0, // Would be actual timestamp
             action_id: action_id.to_string(),
             verdict,
             zone,
-            reasoning: format!("Verdict: {:?}", verdict),
+            reasoning,
         };
         self.journal.log(entry);
     }

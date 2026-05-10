@@ -122,7 +122,12 @@ impl PolicyExecutor {
         };
         
         // Phase 5: Audit logging
-        self.vm.log_action(action_id, consensus_result.final_verdict, MemoryZone::Journal);
+        self.vm.log_action_with_reason(
+            action_id,
+            consensus_result.final_verdict,
+            MemoryZone::Journal,
+            Self::format_consensus_reasoning(&consensus_result),
+        );
         
         // Phase 6: Health check
         self.update_health(&consensus_result);
@@ -140,6 +145,28 @@ impl PolicyExecutor {
             success,
             error: None,
         })
+    }
+
+    fn format_consensus_reasoning(consensus: &ConsensusResult) -> String {
+        let vote_details = consensus
+            .votes
+            .iter()
+            .map(|vote| {
+                format!(
+                    "{:?}={:?} ({})",
+                    vote.judge, vote.verdict, vote.reasoning
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        format!(
+            "Consensus verdict={:?}, unanimous={}, divergence={}; {}",
+            consensus.final_verdict,
+            consensus.unanimous,
+            consensus.divergence,
+            vote_details
+        )
     }
     
     fn pre_execution_checks(&self) -> Result<(), CompileError> {
@@ -412,5 +439,26 @@ mod tests {
         executor.push_event(RuntimeEventKind::MetricsGreen, 1.0, "test");
         executor.process_events();
         assert_eq!(executor.get_state(), RuntimeState::Normal);
+    }
+
+    #[test]
+    fn test_journal_contains_consensus_reasoning() {
+        let module = BytecodeModule::new("test");
+        let mut executor = PolicyExecutor::new("Test".to_string(), &module).unwrap();
+
+        let result = executor.execute_action(
+            "action_consensus_log",
+            vec![Bytecode::LoadBool(true), Bytecode::Return],
+        );
+        assert!(result.is_ok());
+
+        let journal = executor.get_journal();
+        assert!(!journal.entries().is_empty());
+        let last = journal.entries().last().unwrap();
+        assert_eq!(last.action_id, "action_consensus_log");
+        assert!(last.reasoning.contains("Consensus verdict="));
+        assert!(last.reasoning.contains("Law="));
+        assert!(last.reasoning.contains("Proof="));
+        assert!(last.reasoning.contains("Cortex="));
     }
 }
