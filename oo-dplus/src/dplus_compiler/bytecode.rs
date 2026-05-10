@@ -83,6 +83,19 @@ impl BytecodeModule {
         self.foreign_blocks.push(block);
     }
 
+    pub fn foreign_blocks_for(
+        &self,
+        language: super::polyglot::EmbeddedLanguage,
+    ) -> impl Iterator<Item = &ForeignBlock> {
+        self.foreign_blocks
+            .iter()
+            .filter(move |block| block.language == language)
+    }
+
+    pub fn has_foreign_blocks(&self) -> bool {
+        !self.foreign_blocks.is_empty()
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
         // Simple serialization: for now, just output a placeholder
         // In reality, this would be binary format
@@ -98,11 +111,33 @@ impl BytecodeModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dplus_compiler::EmbeddedLanguage;
 
     #[test]
     fn test_bytecode_module() {
         let module = BytecodeModule::new("main");
         assert_eq!(module.entrypoint, "main");
         assert!(module.foreign_blocks.is_empty());
+        assert!(!module.has_foreign_blocks());
+    }
+
+    #[test]
+    fn test_foreign_block_lookup() {
+        let mut module = BytecodeModule::new("main");
+        module.add_foreign_block(ForeignBlock::new(
+            EmbeddedLanguage::Python,
+            "print('hi')",
+        ).unwrap());
+        module.add_foreign_block(ForeignBlock::new(
+            EmbeddedLanguage::Prolog,
+            "can_allocate(X) :- X > 0.",
+        ).unwrap());
+
+        let python_blocks: Vec<_> = module
+            .foreign_blocks_for(EmbeddedLanguage::Python)
+            .collect();
+
+        assert_eq!(python_blocks.len(), 1);
+        assert_eq!(python_blocks[0].language, EmbeddedLanguage::Python);
     }
 }
