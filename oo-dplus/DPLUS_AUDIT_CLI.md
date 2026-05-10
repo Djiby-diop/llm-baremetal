@@ -29,6 +29,8 @@ cargo run --features std --bin dplus_audit -- policy-strict.dplus
 - `--jsonl`: print one JSON line per audit entry
 - `--fail-on-verdict VERDICT`: return non-zero if filtered entries include verdict
 - `--max-divergence-rate 0..1`: return non-zero if divergence rate exceeds threshold
+- `--output PATH`: write output to file instead of stdout
+- `--append`: append to `--output` file instead of overwriting
 
 Verdict values:
 
@@ -87,6 +89,18 @@ Strict mode gate (CI-friendly):
 
 ```bash
 cargo run --features std --bin dplus_audit -- policy-strict.dplus --summary --fail-on-verdict emergency --max-divergence-rate 0.30
+```
+
+Write JSONL output to file:
+
+```bash
+cargo run --features std --bin dplus_audit -- policy-strict.dplus --jsonl --output audit.jsonl
+```
+
+Append another filtered batch to same file:
+
+```bash
+cargo run --features std --bin dplus_audit -- policy-strict.dplus --verdict-filter forbid --jsonl --output audit.jsonl --append
 ```
 
 Expected-fail policy gate example:

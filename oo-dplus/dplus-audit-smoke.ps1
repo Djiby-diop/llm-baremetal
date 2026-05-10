@@ -54,6 +54,22 @@ try {
         }
     }
 
+    # 2b) File output path must create and append correctly.
+    $tmpOut = Join-Path $env:TEMP ('dplus-audit-output-' + [Guid]::NewGuid().ToString() + '.jsonl')
+    & cargo @cargoArgs $policyStrict '--jsonl' '--limit' '1' '--output' $tmpOut | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "file output command failed with code $LASTEXITCODE"
+    }
+    & cargo @cargoArgs $policyStrict '--jsonl' '--limit' '1' '--output' $tmpOut '--append' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "file append command failed with code $LASTEXITCODE"
+    }
+    $writtenLines = Get-Content -Path $tmpOut | Where-Object { $_.Trim().Length -gt 0 }
+    Remove-Item -Path $tmpOut -ErrorAction SilentlyContinue
+    if ($writtenLines.Count -lt 2) {
+        throw 'file output smoke expected at least two lines after append'
+    }
+
     # 3) Strict mode positive path (should pass under permissive threshold).
     & cargo @cargoArgs $policyStrict '--max-divergence-rate' '1.0' '--fail-on-verdict' 'emergency' | Out-Null
     if ($LASTEXITCODE -ne 0) {

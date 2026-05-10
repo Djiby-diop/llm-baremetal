@@ -1,5 +1,6 @@
-use std::fs;
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 
 use osg_memory_warden::dplus_compiler::bytecode::Bytecode;
 use osg_memory_warden::dplus_compiler::compiler::Compiler;
@@ -21,11 +22,13 @@ struct Options {
     summary_output: bool,
     fail_on_verdict: Option<Verdict>,
     max_divergence_rate: Option<f64>,
+    output_path: Option<String>,
+    append_output: bool,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: dplus_audit <policy.dplus> [--runs N] [--action-filter ID] [--verdict-filter VERDICT] [--zone-filter ZONE] [--reason-contains TEXT] [--limit N] [--tail] [--summary] [--json] [--jsonl] [--fail-on-verdict VERDICT] [--max-divergence-rate 0..1]"
+        "usage: dplus_audit <policy.dplus> [--runs N] [--action-filter ID] [--verdict-filter VERDICT] [--zone-filter ZONE] [--reason-contains TEXT] [--limit N] [--tail] [--summary] [--json] [--jsonl] [--fail-on-verdict VERDICT] [--max-divergence-rate 0..1] [--output PATH] [--append]"
     );
     eprintln!("verdict values: allow|allowwarn|defer|throttle|monitor|quarantine|compensate|forbid|emergency");
     eprintln!("zone values: frozen|cold|warm|hot|sentinel|journal");
@@ -91,6 +94,8 @@ fn parse_options() -> Options {
     let mut summary_output = false;
     let mut fail_on_verdict = None;
     let mut max_divergence_rate = None;
+    let mut output_path = None;
+    let mut append_output = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -159,6 +164,12 @@ fn parse_options() -> Options {
                 }
                 max_divergence_rate = Some(parsed);
             }
+            "--output" => {
+                output_path = Some(args.next().unwrap_or_else(|| usage()));
+            }
+            "--append" => {
+                append_output = true;
+            }
             "-h" | "--help" => usage(),
             _ => {
                 eprintln!("unknown argument: {}", arg);
@@ -181,7 +192,22 @@ fn parse_options() -> Options {
         summary_output,
         fail_on_verdict,
         max_divergence_rate,
+        output_path,
+        append_output,
     }
+}
+
+fn apply_limit_tail<'a>(mut entries: Vec<&'a JournalEntry>, limit: Option<usize>, tail: bool) -> Vec<&'a JournalEntry> {
+    if let Some(limit) = limit {
+        if entries.len() > limit {
+            if tail {
+                entries = entries.split_off(entries.len() - limit);
+            } else {
+                entries.truncate(limit);
+            }
+        }
+    }
+    entries
 }
 
 fn divergence_rate(entries: &[&JournalEntry]) -> f64 {
@@ -218,6 +244,120 @@ fn strict_failure_reason(opts: &Options, entries: &[&JournalEntry]) -> Option<St
     }
 
     None
+}
+
+fn build_output(opts: &Options, entries: &[&JournalEntry]) -> String {
+    let mut out = String::new();
+
+    if opts.summary_output {
+        let mut verdict_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut action_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut divergence_count = 0usize;
+
+        for entry in entries {
+            *verdict_counts
+                .entry(format!("{:?}", entry.verdict))
+                .or_insert(0) += 1;
+            *action_counts.entry(entry.action_id.clone()).or_insert(0) += 1;
+            if entry.reasoning.contains("divergence=true") {
+                divergence_count += 1;
+            }
+        }
+
+        let mut top_actions = action_counts.into_iter().collect::<Vec<_>>();
+        top_actions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top_actions.truncate(5);
+
+        out.push_str(&format!(
+            "summary policy={} runs={} matched_entries={}\n",
+            opts.path,
+            opts.runs,
+            entries.len()
+        ));
+        out.push_str(&format!(
+            "summary divergence_count={} divergence_rate={:.3}\n",
+            divergence_count,
+            if entries.is_empty() {
+                0.0
+            } else {
+                divergence_count as f64 / entries.len() as f64
+            }
+        ));
+        for (verdict, count) in verdict_counts {
+            out.push_str(&format!("summary verdict={} count={}\n", verdict, count));
+        }
+        for (action, count) in top_actions {
+            out.push_str(&format!("summary top_action={} count={}\n", action, count));
+        }
+    }
+
+    if opts.jsonl_output {
+        for entry in entries {
+            out.push_str(&format!(
+                "{{\"policy\":\"{}\",\"runs\":{},\"action\":\"{}\",\"verdict\":\"{:?}\",\"zone\":\"{:?}\",\"reason\":\"{}\"}}\n",
+                escape_json(&opts.path),
+                opts.runs,
+                escape_json(&entry.action_id),
+                entry.verdict,
+                entry.zone,
+                escape_json(&entry.reasoning)
+            ));
+        }
+    } else if opts.json_output {
+        out.push_str("{\n");
+        out.push_str(&format!("  \"policy\": \"{}\",\n", escape_json(&opts.path)));
+        out.push_str(&format!("  \"runs\": {},\n", opts.runs));
+        out.push_str(&format!("  \"matched_entries\": {},\n", entries.len()));
+        out.push_str("  \"entries\": [\n");
+        for (idx, entry) in entries.iter().enumerate() {
+            let comma = if idx + 1 < entries.len() { "," } else { "" };
+            out.push_str(&format!(
+                "    {{\"action\":\"{}\",\"verdict\":\"{:?}\",\"zone\":\"{:?}\",\"reason\":\"{}\"}}{}\n",
+                escape_json(&entry.action_id),
+                entry.verdict,
+                entry.zone,
+                escape_json(&entry.reasoning),
+                comma
+            ));
+        }
+        out.push_str("  ]\n");
+        out.push_str("}\n");
+    } else {
+        out.push_str(&format!(
+            "policy={} runs={} matched_entries={}\n",
+            opts.path,
+            opts.runs,
+            entries.len()
+        ));
+        for entry in entries {
+            out.push_str(&format!(
+                "action={} verdict={:?} zone={:?} reason={}\n",
+                entry.action_id, entry.verdict, entry.zone, entry.reasoning
+            ));
+        }
+    }
+
+    out
+}
+
+fn emit_output(text: &str, output_path: Option<&str>, append: bool) -> Result<(), String> {
+    if let Some(path) = output_path {
+        let mut writer = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(append)
+            .truncate(!append)
+            .open(path)
+            .map_err(|e| format!("output open failed: {e}"))?;
+        writer
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("output write failed: {e}"))?;
+        writer.flush().map_err(|e| format!("output flush failed: {e}"))?;
+        return Ok(());
+    }
+
+    print!("{}", text);
+    Ok(())
 }
 
 fn main() {
@@ -289,103 +429,25 @@ fn main() {
         })
         .collect();
 
-    if let Some(limit) = opts.limit {
-        if entries.len() > limit {
-            if opts.tail {
-                entries = entries.split_off(entries.len() - limit);
-            } else {
-                entries.truncate(limit);
-            }
-        }
-    }
-
-    if opts.summary_output {
-        let mut verdict_counts: BTreeMap<String, usize> = BTreeMap::new();
-        let mut action_counts: BTreeMap<String, usize> = BTreeMap::new();
-        let mut divergence_count = 0usize;
-
-        for entry in &entries {
-            *verdict_counts
-                .entry(format!("{:?}", entry.verdict))
-                .or_insert(0) += 1;
-            *action_counts.entry(entry.action_id.clone()).or_insert(0) += 1;
-            if entry.reasoning.contains("divergence=true") {
-                divergence_count += 1;
-            }
-        }
-
-        let mut top_actions = action_counts.into_iter().collect::<Vec<_>>();
-        top_actions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        top_actions.truncate(5);
-
-        println!("summary policy={} runs={} matched_entries={}", opts.path, opts.runs, entries.len());
-        println!(
-            "summary divergence_count={} divergence_rate={:.3}",
-            divergence_count,
-            if entries.is_empty() {
-                0.0
-            } else {
-                divergence_count as f64 / entries.len() as f64
-            }
-        );
-        for (verdict, count) in verdict_counts {
-            println!("summary verdict={} count={}", verdict, count);
-        }
-        for (action, count) in top_actions {
-            println!("summary top_action={} count={}", action, count);
-        }
-    }
+    entries = apply_limit_tail(entries, opts.limit, opts.tail);
 
     if let Some(reason) = strict_failure_reason(&opts, &entries) {
         eprintln!("{}", reason);
         std::process::exit(1);
     }
 
-    if opts.jsonl_output {
-        for entry in entries {
-            println!(
-                "{{\"policy\":\"{}\",\"runs\":{},\"action\":\"{}\",\"verdict\":\"{:?}\",\"zone\":\"{:?}\",\"reason\":\"{}\"}}",
-                escape_json(&opts.path),
-                opts.runs,
-                escape_json(&entry.action_id),
-                entry.verdict,
-                entry.zone,
-                escape_json(&entry.reasoning)
-            );
-        }
-    } else if opts.json_output {
-        println!("{{");
-        println!("  \"policy\": \"{}\",", escape_json(&opts.path));
-        println!("  \"runs\": {},", opts.runs);
-        println!("  \"matched_entries\": {},", entries.len());
-        println!("  \"entries\": [");
-        for (idx, entry) in entries.iter().enumerate() {
-            let comma = if idx + 1 < entries.len() { "," } else { "" };
-            println!(
-                "    {{\"action\":\"{}\",\"verdict\":\"{:?}\",\"zone\":\"{:?}\",\"reason\":\"{}\"}}{}",
-                escape_json(&entry.action_id),
-                entry.verdict,
-                entry.zone,
-                escape_json(&entry.reasoning),
-                comma
-            );
-        }
-        println!("  ]");
-        println!("}}");
-    } else {
-        println!("policy={} runs={} matched_entries={}", opts.path, opts.runs, entries.len());
-        for entry in entries {
-            println!(
-                "action={} verdict={:?} zone={:?} reason={}",
-                entry.action_id, entry.verdict, entry.zone, entry.reasoning
-            );
-        }
+    let output = build_output(&opts, &entries);
+    if let Err(err) = emit_output(&output, opts.output_path.as_deref(), opts.append_output) {
+        eprintln!("{}", err);
+        std::process::exit(1);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs::read_to_string;
 
     fn sample_opts() -> Options {
         Options {
@@ -402,6 +464,8 @@ mod tests {
             summary_output: false,
             fail_on_verdict: None,
             max_divergence_rate: None,
+            output_path: None,
+            append_output: false,
         }
     }
 
@@ -457,5 +521,74 @@ mod tests {
 
         let reason = strict_failure_reason(&opts, &entries);
         assert!(reason.is_none());
+    }
+
+    #[test]
+    fn strict_mode_passes_when_divergence_rate_equals_threshold() {
+        let mut opts = sample_opts();
+        opts.max_divergence_rate = Some(0.5);
+
+        let e1 = entry(Verdict::Allow, "divergence=true");
+        let e2 = entry(Verdict::Allow, "divergence=false");
+        let entries = vec![&e1, &e2];
+
+        let reason = strict_failure_reason(&opts, &entries);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn strict_mode_passes_with_empty_entries() {
+        let mut opts = sample_opts();
+        opts.fail_on_verdict = Some(Verdict::Forbid);
+        opts.max_divergence_rate = Some(0.0);
+        let entries: Vec<&JournalEntry> = vec![];
+
+        let reason = strict_failure_reason(&opts, &entries);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn apply_limit_tail_keeps_last_entries_when_tail_enabled() {
+        let e1 = entry(Verdict::Allow, "divergence=false");
+        let e2 = entry(Verdict::AllowWarn, "divergence=false");
+        let e3 = entry(Verdict::Defer, "divergence=false");
+        let entries = vec![&e1, &e2, &e3];
+
+        let limited = apply_limit_tail(entries, Some(2), true);
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].verdict, Verdict::AllowWarn);
+        assert_eq!(limited[1].verdict, Verdict::Defer);
+    }
+
+    #[test]
+    fn strict_mode_applies_after_limit_tail_reduction() {
+        let mut opts = sample_opts();
+        opts.fail_on_verdict = Some(Verdict::Forbid);
+
+        let e1 = entry(Verdict::Forbid, "divergence=false");
+        let e2 = entry(Verdict::Allow, "divergence=false");
+        let e3 = entry(Verdict::AllowWarn, "divergence=false");
+        let entries = vec![&e1, &e2, &e3];
+
+        let limited = apply_limit_tail(entries, Some(2), true);
+        let reason = strict_failure_reason(&opts, &limited);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn emit_output_writes_and_appends_to_file() {
+        let path = env::temp_dir().join(format!(
+            "dplus-audit-output-{}.txt",
+            std::process::id()
+        ));
+        let file_path = path.to_string_lossy().to_string();
+
+        emit_output("one\n", Some(&file_path), false).unwrap();
+        emit_output("two\n", Some(&file_path), true).unwrap();
+
+        let got = read_to_string(&file_path).unwrap();
+        assert_eq!(got, "one\ntwo\n");
+
+        let _ = std::fs::remove_file(&file_path);
     }
 }
