@@ -97,13 +97,24 @@ impl BytecodeModule {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        // Compact binary format (DPP2), preserving foreign blocks.
-        // Functions are still not serialized in this phase.
+        // Compact binary format (DPP3), preserving functions and foreign blocks.
         let mut out = Vec::new();
-        out.extend_from_slice(b"DPP2");
+        out.extend_from_slice(b"DPP3");
 
         write_u16(&mut out, self.entrypoint.len() as u16);
         out.extend_from_slice(self.entrypoint.as_bytes());
+
+        write_u32(&mut out, self.functions.len() as u32);
+        for func in self.functions.values() {
+            write_u16(&mut out, func.name.len() as u16);
+            out.extend_from_slice(func.name.as_bytes());
+            write_u32(&mut out, func.arity as u32);
+            write_u32(&mut out, func.locals as u32);
+            write_u32(&mut out, func.code.len() as u32);
+            for instr in &func.code {
+                serialize_instruction(&mut out, instr);
+            }
+        }
 
         write_u32(&mut out, self.foreign_blocks.len() as u32);
         for block in &self.foreign_blocks {
@@ -116,7 +127,7 @@ impl BytecodeModule {
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self, String> {
-        if data.len() >= 4 && &data[0..4] == b"DPP2" {
+        if data.len() >= 4 && &data[0..4] == b"DPP3" {
             let mut cursor = 4usize;
 
             let entry_len = read_u16(data, &mut cursor)? as usize;
@@ -124,8 +135,31 @@ impl BytecodeModule {
             let entrypoint = std::str::from_utf8(entry_bytes)
                 .map_err(|e| format!("Invalid utf8 entrypoint: {}", e))?;
 
-            let foreign_count = read_u32(data, &mut cursor)? as usize;
+            let function_count = read_u32(data, &mut cursor)? as usize;
             let mut module = BytecodeModule::new(entrypoint);
+
+            for _ in 0..function_count {
+                let name_len = read_u16(data, &mut cursor)? as usize;
+                let name = String::from_utf8(read_bytes(data, &mut cursor, name_len)?.to_vec())
+                    .map_err(|e| format!("Invalid utf8 function name: {}", e))?;
+                let arity = read_u32(data, &mut cursor)? as usize;
+                let locals = read_u32(data, &mut cursor)? as usize;
+                let code_len = read_u32(data, &mut cursor)? as usize;
+
+                let mut code = Vec::with_capacity(code_len);
+                for _ in 0..code_len {
+                    code.push(deserialize_instruction(data, &mut cursor)?);
+                }
+
+                module.add_function(BytecodeFunction {
+                    name,
+                    arity,
+                    locals,
+                    code,
+                });
+            }
+
+            let foreign_count = read_u32(data, &mut cursor)? as usize;
 
             for _ in 0..foreign_count {
                 let lang_tag = read_u8(data, &mut cursor)?;
@@ -142,7 +176,143 @@ impl BytecodeModule {
             return Ok(module);
         }
 
+        if data.len() >= 4 && &data[0..4] == b"DPP2" {
+            return deserialize_legacy_dpp2(data);
+        }
+
         deserialize_legacy_dpp1(data)
+    }
+}
+
+fn serialize_instruction(out: &mut Vec<u8>, instr: &Bytecode) {
+    match instr {
+        Bytecode::LoadConst(v) => {
+            out.push(1);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        Bytecode::LoadStr(s) => {
+            out.push(2);
+            write_u32(out, s.len() as u32);
+            out.extend_from_slice(s.as_bytes());
+        }
+        Bytecode::LoadBool(b) => {
+            out.push(3);
+            out.push(u8::from(*b));
+        }
+        Bytecode::LoadArg(i) => {
+            out.push(4);
+            write_u32(out, *i as u32);
+        }
+        Bytecode::LoadLocal(i) => {
+            out.push(5);
+            write_u32(out, *i as u32);
+        }
+        Bytecode::StoreLocal(i) => {
+            out.push(6);
+            write_u32(out, *i as u32);
+        }
+        Bytecode::Add => out.push(7),
+        Bytecode::Sub => out.push(8),
+        Bytecode::Mul => out.push(9),
+        Bytecode::Div => out.push(10),
+        Bytecode::Mod => out.push(11),
+        Bytecode::Neg => out.push(12),
+        Bytecode::And => out.push(13),
+        Bytecode::Or => out.push(14),
+        Bytecode::Not => out.push(15),
+        Bytecode::CmpEq => out.push(16),
+        Bytecode::CmpNe => out.push(17),
+        Bytecode::CmpLt => out.push(18),
+        Bytecode::CmpLe => out.push(19),
+        Bytecode::CmpGt => out.push(20),
+        Bytecode::CmpGe => out.push(21),
+        Bytecode::Jump(i) => {
+            out.push(22);
+            write_u32(out, *i as u32);
+        }
+        Bytecode::JumpIfFalse(i) => {
+            out.push(23);
+            write_u32(out, *i as u32);
+        }
+        Bytecode::JumpIfTrue(i) => {
+            out.push(24);
+            write_u32(out, *i as u32);
+        }
+        Bytecode::Call(name, argc) => {
+            out.push(25);
+            write_u16(out, name.len() as u16);
+            out.extend_from_slice(name.as_bytes());
+            write_u32(out, *argc as u32);
+        }
+        Bytecode::Return => out.push(26),
+        Bytecode::ConsensusVote => out.push(27),
+        Bytecode::MergeVerdicts => out.push(28),
+        Bytecode::Nop => out.push(29),
+        Bytecode::Halt => out.push(30),
+        Bytecode::Panic(msg) => {
+            out.push(31);
+            write_u16(out, msg.len() as u16);
+            out.extend_from_slice(msg.as_bytes());
+        }
+    }
+}
+
+fn deserialize_instruction(data: &[u8], cursor: &mut usize) -> Result<Bytecode, String> {
+    let opcode = read_u8(data, cursor)?;
+    match opcode {
+        1 => {
+            let bytes = read_bytes(data, cursor, 8)?;
+            Ok(Bytecode::LoadConst(f64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ])))
+        }
+        2 => {
+            let len = read_u32(data, cursor)? as usize;
+            let s = String::from_utf8(read_bytes(data, cursor, len)?.to_vec())
+                .map_err(|e| format!("Invalid utf8 LoadStr payload: {}", e))?;
+            Ok(Bytecode::LoadStr(s))
+        }
+        3 => Ok(Bytecode::LoadBool(read_u8(data, cursor)? != 0)),
+        4 => Ok(Bytecode::LoadArg(read_u32(data, cursor)? as usize)),
+        5 => Ok(Bytecode::LoadLocal(read_u32(data, cursor)? as usize)),
+        6 => Ok(Bytecode::StoreLocal(read_u32(data, cursor)? as usize)),
+        7 => Ok(Bytecode::Add),
+        8 => Ok(Bytecode::Sub),
+        9 => Ok(Bytecode::Mul),
+        10 => Ok(Bytecode::Div),
+        11 => Ok(Bytecode::Mod),
+        12 => Ok(Bytecode::Neg),
+        13 => Ok(Bytecode::And),
+        14 => Ok(Bytecode::Or),
+        15 => Ok(Bytecode::Not),
+        16 => Ok(Bytecode::CmpEq),
+        17 => Ok(Bytecode::CmpNe),
+        18 => Ok(Bytecode::CmpLt),
+        19 => Ok(Bytecode::CmpLe),
+        20 => Ok(Bytecode::CmpGt),
+        21 => Ok(Bytecode::CmpGe),
+        22 => Ok(Bytecode::Jump(read_u32(data, cursor)? as usize)),
+        23 => Ok(Bytecode::JumpIfFalse(read_u32(data, cursor)? as usize)),
+        24 => Ok(Bytecode::JumpIfTrue(read_u32(data, cursor)? as usize)),
+        25 => {
+            let len = read_u16(data, cursor)? as usize;
+            let name = String::from_utf8(read_bytes(data, cursor, len)?.to_vec())
+                .map_err(|e| format!("Invalid utf8 Call name payload: {}", e))?;
+            let argc = read_u32(data, cursor)? as usize;
+            Ok(Bytecode::Call(name, argc))
+        }
+        26 => Ok(Bytecode::Return),
+        27 => Ok(Bytecode::ConsensusVote),
+        28 => Ok(Bytecode::MergeVerdicts),
+        29 => Ok(Bytecode::Nop),
+        30 => Ok(Bytecode::Halt),
+        31 => {
+            let len = read_u16(data, cursor)? as usize;
+            let msg = String::from_utf8(read_bytes(data, cursor, len)?.to_vec())
+                .map_err(|e| format!("Invalid utf8 Panic payload: {}", e))?;
+            Ok(Bytecode::Panic(msg))
+        }
+        _ => Err(format!("Unknown bytecode opcode tag: {}", opcode)),
     }
 }
 
@@ -207,6 +377,32 @@ fn read_bytes<'a>(data: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a 
     let slice = &data[*cursor..end];
     *cursor = end;
     Ok(slice)
+}
+
+fn deserialize_legacy_dpp2(data: &[u8]) -> Result<BytecodeModule, String> {
+    let mut cursor = 4usize;
+
+    let entry_len = read_u16(data, &mut cursor)? as usize;
+    let entry_bytes = read_bytes(data, &mut cursor, entry_len)?;
+    let entrypoint = std::str::from_utf8(entry_bytes)
+        .map_err(|e| format!("Invalid utf8 entrypoint: {}", e))?;
+
+    let foreign_count = read_u32(data, &mut cursor)? as usize;
+    let mut module = BytecodeModule::new(entrypoint);
+
+    for _ in 0..foreign_count {
+        let lang_tag = read_u8(data, &mut cursor)?;
+        let language = u8_to_language(lang_tag)?;
+        let code_len = read_u32(data, &mut cursor)? as usize;
+        let code_bytes = read_bytes(data, &mut cursor, code_len)?;
+        let code = String::from_utf8(code_bytes.to_vec())
+            .map_err(|e| format!("Invalid utf8 code payload: {}", e))?;
+        let block = ForeignBlock::new(language, code)
+            .map_err(|e| format!("Invalid foreign block: {}", e))?;
+        module.add_foreign_block(block);
+    }
+
+    Ok(module)
 }
 
 fn deserialize_legacy_dpp1(data: &[u8]) -> Result<BytecodeModule, String> {
@@ -357,11 +553,58 @@ mod tests {
     }
 
     #[test]
+    fn test_serialize_deserialize_functions_roundtrip() {
+        let mut module = BytecodeModule::new("main");
+        module.add_function(BytecodeFunction {
+            name: "law_can_allocate".to_string(),
+            arity: 1,
+            locals: 2,
+            code: vec![
+                Bytecode::LoadArg(0),
+                Bytecode::LoadConst(1024.0),
+                Bytecode::CmpLe,
+                Bytecode::Return,
+            ],
+        });
+
+        let bytes = module.serialize();
+        let restored = BytecodeModule::deserialize(&bytes).unwrap();
+        let restored_fn = restored.functions.get("law_can_allocate").unwrap();
+
+        assert_eq!(restored_fn.arity, 1);
+        assert_eq!(restored_fn.locals, 2);
+        assert_eq!(restored_fn.code.len(), 4);
+        assert!(matches!(restored_fn.code[0], Bytecode::LoadArg(0)));
+        assert!(matches!(restored_fn.code[1], Bytecode::LoadConst(v) if (v - 1024.0).abs() < 1e-10));
+        assert!(matches!(restored_fn.code[2], Bytecode::CmpLe));
+        assert!(matches!(restored_fn.code[3], Bytecode::Return));
+    }
+
+    #[test]
     fn test_deserialize_legacy_dpp1_payload() {
         let legacy = b"DPP1\nentrypoint:main\nforeign_blocks:1\nfb|python|7072696e74282768692729\n";
         let restored = BytecodeModule::deserialize(legacy).unwrap();
 
         assert_eq!(restored.entrypoint, "main");
+        assert_eq!(restored.foreign_blocks.len(), 1);
+        assert_eq!(restored.foreign_blocks[0].language, EmbeddedLanguage::Python);
+        assert_eq!(restored.foreign_blocks[0].code, "print('hi')");
+    }
+
+    #[test]
+    fn test_deserialize_legacy_dpp2_payload() {
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(b"DPP2");
+        write_u16(&mut legacy, 4);
+        legacy.extend_from_slice(b"main");
+        write_u32(&mut legacy, 1);
+        legacy.push(language_to_u8(EmbeddedLanguage::Python));
+        write_u32(&mut legacy, 11);
+        legacy.extend_from_slice(b"print('hi')");
+
+        let restored = BytecodeModule::deserialize(&legacy).unwrap();
+        assert_eq!(restored.entrypoint, "main");
+        assert_eq!(restored.functions.len(), 0);
         assert_eq!(restored.foreign_blocks.len(), 1);
         assert_eq!(restored.foreign_blocks[0].language, EmbeddedLanguage::Python);
         assert_eq!(restored.foreign_blocks[0].code, "print('hi')");

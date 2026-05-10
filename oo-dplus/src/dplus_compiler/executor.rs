@@ -255,6 +255,28 @@ impl PolicyExecutor {
     pub fn get_journal(&self) -> &AuditJournal {
         self.vm.get_journal()
     }
+
+    pub fn get_latest_journal_entry(&self) -> Option<&JournalEntry> {
+        self.vm.get_journal().entries().last()
+    }
+
+    pub fn get_journal_entries_for_action(&self, action_id: &str) -> Vec<&JournalEntry> {
+        self.vm
+            .get_journal()
+            .entries()
+            .iter()
+            .filter(|entry| entry.action_id == action_id)
+            .collect()
+    }
+
+    pub fn get_journal_entries_for_verdict(&self, verdict: Verdict) -> Vec<&JournalEntry> {
+        self.vm
+            .get_journal()
+            .entries()
+            .iter()
+            .filter(|entry| entry.verdict == verdict)
+            .collect()
+    }
     
     pub fn get_divergences(&self) -> &[DivergenceEvent] {
         &self.divergence_log
@@ -460,5 +482,31 @@ mod tests {
         assert!(last.reasoning.contains("Law="));
         assert!(last.reasoning.contains("Proof="));
         assert!(last.reasoning.contains("Cortex="));
+    }
+
+    #[test]
+    fn test_journal_filters_by_action_and_verdict() {
+        let module = BytecodeModule::new("test");
+        let mut executor = PolicyExecutor::new("Test".to_string(), &module).unwrap();
+
+        let _ = executor.execute_action(
+            "action_a",
+            vec![Bytecode::LoadBool(true), Bytecode::Return],
+        );
+        let _ = executor.execute_action(
+            "action_b",
+            vec![Bytecode::LoadBool(true), Bytecode::Return],
+        );
+
+        let action_a_entries = executor.get_journal_entries_for_action("action_a");
+        assert_eq!(action_a_entries.len(), 1);
+        assert_eq!(action_a_entries[0].action_id, "action_a");
+
+        let allow_entries = executor.get_journal_entries_for_verdict(Verdict::Allow);
+        assert!(allow_entries.len() >= 2);
+
+        let latest = executor.get_latest_journal_entry();
+        assert!(latest.is_some());
+        assert_eq!(latest.unwrap().action_id, "action_b");
     }
 }
