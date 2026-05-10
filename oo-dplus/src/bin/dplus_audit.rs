@@ -12,11 +12,12 @@ struct Options {
     action_filter: Option<String>,
     verdict_filter: Option<Verdict>,
     json_output: bool,
+    jsonl_output: bool,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: dplus_audit <policy.dplus> [--runs N] [--action-filter ID] [--verdict-filter VERDICT] [--json]"
+        "usage: dplus_audit <policy.dplus> [--runs N] [--action-filter ID] [--verdict-filter VERDICT] [--json] [--jsonl]"
     );
     eprintln!("verdict values: allow|allowwarn|defer|throttle|monitor|quarantine|compensate|forbid|emergency");
     std::process::exit(2);
@@ -61,6 +62,7 @@ fn parse_options() -> Options {
     let mut action_filter = None;
     let mut verdict_filter = None;
     let mut json_output = false;
+    let mut jsonl_output = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -84,6 +86,9 @@ fn parse_options() -> Options {
             "--json" => {
                 json_output = true;
             }
+            "--jsonl" => {
+                jsonl_output = true;
+            }
             "-h" | "--help" => usage(),
             _ => {
                 eprintln!("unknown argument: {}", arg);
@@ -98,6 +103,7 @@ fn parse_options() -> Options {
         action_filter,
         verdict_filter,
         json_output,
+        jsonl_output,
     }
 }
 
@@ -145,7 +151,19 @@ fn main() {
         executor.get_journal().entries().iter().collect()
     };
 
-    if opts.json_output {
+    if opts.jsonl_output {
+        for entry in entries {
+            println!(
+                "{{\"policy\":\"{}\",\"runs\":{},\"action\":\"{}\",\"verdict\":\"{:?}\",\"zone\":\"{:?}\",\"reason\":\"{}\"}}",
+                escape_json(&opts.path),
+                opts.runs,
+                escape_json(&entry.action_id),
+                entry.verdict,
+                entry.zone,
+                escape_json(&entry.reasoning)
+            );
+        }
+    } else if opts.json_output {
         println!("{{");
         println!("  \"policy\": \"{}\",", escape_json(&opts.path));
         println!("  \"runs\": {},", opts.runs);
