@@ -59,6 +59,11 @@ name = "dplus_compile_oo"
 path = "src/bin/dplus_compile_oo.rs"
 required-features = ["std"]
 
+[[bin]]
+name = "dplus_audit"
+path = "src/bin/dplus_audit.rs"
+required-features = ["std"]
+
 [profile.dev]
 panic = "abort"
 
