@@ -29,6 +29,19 @@ jobs:
       - name: Run library and binary tests
         run: cargo test --features std --lib --bins
 
+      - name: Generate audit JSONL snapshot
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          cargo run --features std --bin dplus_audit -- policies/policy-strict.dplus --runs 12 --jsonl --output artifacts/dplus_audit_smoke.jsonl
+
       - name: Run audit smoke script
         shell: pwsh
         run: ./dplus-audit-smoke.ps1 -SkipBuild
+
+      - name: Upload audit JSONL artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oo-dplus-audit-jsonl
+          path: oo-dplus/artifacts/dplus_audit_smoke.jsonl
