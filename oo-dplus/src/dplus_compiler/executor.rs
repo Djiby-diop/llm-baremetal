@@ -112,13 +112,53 @@ impl PolicyExecutor {
         self.process_events();
         
         // Phase 4: Action execution (if allowed)
-        let success = if consensus_result.final_verdict.is_allowed() {
-            match self.vm.execute(bytecode) {
-                Ok(_) => true,
-                Err(_) => false,
+        let (success, exec_error, execution_path) = match consensus_result.final_verdict {
+            Verdict::Allow | Verdict::AllowWarn | Verdict::Compensate => {
+                match self.vm.execute(bytecode) {
+                    Ok(_) => (true, None, "normal".to_string()),
+                    Err(e) => (false, Some(e.to_string()), "normal_failed".to_string()),
+                }
             }
-        } else {
-            false
+            Verdict::Throttle => {
+                // Throttled actions still run, but force SAFE mode and emit pressure event.
+                self.push_event(RuntimeEventKind::CpuSpike, 1.0, action_id);
+                self.process_events();
+                let ctx = self.vm.get_context_mut();
+                ctx.mode = ExecutionMode::Safe;
+                match self.vm.execute(bytecode) {
+                    Ok(_) => (true, None, "throttled_safe_mode".to_string()),
+                    Err(e) => (
+                        false,
+                        Some(e.to_string()),
+                        "throttled_safe_mode_failed".to_string(),
+                    ),
+                }
+            }
+            Verdict::Forbid => (
+                false,
+                Some("Execution blocked by FORBID verdict".to_string()),
+                "blocked_forbid".to_string(),
+            ),
+            Verdict::Emergency => (
+                false,
+                Some("Execution blocked by EMERGENCY verdict".to_string()),
+                "blocked_emergency".to_string(),
+            ),
+            Verdict::Quarantine => (
+                false,
+                Some("Execution blocked by QUARANTINE verdict".to_string()),
+                "blocked_quarantine".to_string(),
+            ),
+            Verdict::Defer => (
+                false,
+                Some("Execution deferred by policy verdict".to_string()),
+                "blocked_defer".to_string(),
+            ),
+            Verdict::Monitor => (
+                false,
+                Some("Execution held in monitor-only mode".to_string()),
+                "blocked_monitor".to_string(),
+            ),
         };
         
         // Phase 5: Audit logging
@@ -126,7 +166,11 @@ impl PolicyExecutor {
             action_id,
             consensus_result.final_verdict,
             MemoryZone::Journal,
-            Self::format_consensus_reasoning(&consensus_result),
+            format!(
+                "{}; execution_path={}",
+                Self::format_consensus_reasoning(&consensus_result),
+                execution_path
+            ),
         );
         
         // Phase 6: Health check
@@ -143,7 +187,7 @@ impl PolicyExecutor {
             consensus: consensus_result,
             duration_ns: start.elapsed().as_nanos() as u64,
             success,
-            error: None,
+            error: exec_error,
         })
     }
 
@@ -508,5 +552,29 @@ mod tests {
         let latest = executor.get_latest_journal_entry();
         assert!(latest.is_some());
         assert_eq!(latest.unwrap().action_id, "action_b");
+    }
+
+    #[test]
+    fn test_forbid_verdict_blocks_execution_path_explicitly() {
+        let mut module = BytecodeModule::new("test");
+        module.add_foreign_block(
+            crate::dplus_compiler::ForeignBlock::new(
+                crate::dplus_compiler::EmbeddedLanguage::Rust,
+                "fn blocked() {}",
+            )
+            .unwrap(),
+        );
+
+        let mut executor = PolicyExecutor::new("Test".to_string(), &module).unwrap();
+        let result = executor
+            .execute_action("blocked_action", vec![Bytecode::LoadBool(true), Bytecode::Return])
+            .unwrap();
+
+        assert_eq!(result.verdict, Verdict::Forbid);
+        assert!(!result.success);
+        assert!(result.error.is_some());
+
+        let latest = executor.get_latest_journal_entry().unwrap();
+        assert!(latest.reasoning.contains("execution_path=blocked_forbid"));
     }
 }

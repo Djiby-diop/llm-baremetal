@@ -173,6 +173,13 @@ impl BytecodeModule {
                 module.add_foreign_block(block);
             }
 
+            if cursor != data.len() {
+                return Err(format!(
+                    "Trailing bytes after DPP3 payload: {}",
+                    data.len() - cursor
+                ));
+            }
+
             return Ok(module);
         }
 
@@ -402,6 +409,13 @@ fn deserialize_legacy_dpp2(data: &[u8]) -> Result<BytecodeModule, String> {
         module.add_foreign_block(block);
     }
 
+    if cursor != data.len() {
+        return Err(format!(
+            "Trailing bytes after DPP2 payload: {}",
+            data.len() - cursor
+        ));
+    }
+
     Ok(module)
 }
 
@@ -608,5 +622,51 @@ mod tests {
         assert_eq!(restored.foreign_blocks.len(), 1);
         assert_eq!(restored.foreign_blocks[0].language, EmbeddedLanguage::Python);
         assert_eq!(restored.foreign_blocks[0].code, "print('hi')");
+    }
+
+    #[test]
+    fn test_deserialize_dpp3_rejects_truncated_payload() {
+        let mut module = BytecodeModule::new("main");
+        module.add_function(BytecodeFunction {
+            name: "f".into(),
+            arity: 0,
+            locals: 0,
+            code: vec![Bytecode::Return],
+        });
+        let mut bytes = module.serialize();
+        let _ = bytes.pop();
+
+        let err = BytecodeModule::deserialize(&bytes).unwrap_err();
+        assert!(err.contains("Unexpected EOF"));
+    }
+
+    #[test]
+    fn test_deserialize_dpp3_rejects_invalid_opcode() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"DPP3");
+        write_u16(&mut payload, 4);
+        payload.extend_from_slice(b"main");
+        write_u32(&mut payload, 1); // function count
+        write_u16(&mut payload, 1); // name len
+        payload.extend_from_slice(b"f");
+        write_u32(&mut payload, 0); // arity
+        write_u32(&mut payload, 0); // locals
+        write_u32(&mut payload, 1); // code len
+        payload.push(255); // invalid opcode tag
+        write_u32(&mut payload, 0); // foreign blocks
+
+        let err = BytecodeModule::deserialize(&payload).unwrap_err();
+        assert!(err.contains("Unknown bytecode opcode tag"));
+    }
+
+    #[test]
+    fn test_deserialize_dpp3_rejects_trailing_bytes() {
+        let mut module = BytecodeModule::new("main");
+        module.add_foreign_block(ForeignBlock::new(EmbeddedLanguage::Python, "print(1)").unwrap());
+        let mut bytes = module.serialize();
+        bytes.extend_from_slice(&[0xAA, 0xBB]);
+
+        let err = BytecodeModule::deserialize(&bytes).unwrap_err();
+        assert!(err.contains("Trailing bytes"));
     }
 }

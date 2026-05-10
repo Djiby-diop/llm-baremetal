@@ -1,25 +1,32 @@
 use std::fs;
+use std::collections::BTreeMap;
 
 use osg_memory_warden::dplus_compiler::bytecode::Bytecode;
 use osg_memory_warden::dplus_compiler::compiler::Compiler;
 use osg_memory_warden::dplus_compiler::executor::PolicyExecutor;
 use osg_memory_warden::dplus_compiler::parser::parse;
-use osg_memory_warden::dplus_compiler::vm::Verdict;
+use osg_memory_warden::dplus_compiler::vm::{MemoryZone, Verdict};
 
 struct Options {
     path: String,
     runs: usize,
     action_filter: Option<String>,
     verdict_filter: Option<Verdict>,
+    zone_filter: Option<MemoryZone>,
+    reason_contains: Option<String>,
+    limit: Option<usize>,
+    tail: bool,
     json_output: bool,
     jsonl_output: bool,
+    summary_output: bool,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: dplus_audit <policy.dplus> [--runs N] [--action-filter ID] [--verdict-filter VERDICT] [--json] [--jsonl]"
+        "usage: dplus_audit <policy.dplus> [--runs N] [--action-filter ID] [--verdict-filter VERDICT] [--zone-filter ZONE] [--reason-contains TEXT] [--limit N] [--tail] [--summary] [--json] [--jsonl]"
     );
     eprintln!("verdict values: allow|allowwarn|defer|throttle|monitor|quarantine|compensate|forbid|emergency");
+    eprintln!("zone values: frozen|cold|warm|hot|sentinel|journal");
     std::process::exit(2);
 }
 
@@ -54,6 +61,18 @@ fn parse_verdict(raw: &str) -> Option<Verdict> {
     }
 }
 
+fn parse_zone(raw: &str) -> Option<MemoryZone> {
+    match raw.to_ascii_lowercase().as_str() {
+        "frozen" => Some(MemoryZone::Frozen),
+        "cold" => Some(MemoryZone::Cold),
+        "warm" => Some(MemoryZone::Warm),
+        "hot" => Some(MemoryZone::Hot),
+        "sentinel" => Some(MemoryZone::Sentinel),
+        "journal" => Some(MemoryZone::Journal),
+        _ => None,
+    }
+}
+
 fn parse_options() -> Options {
     let mut args = std::env::args().skip(1);
     let path = args.next().unwrap_or_else(|| usage());
@@ -61,8 +80,13 @@ fn parse_options() -> Options {
     let mut runs = 3usize;
     let mut action_filter = None;
     let mut verdict_filter = None;
+    let mut zone_filter = None;
+    let mut reason_contains = None;
+    let mut limit = None;
+    let mut tail = false;
     let mut json_output = false;
     let mut jsonl_output = false;
+    let mut summary_output = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -83,11 +107,34 @@ fn parse_options() -> Options {
                     usage();
                 });
             }
+            "--zone-filter" => {
+                let raw = args.next().unwrap_or_else(|| usage());
+                zone_filter = parse_zone(&raw).or_else(|| {
+                    eprintln!("invalid --zone-filter value: {}", raw);
+                    usage();
+                });
+            }
+            "--reason-contains" => {
+                reason_contains = Some(args.next().unwrap_or_else(|| usage()));
+            }
+            "--limit" => {
+                let v = args.next().unwrap_or_else(|| usage());
+                limit = Some(v.parse::<usize>().unwrap_or_else(|_| {
+                    eprintln!("invalid --limit value: {}", v);
+                    usage();
+                }));
+            }
+            "--tail" => {
+                tail = true;
+            }
             "--json" => {
                 json_output = true;
             }
             "--jsonl" => {
                 jsonl_output = true;
+            }
+            "--summary" => {
+                summary_output = true;
             }
             "-h" | "--help" => usage(),
             _ => {
@@ -102,8 +149,13 @@ fn parse_options() -> Options {
         runs,
         action_filter,
         verdict_filter,
+        zone_filter,
+        reason_contains,
+        limit,
+        tail,
         json_output,
         jsonl_output,
+        summary_output,
     }
 }
 
@@ -143,13 +195,85 @@ fn main() {
         }
     }
 
-    let entries: Vec<_> = if let Some(action_id) = &opts.action_filter {
-        executor.get_journal_entries_for_action(action_id)
-    } else if let Some(verdict) = opts.verdict_filter {
-        executor.get_journal_entries_for_verdict(verdict)
-    } else {
-        executor.get_journal().entries().iter().collect()
-    };
+    let mut entries: Vec<_> = executor
+        .get_journal()
+        .entries()
+        .iter()
+        .filter(|entry| {
+            if let Some(action_id) = &opts.action_filter {
+                if &entry.action_id != action_id {
+                    return false;
+                }
+            }
+
+            if let Some(verdict) = opts.verdict_filter {
+                if entry.verdict != verdict {
+                    return false;
+                }
+            }
+
+            if let Some(zone) = opts.zone_filter {
+                if entry.zone != zone {
+                    return false;
+                }
+            }
+
+            if let Some(sub) = &opts.reason_contains {
+                if !entry.reasoning.contains(sub) {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect();
+
+    if let Some(limit) = opts.limit {
+        if entries.len() > limit {
+            if opts.tail {
+                entries = entries.split_off(entries.len() - limit);
+            } else {
+                entries.truncate(limit);
+            }
+        }
+    }
+
+    if opts.summary_output {
+        let mut verdict_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut action_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut divergence_count = 0usize;
+
+        for entry in &entries {
+            *verdict_counts
+                .entry(format!("{:?}", entry.verdict))
+                .or_insert(0) += 1;
+            *action_counts.entry(entry.action_id.clone()).or_insert(0) += 1;
+            if entry.reasoning.contains("divergence=true") {
+                divergence_count += 1;
+            }
+        }
+
+        let mut top_actions = action_counts.into_iter().collect::<Vec<_>>();
+        top_actions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top_actions.truncate(5);
+
+        println!("summary policy={} runs={} matched_entries={}", opts.path, opts.runs, entries.len());
+        println!(
+            "summary divergence_count={} divergence_rate={:.3}",
+            divergence_count,
+            if entries.is_empty() {
+                0.0
+            } else {
+                divergence_count as f64 / entries.len() as f64
+            }
+        );
+        for (verdict, count) in verdict_counts {
+            println!("summary verdict={} count={}", verdict, count);
+        }
+        for (action, count) in top_actions {
+            println!("summary top_action={} count={}", action, count);
+        }
+    }
 
     if opts.jsonl_output {
         for entry in entries {
