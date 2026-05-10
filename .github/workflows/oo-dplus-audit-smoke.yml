@@ -1,0 +1,34 @@
+name: oo-dplus-audit-smoke
+
+on:
+  push:
+    paths:
+      - "oo-dplus/**"
+      - ".github/workflows/oo-dplus-audit-smoke.yml"
+  pull_request:
+    paths:
+      - "oo-dplus/**"
+      - ".github/workflows/oo-dplus-audit-smoke.yml"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oo-dplus
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo check dplus_audit
+        run: cargo check --features std --bin dplus_audit
+
+      - name: Run library and binary tests
+        run: cargo test --features std --lib --bins
+
+      - name: Run audit smoke script
+        shell: pwsh
+        run: ./dplus-audit-smoke.ps1 -SkipBuild

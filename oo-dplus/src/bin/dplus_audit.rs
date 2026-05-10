@@ -5,7 +5,7 @@ use osg_memory_warden::dplus_compiler::bytecode::Bytecode;
 use osg_memory_warden::dplus_compiler::compiler::Compiler;
 use osg_memory_warden::dplus_compiler::executor::PolicyExecutor;
 use osg_memory_warden::dplus_compiler::parser::parse;
-use osg_memory_warden::dplus_compiler::vm::{MemoryZone, Verdict};
+use osg_memory_warden::dplus_compiler::vm::{JournalEntry, MemoryZone, Verdict};
 
 struct Options {
     path: String,
@@ -184,6 +184,42 @@ fn parse_options() -> Options {
     }
 }
 
+fn divergence_rate(entries: &[&JournalEntry]) -> f64 {
+    if entries.is_empty() {
+        return 0.0;
+    }
+
+    let divergence_count = entries
+        .iter()
+        .filter(|entry| entry.reasoning.contains("divergence=true"))
+        .count();
+
+    divergence_count as f64 / entries.len() as f64
+}
+
+fn strict_failure_reason(opts: &Options, entries: &[&JournalEntry]) -> Option<String> {
+    if let Some(verdict) = opts.fail_on_verdict {
+        if entries.iter().any(|entry| entry.verdict == verdict) {
+            return Some(format!(
+                "strict-fail: found verdict {:?} in matched entries",
+                verdict
+            ));
+        }
+    }
+
+    if let Some(max_rate) = opts.max_divergence_rate {
+        let rate = divergence_rate(entries);
+        if rate > max_rate {
+            return Some(format!(
+                "strict-fail: divergence_rate {:.6} exceeds max {:.6}",
+                rate, max_rate
+            ));
+        }
+    }
+
+    None
+}
+
 fn main() {
     let opts = parse_options();
 
@@ -300,34 +336,9 @@ fn main() {
         }
     }
 
-    let divergence_count = entries
-        .iter()
-        .filter(|entry| entry.reasoning.contains("divergence=true"))
-        .count();
-    let divergence_rate = if entries.is_empty() {
-        0.0
-    } else {
-        divergence_count as f64 / entries.len() as f64
-    };
-
-    if let Some(verdict) = opts.fail_on_verdict {
-        if entries.iter().any(|entry| entry.verdict == verdict) {
-            eprintln!(
-                "strict-fail: found verdict {:?} in matched entries",
-                verdict
-            );
-            std::process::exit(1);
-        }
-    }
-
-    if let Some(max_rate) = opts.max_divergence_rate {
-        if divergence_rate > max_rate {
-            eprintln!(
-                "strict-fail: divergence_rate {:.6} exceeds max {:.6}",
-                divergence_rate, max_rate
-            );
-            std::process::exit(1);
-        }
+    if let Some(reason) = strict_failure_reason(&opts, &entries) {
+        eprintln!("{}", reason);
+        std::process::exit(1);
     }
 
     if opts.jsonl_output {
@@ -369,5 +380,82 @@ fn main() {
                 entry.action_id, entry.verdict, entry.zone, entry.reasoning
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_opts() -> Options {
+        Options {
+            path: "policy.dplus".to_string(),
+            runs: 3,
+            action_filter: None,
+            verdict_filter: None,
+            zone_filter: None,
+            reason_contains: None,
+            limit: None,
+            tail: false,
+            json_output: false,
+            jsonl_output: false,
+            summary_output: false,
+            fail_on_verdict: None,
+            max_divergence_rate: None,
+        }
+    }
+
+    fn entry(verdict: Verdict, reasoning: &str) -> JournalEntry {
+        JournalEntry {
+            timestamp: 0,
+            action_id: "a1".to_string(),
+            verdict,
+            zone: MemoryZone::Warm,
+            reasoning: reasoning.to_string(),
+        }
+    }
+
+    #[test]
+    fn strict_mode_fails_when_target_verdict_present() {
+        let mut opts = sample_opts();
+        opts.fail_on_verdict = Some(Verdict::Forbid);
+
+        let e1 = entry(Verdict::Allow, "divergence=false");
+        let e2 = entry(Verdict::Forbid, "divergence=false");
+        let entries = vec![&e1, &e2];
+
+        let reason = strict_failure_reason(&opts, &entries);
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("found verdict Forbid"));
+    }
+
+    #[test]
+    fn strict_mode_fails_when_divergence_rate_exceeds_threshold() {
+        let mut opts = sample_opts();
+        opts.max_divergence_rate = Some(0.4);
+
+        let e1 = entry(Verdict::Allow, "divergence=true");
+        let e2 = entry(Verdict::Allow, "divergence=true");
+        let e3 = entry(Verdict::Allow, "divergence=false");
+        let entries = vec![&e1, &e2, &e3];
+
+        let reason = strict_failure_reason(&opts, &entries);
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("divergence_rate"));
+    }
+
+    #[test]
+    fn strict_mode_passes_when_below_threshold_and_no_forbidden_verdict() {
+        let mut opts = sample_opts();
+        opts.fail_on_verdict = Some(Verdict::Emergency);
+        opts.max_divergence_rate = Some(0.5);
+
+        let e1 = entry(Verdict::Allow, "divergence=true");
+        let e2 = entry(Verdict::AllowWarn, "divergence=false");
+        let e3 = entry(Verdict::Defer, "divergence=false");
+        let entries = vec![&e1, &e2, &e3];
+
+        let reason = strict_failure_reason(&opts, &entries);
+        assert!(reason.is_none());
     }
 }
