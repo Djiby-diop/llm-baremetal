@@ -58,6 +58,7 @@ cargo test
 cargo run --features std --bin dplus_check -- policy-strict.dplus
 cargo run --features std --bin dplus_judge -- policy-strict.dplus
 cargo run --features std --bin dplus_audit -- policy-strict.dplus --summary
+pwsh ./dplus-audit-smoke.ps1
 pwsh ./test-smoke.ps1
 pwsh ./test-smoke.ps1 -Configuration release
 ```

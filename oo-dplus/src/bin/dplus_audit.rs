@@ -19,11 +19,13 @@ struct Options {
     json_output: bool,
     jsonl_output: bool,
     summary_output: bool,
+    fail_on_verdict: Option<Verdict>,
+    max_divergence_rate: Option<f64>,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: dplus_audit <policy.dplus> [--runs N] [--action-filter ID] [--verdict-filter VERDICT] [--zone-filter ZONE] [--reason-contains TEXT] [--limit N] [--tail] [--summary] [--json] [--jsonl]"
+        "usage: dplus_audit <policy.dplus> [--runs N] [--action-filter ID] [--verdict-filter VERDICT] [--zone-filter ZONE] [--reason-contains TEXT] [--limit N] [--tail] [--summary] [--json] [--jsonl] [--fail-on-verdict VERDICT] [--max-divergence-rate 0..1]"
     );
     eprintln!("verdict values: allow|allowwarn|defer|throttle|monitor|quarantine|compensate|forbid|emergency");
     eprintln!("zone values: frozen|cold|warm|hot|sentinel|journal");
@@ -87,6 +89,8 @@ fn parse_options() -> Options {
     let mut json_output = false;
     let mut jsonl_output = false;
     let mut summary_output = false;
+    let mut fail_on_verdict = None;
+    let mut max_divergence_rate = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -136,6 +140,25 @@ fn parse_options() -> Options {
             "--summary" => {
                 summary_output = true;
             }
+            "--fail-on-verdict" => {
+                let raw = args.next().unwrap_or_else(|| usage());
+                fail_on_verdict = parse_verdict(&raw).or_else(|| {
+                    eprintln!("invalid --fail-on-verdict value: {}", raw);
+                    usage();
+                });
+            }
+            "--max-divergence-rate" => {
+                let raw = args.next().unwrap_or_else(|| usage());
+                let parsed = raw.parse::<f64>().unwrap_or_else(|_| {
+                    eprintln!("invalid --max-divergence-rate value: {}", raw);
+                    usage();
+                });
+                if !(0.0..=1.0).contains(&parsed) {
+                    eprintln!("--max-divergence-rate must be between 0.0 and 1.0");
+                    usage();
+                }
+                max_divergence_rate = Some(parsed);
+            }
             "-h" | "--help" => usage(),
             _ => {
                 eprintln!("unknown argument: {}", arg);
@@ -156,6 +179,8 @@ fn parse_options() -> Options {
         json_output,
         jsonl_output,
         summary_output,
+        fail_on_verdict,
+        max_divergence_rate,
     }
 }
 
@@ -272,6 +297,36 @@ fn main() {
         }
         for (action, count) in top_actions {
             println!("summary top_action={} count={}", action, count);
+        }
+    }
+
+    let divergence_count = entries
+        .iter()
+        .filter(|entry| entry.reasoning.contains("divergence=true"))
+        .count();
+    let divergence_rate = if entries.is_empty() {
+        0.0
+    } else {
+        divergence_count as f64 / entries.len() as f64
+    };
+
+    if let Some(verdict) = opts.fail_on_verdict {
+        if entries.iter().any(|entry| entry.verdict == verdict) {
+            eprintln!(
+                "strict-fail: found verdict {:?} in matched entries",
+                verdict
+            );
+            std::process::exit(1);
+        }
+    }
+
+    if let Some(max_rate) = opts.max_divergence_rate {
+        if divergence_rate > max_rate {
+            eprintln!(
+                "strict-fail: divergence_rate {:.6} exceeds max {:.6}",
+                divergence_rate, max_rate
+            );
+            std::process::exit(1);
         }
     }
 

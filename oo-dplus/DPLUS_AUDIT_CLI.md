@@ -27,6 +27,8 @@ cargo run --features std --bin dplus_audit -- policy-strict.dplus
 - `--summary`: print aggregate observability summary
 - `--json`: print one structured JSON document
 - `--jsonl`: print one JSON line per audit entry
+- `--fail-on-verdict VERDICT`: return non-zero if filtered entries include verdict
+- `--max-divergence-rate 0..1`: return non-zero if divergence rate exceeds threshold
 
 Verdict values:
 
@@ -81,6 +83,18 @@ Summary mode (verdict distribution, top actions, divergence rate):
 cargo run --features std --bin dplus_audit -- policy-strict.dplus --runs 20 --summary
 ```
 
+Strict mode gate (CI-friendly):
+
+```bash
+cargo run --features std --bin dplus_audit -- policy-strict.dplus --summary --fail-on-verdict emergency --max-divergence-rate 0.30
+```
+
+Expected-fail policy gate example:
+
+```bash
+cargo run --features std --bin dplus_audit -- policy.dplus --fail-on-verdict forbid
+```
+
 ## Output Notes
 
 - Text mode prints one line per entry with action, verdict, zone, and reason.
@@ -105,4 +119,11 @@ cargo run --features std --bin dplus_audit -- policy-strict.dplus --summary
 
 ```bash
 cargo run --features std --bin dplus_audit -- policy-strict.dplus --verdict-filter forbid --jsonl
+```
+
+4. CI/local smoke check:
+
+```powershell
+pwsh ./dplus-audit-smoke.ps1
+pwsh ./dplus-audit-smoke.ps1 -Configuration release
 ```
