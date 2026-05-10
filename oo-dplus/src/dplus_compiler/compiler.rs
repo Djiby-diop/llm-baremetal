@@ -55,9 +55,8 @@ impl Compiler {
                 Section::Emergency { body } => {
                     self.compile_emergency(body)?;
                 }
-                Section::Polyglot { block: _ } => {
-                    // Phase 4 foundation: parser accepts polyglot blocks.
-                    // Backend codegen for each foreign language will be added in next step.
+                Section::Polyglot { block } => {
+                    bc_module.add_foreign_block(block.clone());
                 }
             }
         }
@@ -181,6 +180,7 @@ impl Compiler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dplus_compiler::{EmbeddedLanguage, ForeignBlock, Section};
 
     #[test]
     fn test_compiler_empty() {
@@ -191,5 +191,21 @@ mod tests {
         };
         let result = compiler.compile(&module);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_compiler_preserves_polyglot_blocks() {
+        let mut compiler = Compiler::new();
+        let module = DplusModule {
+            sections: vec![Section::Polyglot {
+                block: ForeignBlock::new(EmbeddedLanguage::Python, "print('hi')").unwrap(),
+            }],
+            metadata: HashMap::new(),
+        };
+
+        let bytecode = compiler.compile(&module).unwrap();
+        assert_eq!(bytecode.foreign_blocks.len(), 1);
+        assert_eq!(bytecode.foreign_blocks[0].language, EmbeddedLanguage::Python);
+        assert!(bytecode.foreign_blocks[0].code.contains("print"));
     }
 }

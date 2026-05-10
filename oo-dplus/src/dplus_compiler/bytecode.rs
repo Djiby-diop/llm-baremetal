@@ -1,6 +1,8 @@
 // src/dplus_compiler/bytecode.rs
 //! D++ Bytecode: Intermediate Representation
 
+use super::polyglot::ForeignBlock;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Bytecode {
     // Stack operations
@@ -60,6 +62,7 @@ pub struct BytecodeFunction {
 #[derive(Debug, Clone)]
 pub struct BytecodeModule {
     pub functions: std::collections::HashMap<String, BytecodeFunction>,
+    pub foreign_blocks: Vec<ForeignBlock>,
     pub entrypoint: String,
 }
 
@@ -67,12 +70,17 @@ impl BytecodeModule {
     pub fn new(entrypoint: &str) -> Self {
         BytecodeModule {
             functions: std::collections::HashMap::new(),
+            foreign_blocks: Vec::new(),
             entrypoint: entrypoint.to_string(),
         }
     }
 
     pub fn add_function(&mut self, func: BytecodeFunction) {
         self.functions.insert(func.name.clone(), func);
+    }
+
+    pub fn add_foreign_block(&mut self, block: ForeignBlock) {
+        self.foreign_blocks.push(block);
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -95,5 +103,6 @@ mod tests {
     fn test_bytecode_module() {
         let module = BytecodeModule::new("main");
         assert_eq!(module.entrypoint, "main");
+        assert!(module.foreign_blocks.is_empty());
     }
 }
