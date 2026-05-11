@@ -4474,6 +4474,15 @@ void transformer_forward(RunState* s, TransformerWeights* w, Config* p, int toke
             matmul(s->k, s->xb, w->wk + l*dim*kv_dim, dim, kv_dim);
             matmul(s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim);
         }
+
+        // ── LoRA forward injection (Phase 6D) ──────────────────────────────
+        // g_lora is zero-init until trained, so this is a safe no-op at boot.
+        // Once LoRA is trained, it adds rank-8 deltas to q, k, v in-place.
+        if (g_lora.n_layers > 0 && (UINT32)l < g_lora.n_layers) {
+            oo_lora_forward(&g_lora.layers[l][0], s->xb, s->q, (UINT32)dim);
+            oo_lora_forward(&g_lora.layers[l][1], s->xb, s->k, (UINT32)kv_dim);
+            oo_lora_forward(&g_lora.layers[l][2], s->xb, s->v, (UINT32)kv_dim);
+        }
         
         // Store in KV cache
         int loff = l * p->seq_len * kv_dim;

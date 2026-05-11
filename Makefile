@@ -64,6 +64,24 @@ OO_LINK_ARCHIVES = \
 	$(OO_BUILD_DIR)/librust_guard.a \
 	../vital-baremetal/liboo-vital.a
 
+# OO Biological Organ object files (linked when available)
+OO_ORGAN_OBJS := $(wildcard \
+	../united-baremetal/build/*.o \
+	../kernel-baremetal/build/*.o \
+	../memory-baremetal/build/*.o \
+	../network-baremetal/build/*.o \
+	../identity-baremetal/build/*.o \
+	../sense-baremetal/build/*.o \
+	../vocal-baremetal/build/*.o \
+	../reflex-baremetal/build/*.o \
+	../evolution-baremetal/build/*.o \
+	../dream-baremetal/build/*.o \
+	../regen-baremetal/build/*.o \
+	../swarm-baremetal/build/*.o \
+	../shadow-baremetal/build/*.o \
+	../proprioception-baremetal/build/*.o \
+)
+
 # P1 split build: build efi_phases/efi_entry locally because cached OO archives
 # may be placeholder stubs during host-only iteration.
 TARGET = llama2.efi
@@ -270,6 +288,7 @@ oo-modules/ghost-engine/core/oo_net_packet.o: oo-modules/ghost-engine/core/oo_ne
 
 $(REPL_SO): $(REPL_OBJS) $(OO_LINK_ARCHIVES) | oo-subsystems
 	ld $(LDFLAGS) --allow-multiple-definition $(REPL_OBJS) \
+		$(OO_ORGAN_OBJS) \
 		--start-group $(OO_LINK_ARCHIVES) --end-group \
 		-o $(REPL_SO) $(LIBS)
 

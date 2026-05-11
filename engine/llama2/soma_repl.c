@@ -294,6 +294,12 @@ static void llmk_repl_no_model_loop(void) {
          * ----------------------------------------------------------------- */
         soma_vitals_tick();
 
+        /* ── Phase 6F: Organ Bus Tick ────────────────────────────────────────
+         * Polls keyboard IRQ ring, scheduler state, bot threats, thermal.
+         * Dispatches globules over the united_bus cardiovascular network.
+         * ----------------------------------------------------------------- */
+        oo_organ_bus_tick();
+
         /* ── Phase WW: Voice Pipeline Tick ──────────────────────────────────
          * Drives the full voice FSM: HDA capture → wakeword → NLP → TTS.
          * Non-blocking; each tick processes ~42ms of audio.

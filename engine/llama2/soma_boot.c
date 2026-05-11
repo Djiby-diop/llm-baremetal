@@ -468,6 +468,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     oo_lora_init(&g_lora, 22, 288, 8);   /* Tinyllama: 22 layers, dim=288 */
     oo_lora_load(&g_lora, (void*)0);      /* load from NVMe LBA if present */
     llmk_boot_mark(L"lora_init");
+
+    // Phase 6E: Evolution bridge — connects genetic mutations to LoRA backward
+    oo_evo_init();
+    llmk_boot_mark(L"evo_bridge_init");
+
+    // Phase 6F: Organ bus — connect all biological organs to united_bus IPC
+    oo_organ_bus_init();
+    llmk_boot_mark(L"organ_bus_init");
 #endif
     llmk_boot_mark(L"nvme_init");// [Federation] Peer mesh (Phase 4E)
     oo_fed_init(&g_federation, (const CHAR8*)g_netboot.node_id);
@@ -7419,6 +7427,30 @@ snap_autoload_done:
             } else if (my_strncmp(prompt, "/lora_save", 10) == 0) {
                 int ls = oo_lora_persist(&g_lora, (void*)0);
                 Print(L"\r\n[LoRA] persist: %s\r\n\r\n", ls == 0 ? L"OK" : L"FAIL");
+                continue;
+
+            // ── Phase 6E: Evolution bridge stats ────────────────────────────
+            } else if (my_strncmp(prompt, "/evo_status", 11) == 0) {
+                const oo_evo_stats_t *es = oo_evo_stats();
+                Print(L"\r\n[Evo] gen=%u accepted=%u rejected=%u fitness=%.3f\r\n\r\n",
+                      es->generation, es->accepted, es->rejected,
+                      (int)(es->fitness_score * 1000));
+                continue;
+            } else if (my_strncmp(prompt, "/evo_eval", 9) == 0) {
+                oo_evo_evaluate();
+                Print(L"\r\n[Evo] Fitness evaluated — genome updated if threshold met.\r\n\r\n");
+                continue;
+
+            // ── Phase 6F: Organ bus status ───────────────────────────────────
+            } else if (my_strncmp(prompt, "/bus_status", 11) == 0) {
+                UINT8 sched = (UINT8)oo_scheduler_get_state();
+                const char *states[] = {"RELAXED","VIGILANT","COMBAT","SURVIVAL"};
+                const char *sname = (sched < 4) ? states[sched] : "UNKNOWN";
+                Print(L"\r\n[OrganBus] homeostasis=%s  kbd_ring=%s\r\n\r\n",
+                      sname[0] == 'R' ? L"RELAXED" :
+                      sname[0] == 'V' ? L"VIGILANT" :
+                      sname[0] == 'C' ? L"COMBAT" : L"SURVIVAL",
+                      (oo_kbd_getchar() != -1) ? L"pending" : L"empty");
                 continue;
 
 #endif

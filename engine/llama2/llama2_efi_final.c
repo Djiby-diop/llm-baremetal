@@ -228,6 +228,14 @@
 #include "../self_improve/oo_lora.h"
 #include "../self_improve/oo_lora.c"
 
+// Phase 6E: Evolution-baremetal bridge (DNA-validated LoRA backward)
+#include "../self_improve/oo_evolution_bridge.h"
+#include "../self_improve/oo_evolution_bridge.c"
+
+// Phase 6F: Organ bus — all biological organs wired to united_bus IPC
+#include "../kernel/oo_organ_bus.h"
+#include "../kernel/oo_organ_bus.c"
+
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 
