@@ -196,7 +196,23 @@
 #include "../kernel/oo_nvme.c"// Phase 4E: Federation protocol — peer discovery + patch sharing
 #endif
 #include "../network/oo_federation.h"
-#include "../network/oo_federation.c"// Phase SI: OO Self-Improvement Engine — human-in-the-loop patch pipeline
+#include "../network/oo_federation.c"// Phase 5B: MMU — 4-level page tables, higher-half kernel, huge pages
+#include "../kernel/oo_mmu.h"
+#include "../kernel/oo_mmu.c"
+
+// Phase 5E: Cooperative scheduler (8 tasks, LAPIC preemption stub)
+#include "../kernel/oo_scheduler.h"
+#include "../kernel/oo_scheduler.c"
+
+// Phase 5G: Self-coding engine (DIOP → C patches → D+ gate → apply)
+#include "../self_improve/oo_self_coding.h"
+#include "../self_improve/oo_self_coding.c"
+
+// Phase 5H: GPU double-buffer (GOP back-buffer + VirtIO-GPU detection)
+#include "../display/oo_gpu.h"
+#include "../display/oo_gpu.c"
+
+// Phase SI: OO Self-Improvement Engine — human-in-the-loop patch pipeline
 #include "../self_improve/oo_self_improve.h"
 #include "../self_improve/oo_self_improve.c"
 

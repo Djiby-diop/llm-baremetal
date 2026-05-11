@@ -15,12 +15,12 @@ $ErrorActionPreference = "Stop"
 $QEMU   = "C:\Program Files\qemu\qemu-system-x86_64.exe"
 $OVMF   = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
 $VARS   = "C:\Program Files\qemu\share\edk2-x86_64-secure-code.fd"  # vars (writable copy)
-$IMG    = "$PSScriptRoot\..\..\llm-baremetal\llm-baremetal-boot.img"
+$IMG    = "$PSScriptRoot\llm-baremetal-boot.img"
 $GUARD  = "$PSScriptRoot\oo-warden\guard\target\release\oo-guard"
 
 # OO UART bridge output (captured from COM1 via QEMU -serial)
-$SERIAL   = "$env:TEMP\oo-serial.txt"
-$OO_UART  = "$PSScriptRoot\..\..\llm-baremetal\OO_UART.log"
+$SERIAL_LOG_PATH = "$env:TEMP\oo-serial.txt"
+$OO_UART  = "$PSScriptRoot\OO_UART.log"
 
 # Resolve relative paths
 $IMG = (Resolve-Path $IMG).Path
@@ -41,7 +41,7 @@ if (Test-Path $OO_UART) { Remove-Item $OO_UART -Force }
 
 Write-Host "==> QEMU UEFI boot: $IMG" -ForegroundColor Cyan
 Write-Host "    OVMF: $OVMF" -ForegroundColor Gray
-Write-Host "    Serial → $SERIAL" -ForegroundColor Gray
+Write-Host "    Serial → $SERIAL_LOG_PATH" -ForegroundColor Gray
 Write-Host "    OO UART → $OO_UART" -ForegroundColor Gray
 
 # Build QEMU args
@@ -54,7 +54,7 @@ $qemu_args = @(
     "-drive", "if=pflash,format=raw,file=$VARS_TMP",
     "-drive", "format=raw,file=$IMG",
     "-serial", "file:$OO_UART",       # COM1 → OO UART bridge log
-    "-serial", "file:$SERIAL",        # COM2 → legacy serial log
+    "-serial", "file:$SERIAL_LOG_PATH",        # COM2 → legacy serial log
     "-monitor", "none"
 )
 
@@ -92,7 +92,7 @@ if ($TailUart) {
 $guard_proc = $null
 if ($Serial -and (Test-Path $GUARD)) {
     Write-Host "==> Launching oo-guard watch..." -ForegroundColor Cyan
-    $guard_proc = Start-Process -FilePath $GUARD -ArgumentList "watch --serial `"$SERIAL`"" -PassThru -NoNewWindow
+    $guard_proc = Start-Process -FilePath $GUARD -ArgumentList "watch --serial `"$SERIAL_LOG_PATH`"" -PassThru -NoNewWindow
 }
 
 # Launch QEMU
@@ -124,10 +124,10 @@ if (Test-Path $OO_UART) {
 }
 
 # Show last 30 lines of legacy serial log
-if (Test-Path $SERIAL) {
+if (Test-Path $SERIAL_LOG_PATH) {
     Write-Host ""
     Write-Host "==> Serial output (last 30 lines):" -ForegroundColor Cyan
-    Get-Content $SERIAL | Select-Object -Last 30
+    Get-Content $SERIAL_LOG_PATH | Select-Object -Last 30
 }
 
 exit $exit_code

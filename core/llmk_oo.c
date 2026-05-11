@@ -5,6 +5,7 @@
 #include "oo-modules/cellion-engine/core/cellion.h"
 #include "oo-modules/collectivion-engine/core/collectivion.h"
 #include "oo-modules/ghost-engine/core/ghost.h"
+#include "../../vital-baremetal/include/vital_spark.h"
 
 // ============================================================================
 // LLM-OO (Organism-Oriented) minimal runtime
@@ -477,6 +478,10 @@ static void llmk_oo_step_index(int idx) {
         // In V1 Foundation, it simply advances the latent state.
     }
     // ───────────────────────────────────────────────────────────────────────
+    
+    // --- VITAL-BAREMETAL PULSE ---
+    // On synchronise le rythme cardiaque global
+    vital_eternal_heartbeat();
 
     if (g_on_step) {
         g_on_step(e->id, e->ticks, e->energy);
@@ -514,6 +519,9 @@ void llmk_oo_init(void) {
     // Bridge it to the global contexts
     soma_mind_init(&g_soma_mind, &g_soma_router, (OosiV3GenCtx*)&g_oosi_ctx, &g_soma_logic, &g_cellion, NULL, NULL);
     g_soma_mind_ready = 1;
+    
+    // --- VITAL-BAREMETAL INIT ---
+    vital_init();
 }
 
 void llmk_oo_set_on_step(LlmkOoOnStep cb) {

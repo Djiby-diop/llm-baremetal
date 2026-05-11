@@ -440,6 +440,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     oo_growth_init(&g_growth);
     llmk_boot_mark(L"growth_init");    // [NVMe] Bare-metal NVMe driver (Phase 5C)
     oo_nvme_init(&g_nvme);
+    llmk_boot_mark(L"nvme_init");    // [MMU] Page tables Phase 5B
+    oo_mmu_init(&g_mmu);
+    llmk_boot_mark(L"mmu_init");     // [USB HID] Keyboard Phase 5D
+    oo_usb_hid_init(&g_usb_hid);
+    llmk_boot_mark(L"hid_init");     // [Scheduler] Cooperative tasks Phase 5E
+    oo_sched_init(&g_sched, 10);
+    llmk_boot_mark(L"sched_init");   // [Self-coding] Patch engine Phase 5G
+    oo_coding_init(&g_self_coding);
+    llmk_boot_mark(L"coding_init");  // [GPU] Double-buffer Phase 5H
+    oo_gpu_init(&g_gpu, SystemTable);
+    llmk_boot_mark(L"gpu_init");
 #endif
     llmk_boot_mark(L"nvme_init");// [Federation] Peer mesh (Phase 4E)
     oo_fed_init(&g_federation, (const CHAR8*)g_netboot.node_id);
@@ -7338,6 +7349,21 @@ snap_autoload_done:
                 continue;            // ── Phase 5F: Model growth pipeline ─────────────────────────────
             } else if (my_strncmp(prompt, "/growth_", 8) == 0) {
                 oo_growth_repl_cmd(&g_growth, &g_diop, prompt, g_root);
+                continue;            // ── Phase 5B: MMU paging ────────────────────────────────────────
+            } else if (my_strncmp(prompt, "/mmu_", 5) == 0) {
+                oo_mmu_repl_cmd(&g_mmu, &g_oo_boot, prompt);
+                continue;            // ── Phase 5D: USB HID keyboard ──────────────────────────────────
+            } else if (my_strncmp(prompt, "/hid_", 5) == 0) {
+                oo_usb_hid_repl_cmd(&g_usb_hid, prompt);
+                continue;            // ── Phase 5E: Scheduler ─────────────────────────────────────────
+            } else if (my_strncmp(prompt, "/sched_", 7) == 0) {
+                oo_sched_repl_cmd(&g_sched, prompt);
+                continue;            // ── Phase 5G: Self-coding engine ────────────────────────────────
+            } else if (my_strncmp(prompt, "/code_", 6) == 0) {
+                oo_coding_repl_cmd(&g_self_coding, prompt);
+                continue;            // ── Phase 5H: GPU / framebuffer ─────────────────────────────────
+            } else if (my_strncmp(prompt, "/gpu_", 5) == 0) {
+                oo_gpu_repl_cmd(&g_gpu, prompt);
                 continue;
 
 #endif

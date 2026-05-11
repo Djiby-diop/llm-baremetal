@@ -61,7 +61,8 @@ OO_LINK_ARCHIVES = \
 	$(OO_BUILD_DIR)/liboo-engine.a \
 	$(OO_BUILD_DIR)/liboo-modules.a \
 	$(OO_BUILD_DIR)/liboo-bus.a \
-	$(OO_BUILD_DIR)/librust_guard.a
+	$(OO_BUILD_DIR)/librust_guard.a \
+	../vital-baremetal/liboo-vital.a
 
 # P1 split build: build efi_phases/efi_entry locally because cached OO archives
 # may be placeholder stubs during host-only iteration.
@@ -267,7 +268,7 @@ oo-modules/evolvion-engine/core/oo_driver_probe.o: oo-modules/evolvion-engine/co
 oo-modules/ghost-engine/core/oo_net_packet.o: oo-modules/ghost-engine/core/oo_net_packet.c oo-modules/ghost-engine/core/oo_net_packet.h
 	$(CC) $(CFLAGS) -c oo-modules/ghost-engine/core/oo_net_packet.c -o oo-modules/ghost-engine/core/oo_net_packet.o
 
-$(REPL_SO): $(REPL_OBJS) | oo-subsystems
+$(REPL_SO): $(REPL_OBJS) $(OO_LINK_ARCHIVES) | oo-subsystems
 	ld $(LDFLAGS) --allow-multiple-definition $(REPL_OBJS) \
 		--start-group $(OO_LINK_ARCHIVES) --end-group \
 		-o $(REPL_SO) $(LIBS)
