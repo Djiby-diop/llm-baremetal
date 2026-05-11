@@ -7390,9 +7390,12 @@ snap_autoload_done:
             } else if (my_strncmp(prompt, "/gpu_", 5) == 0) {
                 oo_gpu_repl_cmd(&g_gpu, prompt);
                 continue;
+            }
+
+#endif /* LLMK_SKIP_EXPERIMENTAL_UNITY — Phase 5 experimental block ends here */
 
             // ── Phase 6A: IRQ status ─────────────────────────────────────────
-            } else if (my_strncmp(prompt, "/irq_status", 11) == 0) {
+            else if (my_strncmp(prompt, "/irq_status", 11) == 0) {
                 Print(L"\r\n[IRQ] PS/2 keyboard interrupt active (IDT[33], IRQ1)\r\n");
                 int ch = oo_kbd_getchar();
                 if (ch > 0) { Print(L"[IRQ] Buffered key: %c\r\n\r\n", (CHAR16)ch); }
@@ -7453,7 +7456,6 @@ snap_autoload_done:
                       (oo_kbd_getchar() != -1) ? L"pending" : L"empty");
                 continue;
 
-#endif
             // ── Phase NB: Network Boot commands ──────────────────────────────
             } else if (my_strncmp(prompt, "/net_pull ", 10) == 0) {
                 const char *url = prompt + 10;

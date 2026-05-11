@@ -103,3 +103,42 @@ char *strncpy(char *dst, const char *src, size_t n) {
     for (; i < n; i++) dst[i] = 0;
     return dst;
 }
+
+/* ── remaining undefined symbols ────────────────────────────────────────
+ * These were undefined before the scheduler/bot fix. Adding stubs here
+ * ensures no PLT-zero-execution crash if any of these are reached at runtime.
+ */
+void repl_register_cmd(const char *name, void *fn, const char *help) {
+    (void)name; (void)fn; (void)help;
+}
+void __stack_chk_fail(void) { for (;;) {} }   /* halt on stack corruption */
+void _task_wrapper(void) {}
+int  oo_nvme_read_lba(void *ctx, UINT64 lba, UINT32 cnt, void *buf) {
+    (void)ctx; (void)lba; (void)cnt; (void)buf; return -1;
+}
+int  oo_nvme_write_lba(void *ctx, UINT64 lba, UINT32 cnt, const void *buf) {
+    (void)ctx; (void)lba; (void)cnt; (void)buf; return -1;
+}
+int  oo_pressure_sample(void) { return 0; }
+int  oo_storage_exists(const char *path) { (void)path; return 0; }
+int  oo_storage_read_all(const char *path, void *buf, UINTN cap, UINTN *out) {
+    (void)path; (void)buf; (void)cap; if (out) *out = 0; return -1;
+}
+int  oo_storage_write_all(const char *path, const void *buf, UINTN len) {
+    (void)path; (void)buf; (void)len; return -1;
+}
+void trigger_diop_sleep_learning(void) {}
+
+/* ── kernel-baremetal stubs ──────────────────────────────────────────────
+ * oo_scheduler_get_state() and oo_scheduler_heartbeat() are pulled from
+ * kernel-baremetal/build/*.o via OO_ORGAN_OBJS when that build exists.
+ * When the build directory is absent, these stubs prevent PLT-stub crashes
+ * (PLT section is not mapped in the EFI PE image, so any unresolved PLT
+ * call runs off into unmapped zeros and eventually hits a #UD in .data).
+ */
+int oo_scheduler_get_state(void) { return 0; }   /* 0 = HOMEOSTASIS_NORMAL */
+
+/* ── bot-baremetal stub ──────────────────────────────────────────────────
+ * bot_get_threat_level() returns 0 = no threat detected.
+ */
+UINT8 bot_get_threat_level(void) { return 0; }
