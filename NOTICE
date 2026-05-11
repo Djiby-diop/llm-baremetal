@@ -20,6 +20,26 @@ This notice serves as a formal declaration of intellectual property.
    - The OO-SomaMind runtime contract
    - All OO subsystem modules (20+ engines)
    - The DjiBLAS bare-metal BLAS library
+   - The biological organ architecture:
+       united-baremetal  (cardiovascular / IPC bus)
+       kernel-baremetal  (brainstem / homeostasis)
+       memory-baremetal  (hippocampus / lymphatic)
+       network-baremetal (respiratory / TCP/IP)
+       identity-baremetal (DNA / self-recognition)
+       sense-baremetal   (sensory / retina)
+       vocal-baremetal   (vocal cords / speaker)
+       reflex-baremetal  (spinal cord / reflexes)
+       evolution-baremetal (genetic mutation)
+       dream-baremetal   (sleep / memory consolidation)
+       regen-baremetal   (stem cells / hot-patching)
+       swarm-baremetal   (collective intelligence / pheromones)
+       shadow-baremetal  (anti-forensics / stealth)
+       vital-baremetal   (heartbeat / consciousness FSM / Yin-Yang)
+       bot-baremetal     (immune system / threat detection)
+   - The DNA Synthesizer (adaptive self-tuning pipeline)
+   - The Yin/Yang consciousness balance model
+   - The OO self-improvement pipeline (Phase 3-5G)
+   - The DIOP inference model series
    is the original work of Djiby Diop, created starting 2024.
 
 2. GIT HISTORY AS PROOF
@@ -27,16 +47,26 @@ This notice serves as a formal declaration of intellectual property.
    of authorship and timeline. All commits by "Djiby Diop" and "npdji"
    are by the same person (Djiby Diop).
 
-3. DERIVATIVE WORKS
+3. PATENT NOTICE
+   The following concepts may be subject to patent applications:
+   - Biological organ architecture for operating systems
+   - Yin/Yang consciousness balance for AI safety decisions
+   - DNA-hash based process self-recognition in bare-metal systems
+   - Pheromone-based inter-node immunity sharing
+   - Hot-patch stem-cell repair without reboot (regen-baremetal)
+   Use of this code does not grant any patent rights.
+
+4. DERIVATIVE WORKS
    Any fork or derivative of this repository (including but not limited
    to github.com/batteryphil/llm-baremetal) is subject to the terms of
    the AGPL-3.0 license with additional terms as specified in LICENSE.
+   Commercial use requires explicit written permission from Djiby Diop.
 
-4. PRIOR ART
+5. PRIOR ART
    This project builds upon llama2.c by Andrej Karpathy (MIT License)
    for the base transformer inference logic. All other systems-level
    architecture is original work by Djiby Diop.
 
-5. CONTACT
+6. CONTACT
    For licensing, partnership, or IP inquiries:
    Djiby Diop — djibydiop@proton.me
