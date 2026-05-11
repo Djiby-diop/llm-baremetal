@@ -451,6 +451,23 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     llmk_boot_mark(L"coding_init");  // [GPU] Double-buffer Phase 5H
     oo_gpu_init(&g_gpu, SystemTable);
     llmk_boot_mark(L"gpu_init");
+
+    // Phase 6A: IRQ wiring — PS/2 keyboard via 8259A PIC (post-EBS)
+    oo_irq_init();
+    llmk_boot_mark(L"irq_init");
+
+    // Phase 6B: CPU thermal — MSR-based temperature monitoring
+    {
+        oo_thermal_status_t _ts;
+        int tr = oo_thermal_read(&_ts);
+        if (tr == 0) llmk_boot_mark(L"thermal_ok");
+        else         llmk_boot_mark(L"thermal_skip");
+    }
+
+    // Phase 6C: LoRA — load saved adapter from NVMe (if any)
+    oo_lora_init(&g_lora, 22, 288, 8);   /* Tinyllama: 22 layers, dim=288 */
+    oo_lora_load(&g_lora, (void*)0);      /* load from NVMe LBA if present */
+    llmk_boot_mark(L"lora_init");
 #endif
     llmk_boot_mark(L"nvme_init");// [Federation] Peer mesh (Phase 4E)
     oo_fed_init(&g_federation, (const CHAR8*)g_netboot.node_id);
@@ -7364,6 +7381,44 @@ snap_autoload_done:
                 continue;            // ── Phase 5H: GPU / framebuffer ─────────────────────────────────
             } else if (my_strncmp(prompt, "/gpu_", 5) == 0) {
                 oo_gpu_repl_cmd(&g_gpu, prompt);
+                continue;
+
+            // ── Phase 6A: IRQ status ─────────────────────────────────────────
+            } else if (my_strncmp(prompt, "/irq_status", 11) == 0) {
+                Print(L"\r\n[IRQ] PS/2 keyboard interrupt active (IDT[33], IRQ1)\r\n");
+                int ch = oo_kbd_getchar();
+                if (ch > 0) { Print(L"[IRQ] Buffered key: %c\r\n\r\n", (CHAR16)ch); }
+                else        { Print(L"[IRQ] Key buffer empty\r\n\r\n"); }
+                continue;
+
+            // ── Phase 6B: ACPI thermal ───────────────────────────────────────
+            } else if (my_strncmp(prompt, "/thermal", 8) == 0) {
+                oo_thermal_status_t ts;
+                int tr = oo_thermal_read(&ts);
+                if (tr == 0) {
+                    Print(L"\r\n[ACPI] CPU temp: %u°C  throttle:%u  emergency:%u\r\n\r\n",
+                          ts.temperature_C, ts.throttle, ts.emergency);
+                } else {
+                    Print(L"\r\n[ACPI] Thermal MSR not available (r=%d)\r\n\r\n", tr);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/shutdown", 9) == 0) {
+                Print(L"\r\n[ACPI] Initiating clean S5 shutdown...\r\n");
+                oo_acpi_shutdown();   /* drivers/oo_acpi.h */
+                /* Should not reach here */
+                continue;
+
+            // ── Phase 6C: LoRA self-improvement ─────────────────────────────
+            } else if (my_strncmp(prompt, "/lora_status", 12) == 0) {
+                float sc = oo_lora_score(&g_lora);
+                Print(L"\r\n[LoRA] layers=%u steps=%llu score=%.3f dirty=%u\r\n\r\n",
+                      g_lora.n_layers,
+                      (unsigned long long)g_lora.step_count,
+                      (int)(sc * 1000), g_lora.dirty);
+                continue;
+            } else if (my_strncmp(prompt, "/lora_save", 10) == 0) {
+                int ls = oo_lora_persist(&g_lora, (void*)0);
+                Print(L"\r\n[LoRA] persist: %s\r\n\r\n", ls == 0 ? L"OK" : L"FAIL");
                 continue;
 
 #endif

@@ -112,6 +112,7 @@ EFI_STATUS oo_ebs_call(OoBootState *bs, EFI_HANDLE ImageHandle,
                         EFI_SYSTEM_TABLE *ST);
 void       oo_ebs_post_init(OoBootState *bs);
 void       oo_idt_install(void);
+void       oo_idt_set_gate(int vec, UINT64 handler, UINT8 type_attr); /* Add/update one IDT entry */
 void       oo_ebs_print_mmap(const OoBootState *bs);
 UINT64     oo_ebs_find_heap(const OoBootState *bs, UINT64 *out_size);
 int        oo_ebs_repl_cmd(OoBootState *bs, const char *cmd,

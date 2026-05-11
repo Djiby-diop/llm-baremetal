@@ -216,6 +216,18 @@
 #include "../self_improve/oo_self_improve.h"
 #include "../self_improve/oo_self_improve.c"
 
+// Phase 6A: PS/2 keyboard IRQ + 8259A PIC wiring (post-ExitBootServices)
+#include "../kernel/oo_irq.h"
+#include "../kernel/oo_irq.c"
+
+// Phase 6B: CPU thermal monitoring via IA32_THERM_STATUS MSR
+#include "../kernel/oo_thermal.h"
+#include "../kernel/oo_thermal.c"
+
+// Phase 6C: LoRA adapter self-improvement (closes the evolution loop)
+#include "../self_improve/oo_lora.h"
+#include "../self_improve/oo_lora.c"
+
 // Forward declarations for static helpers used before their definitions
 static void ascii_to_char16(CHAR16 *dst, const char *src, int max_len);
 

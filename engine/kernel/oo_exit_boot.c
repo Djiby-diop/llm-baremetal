@@ -335,6 +335,11 @@ void oo_idt_install(void) {
     __asm__ volatile("lidt %0" :: "m"(_idt_ptr) : "memory");
 }
 
+/* Public: set/update one IDT gate — can be called by oo_irq.c post-init */
+void oo_idt_set_gate(int vec, UINT64 handler, UINT8 type_attr) {
+    _idt_set_gate(vec, (void *)handler, type_attr);
+}
+
 /* ── Enable NX (No-Execute) bit in EFER ────────────────────────────────── */
 static void _enable_nx(void) {
     /* IA32_EFER MSR = 0xC0000080, NXE = bit 11 */
