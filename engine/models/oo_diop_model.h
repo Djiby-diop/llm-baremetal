@@ -95,3 +95,18 @@ int oo_diop_repl_cmd(OoDiopModel *m, const char *cmd,
 
 /* Global singleton */
 extern OoDiopModel g_diop;
+
+/* ── Phase 7C: Async inference request ─────────────────────────────────────
+ * oo_diop_run() submits a request here. The REPL main loop in soma_boot.c
+ * drains it using the full transformer engine (in scope there).
+ * result[] is populated by soma_boot; oo_coding_generate() polls for it. */
+#define OO_DIOP_PROMPT_MAX  512
+#define OO_DIOP_RESULT_MAX  2048
+typedef struct {
+    CHAR8  prompt[OO_DIOP_PROMPT_MAX];
+    CHAR8  result[OO_DIOP_RESULT_MAX];
+    int    pending;   /* 1 = waiting for inference from REPL loop */
+    int    done;      /* 1 = result ready in result[] */
+    int    max_tok;   /* requested token budget */
+} OoDiopRequest;
+extern OoDiopRequest g_diop_req;

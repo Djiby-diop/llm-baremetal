@@ -157,8 +157,40 @@ int oo_coding_generate(OoSelfCoding *ctx, const char *prompt,
     _coding_scopy(p->description, prompt ? prompt : "", 255);
     _coding_scopy(ctx->last_prompt, prompt ? prompt : "", OO_CODEGEN_MAX_PROMPT - 1);
 
-    /* Use template / DIOP-generated code */
-    const char *code = _coding_get_template(target_file);
+    /* Phase 7C: Try DIOP model inference first if loaded.
+     * If DIOP result is ready (from a previous /sc_gen call), use it.
+     * Otherwise submit async request and use template as placeholder. */
+    extern OoDiopModel g_diop;
+    extern OoDiopRequest g_diop_req;
+    static CHAR8 _diop_out[OO_DIOP_RESULT_MAX];
+    const char *code = NULL;
+
+    if (g_diop.loaded) {
+        /* Build a code-focused prompt */
+        static CHAR8 _cod_prompt[512];
+        UINTN ci = 0;
+        const char *pfx = "Generate bare-metal C code for: ";
+        for (int k = 0; pfx[k] && ci < 480; k++) _cod_prompt[ci++] = (CHAR8)pfx[k];
+        if (prompt) for (int k = 0; prompt[k] && ci < 480; k++) _cod_prompt[ci++] = (CHAR8)prompt[k];
+        if (target_file) {
+            const char *sf = " [target: ";
+            for (int k = 0; sf[k] && ci < 508; k++) _cod_prompt[ci++] = (CHAR8)sf[k];
+            for (int k = 0; target_file[k] && ci < 508; k++) _cod_prompt[ci++] = (CHAR8)target_file[k];
+            _cod_prompt[ci++] = ']';
+        }
+        _cod_prompt[ci] = 0;
+
+        int diop_ret = oo_diop_run(&g_diop, _cod_prompt, _diop_out, OO_DIOP_RESULT_MAX);
+        if (diop_ret > 1) {
+            /* Result immediately available (was buffered from previous call) */
+            code = (const char *)_diop_out;
+            Print(L"[self_coding] [7C] Using DIOP-generated code (%d chars)\r\n", diop_ret);
+        } else if (diop_ret == 1) {
+            /* Request submitted — will complete when REPL loop runs /diop_await */
+            Print(L"[self_coding] [7C] DIOP async queued. Using template placeholder.\r\n");
+        }
+    }
+    if (!code) code = _coding_get_template(target_file);
     if (!code) code = _coding_get_template(NULL);
     _coding_scopy(p->code, code, OO_CODEGEN_MAX_CODE - 1);
 

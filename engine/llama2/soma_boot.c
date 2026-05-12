@@ -7348,8 +7348,103 @@ snap_autoload_done:
                 oo_mbedtls_repl_cmd(prompt);
                 continue;            // ── Phase 4D: DIOP model commands ──────────────────────────────
             } else if (my_strncmp(prompt, "/diop_", 6) == 0) {
+                /* Phase 7C: /diop_await — drain pending DIOP inference request */
+                if (my_strncmp(prompt, "/diop_await", 11) == 0) {
+                    if (!g_diop_req.pending) {
+                        Print(L"[diop] No pending request.\r\n");
+                    } else {
+                        Print(L"[diop] [7C] Running DIOP inference (model=%a max_tok=%d)...\r\n",
+                              g_diop.name, g_diop_req.max_tok);
+                        /* Use DIOP model weights for inference.
+                         * We temporarily swap the weights pointer and run a short
+                         * inference loop, then restore. DIOP is in llama2 BIN format. */
+                        if (g_diop.fmt == DIOP_FMT_BIN && g_diop.weights_len >= 28) {
+                            /* Parse DIOP config (7 ints = 28 bytes) */
+                            Config d_cfg;
+                            const int *icfg = (const int*)g_diop.weights;
+                            d_cfg.dim       = icfg[0]; d_cfg.hidden_dim = icfg[1];
+                            d_cfg.n_layers  = icfg[2]; d_cfg.n_heads    = icfg[3];
+                            d_cfg.n_kv_heads= icfg[3]; d_cfg.vocab_size = icfg[5];
+                            d_cfg.seq_len   = icfg[6];
+                            if (d_cfg.vocab_size < 0) d_cfg.vocab_size = -d_cfg.vocab_size;
+                            /* Cap to avoid OOM in QEMU test */
+                            if (d_cfg.seq_len > 256) d_cfg.seq_len = 256;
+                            int d_kv_dim = d_cfg.dim;
+
+                            Print(L"[diop] Config: dim=%d layers=%d vocab=%d seq=%d\r\n",
+                                  d_cfg.dim, d_cfg.n_layers, d_cfg.vocab_size, d_cfg.seq_len);
+
+                            /* Alloc minimal RunState for DIOP using zone allocator */
+                            RunState ds;
+                            ds.x    = (float*)simple_alloc(d_cfg.dim * sizeof(float));
+                            ds.xb   = (float*)simple_alloc(d_cfg.dim * sizeof(float));
+                            ds.xb2  = (float*)simple_alloc(d_cfg.dim * sizeof(float));
+                            ds.hb   = (float*)simple_alloc(d_cfg.hidden_dim * sizeof(float));
+                            ds.hb2  = (float*)simple_alloc(d_cfg.hidden_dim * sizeof(float));
+                            ds.q    = (float*)simple_alloc(d_cfg.dim * sizeof(float));
+                            ds.k    = (float*)simple_alloc(d_kv_dim * sizeof(float));
+                            ds.v    = (float*)simple_alloc(d_kv_dim * sizeof(float));
+                            ds.att  = (float*)simple_alloc(d_cfg.n_heads * d_cfg.seq_len * sizeof(float));
+                            ds.logits = (float*)simple_alloc(d_cfg.vocab_size * sizeof(float));
+                            ds.key_cache   = (float*)llmk_alloc_kv(
+                                (UINT64)d_cfg.n_layers * d_cfg.seq_len * d_kv_dim * sizeof(float), L"d_key");
+                            ds.value_cache = (float*)llmk_alloc_kv(
+                                (UINT64)d_cfg.n_layers * d_cfg.seq_len * d_kv_dim * sizeof(float), L"d_val");
+
+                            if (ds.x && ds.logits && ds.key_cache && ds.value_cache) {
+                                /* Map DIOP weights (shared_weights=1 for BIN signed vocab) */
+                                TransformerWeights dw;
+                                float *dw_ptr = (float*)((UINT8*)g_diop.weights + 7*sizeof(int));
+                                int shared = (icfg[5] > 0) ? 0 : 1;
+                                memory_map_weights(&dw, &d_cfg, dw_ptr, shared);
+
+                                /* Simple prompt tokenization: byte-level (ASCII) */
+                                int d_tok[128]; int d_n = 0;
+                                const CHAR8 *dp = g_diop_req.prompt;
+                                while (*dp && d_n < 127) d_tok[d_n++] = (unsigned char)*dp++;
+
+                                /* Run generation loop */
+                                int max_gen = g_diop_req.max_tok;
+                                if (max_gen > 64) max_gen = 64; /* cap for QEMU speed */
+                                int ri = 0;
+                                int token = d_tok[0];
+                                for (int pos = 0; pos < max_gen; pos++) {
+                                    transformer_forward(&ds, &dw, &d_cfg, token, pos);
+                                    /* Greedy: argmax of logits */
+                                    int next = 0; float best = ds.logits[0];
+                                    for (int vi = 1; vi < d_cfg.vocab_size; vi++) {
+                                        if (ds.logits[vi] > best) { best = ds.logits[vi]; next = vi; }
+                                    }
+                                    /* Write printable byte to result */
+                                    if (next >= 32 && next < 127) {
+                                        if (ri < OO_DIOP_RESULT_MAX - 1)
+                                            g_diop_req.result[ri++] = (CHAR8)next;
+                                    } else if (next == '\n' || next == ' ') {
+                                        if (ri < OO_DIOP_RESULT_MAX - 1)
+                                            g_diop_req.result[ri++] = (CHAR8)next;
+                                    }
+                                    token = next;
+                                    /* Feed next prompt token if still in prompt */
+                                    if (pos + 1 < d_n) token = d_tok[pos + 1];
+                                }
+                                g_diop_req.result[ri] = 0;
+                                g_diop_req.pending = 0;
+                                g_diop_req.done    = 1;
+                                Print(L"[diop] [7C] Inference done: %d chars\r\n", ri);
+                                Print(L"[diop] Result: %a\r\n", g_diop_req.result);
+                            } else {
+                                Print(L"[diop] OOM: cannot alloc RunState for DIOP model\r\n");
+                                g_diop_req.pending = 0;
+                            }
+                        } else {
+                            Print(L"[diop] DIOP model not in BIN format — cannot run inference\r\n");
+                            g_diop_req.pending = 0;
+                        }
+                    }
+                    continue;
+                }
                 oo_diop_repl_cmd(&g_diop, prompt, g_root);
-                continue;            // ── Phase 4E: Federation commands ───────────────────────────────
+                continue;// ── Phase 4E: Federation commands ───────────────────────────────
             } else if (my_strncmp(prompt, "/fed_", 5) == 0) {
                 oo_fed_repl_cmd(&g_federation, prompt);
                 continue;            // ── Phase 5A: ExitBootServices (full CPU takeover) ─────────────

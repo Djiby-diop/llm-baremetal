@@ -11,6 +11,9 @@
 /* Global singleton */
 OoDiopModel g_diop;
 
+/* Phase 7C: async inference request shared with soma_boot.c REPL loop */
+OoDiopRequest g_diop_req;
+
 /* ── String helpers ─────────────────────────────────────────────────────── */
 static UINTN _d_strlen(const CHAR8 *s){UINTN n=0;if(!s)return 0;while(s[n])n++;return n;}
 static void  _d_strlcpy(CHAR8*d,const CHAR8*s,UINTN c){UINTN i=0;while(i+1<c&&s[i]){d[i]=s[i];i++;}d[i]=0;}
@@ -223,28 +226,76 @@ EFI_STATUS oo_diop_load_url(OoDiopModel *m, const CHAR8 *url) {
     return EFI_SUCCESS;
 }
 
-/* ── Run inference (bridge to llmk) ─────────────────────────────────────── */
+/* ── Run inference (Phase 7C: async submit) ──────────────────────────────── */
 /*
- * The DIOP model run bridges into the existing llmk inference engine.
- * The actual llmk_run_inference() / llmk_infer_text() functions are in
- * soma_boot.c scope. Here we prepare the context and call through the
- * global model state set by /diop_activate.
+ * Submits an inference request to the async queue (g_diop_req). The REPL main
+ * loop in soma_boot.c drains it using the full transformer engine.
  *
- * Phase 4D: sets the model buffer in the global llmk state so the next
- * REPL inference call uses the DIOP model weights.
+ * Returns:
+ *   0  — not loaded / busy
+ *   1  — request submitted (result will be in g_diop_req.result when done=1)
+ *   >0 — result already ready (copied into out_buf)
  */
 int oo_diop_run(OoDiopModel *m, const CHAR8 *prompt,
                 CHAR8 *out_buf, UINTN out_cap) {
     if (!m || !m->loaded || !prompt) return 0;
-    (void)out_buf; (void)out_cap;
-    Print(L"[diop] Run inference (via llmk engine)...\r\n");
-    Print(L"[diop] Model: %a | fmt=%s | variant=%d\r\n",
-          m->name,
-          m->fmt==DIOP_FMT_GGUF?L"GGUF":L"BIN",
-          m->variant);
-    Print(L"[diop] Prompt: %a\r\n", prompt);
-    Print(L"[diop] Note: use /diop_activate then type prompt in REPL for full inference\r\n");
+
+    /* ── If result already available from previous async run, consume it ── */
+    if (g_diop_req.done) {
+        UINTN rlen = _d_strlen(g_diop_req.result);
+        if (rlen >= out_cap) rlen = out_cap - 1;
+        for (UINTN i = 0; i < rlen; i++) out_buf[i] = g_diop_req.result[i];
+        out_buf[rlen] = 0;
+        g_diop_req.done    = 0;
+        g_diop_req.pending = 0;
+        m->total_tokens   += (UINT32)(rlen / 4 + 1);
+        m->runs++;
+        Print(L"[diop] Result consumed (%u chars)\r\n", (UINT32)rlen);
+        return (int)rlen;
+    }
+
+    /* ── If already pending, report busy ── */
+    if (g_diop_req.pending) {
+        Print(L"[diop] Inference in progress — call /diop_await or /sc_await\r\n");
+        return 0;
+    }
+
+    /* ── Parse llama2 BIN Config from DIOP model header ── */
+    if (m->fmt == DIOP_FMT_BIN && m->weights_len >= 28) {
+        /* Config layout: int dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len */
+        const int *cfg = (const int *)m->weights;
+        int dim      = cfg[0], hidden = cfg[1], n_lay = cfg[2];
+        int n_heads  = cfg[3], vocab  = cfg[5], seq   = cfg[6];
+        Print(L"[diop] Config: dim=%d hidden=%d layers=%d heads=%d vocab=%d seq=%d\r\n",
+              dim, hidden, n_lay, n_heads, vocab, seq);
+        /* Update metadata if probe didn't fill it */
+        if (!m->dim)       m->dim       = (UINT32)dim;
+        if (!m->n_layers)  m->n_layers  = (UINT32)n_lay;
+        if (!m->n_heads)   m->n_heads   = (UINT32)n_heads;
+        if (!m->vocab_size)m->vocab_size= (UINT32)(vocab < 0 ? -vocab : vocab);
+    }
+
+    /* ── Build full prompt: [SYS] + system_prompt + [USER] + user_prompt ── */
+    static CHAR8 _full[OO_DIOP_PROMPT_MAX];
+    UINTN pi = 0;
+    /* sys prefix */
+    const CHAR8 *sys_tag = (const CHAR8*)"[SYS]";
+    for (int k = 0; sys_tag[k] && pi < OO_DIOP_PROMPT_MAX-1; k++) _full[pi++] = sys_tag[k];
+    for (int k = 0; m->system_prompt[k] && pi < OO_DIOP_PROMPT_MAX-1; k++) _full[pi++] = m->system_prompt[k];
+    const CHAR8 *usr_tag = (const CHAR8*)"[USER]";
+    for (int k = 0; usr_tag[k] && pi < OO_DIOP_PROMPT_MAX-1; k++) _full[pi++] = usr_tag[k];
+    for (int k = 0; prompt[k] && pi < OO_DIOP_PROMPT_MAX-1; k++) _full[pi++] = prompt[k];
+    _full[pi] = 0;
+
+    /* ── Submit async request ── */
+    _d_strlcpy(g_diop_req.prompt, _full, OO_DIOP_PROMPT_MAX);
+    g_diop_req.result[0] = 0;
+    g_diop_req.max_tok   = m->max_tokens;
+    g_diop_req.done      = 0;
+    g_diop_req.pending   = 1;
     m->runs++;
+    Print(L"[diop] [7C] Inference queued (%u tok budget). Run /diop_await.\r\n",
+          (UINT32)m->max_tokens);
     return 1;
 }
 
