@@ -7375,7 +7375,17 @@ snap_autoload_done:
                 Print(L"\r\n[netboot] API key stored in RAM (%lu chars). Never written to disk.\r\n\r\n", (UINTN)ki);
                 continue;
             } else if (my_strncmp(prompt, "/net_push", 9) == 0) {
-                Print(L"\r\n[netboot] Push delta to federation: Phase 4 TODO\r\n\r\n");
+                /* Push last self-improve patch to all federation peers */
+                if (g_self_improve.n_patches > 0) {
+                    int last = g_self_improve.n_patches - 1;
+                    const CHAR8 *pjson = (const CHAR8*)g_self_improve.patches[last].json;
+                    UINTN plen = 0;
+                    while (pjson[plen]) plen++;
+                    EFI_STATUS fst = oo_fed_share_patch(&g_federation, pjson, plen);
+                    Print(L"\r\n[netboot] Pushed patch to federation: %r\r\n\r\n", fst);
+                } else {
+                    Print(L"\r\n[netboot] No patches to push (run /si_patch first)\r\n\r\n");
+                }
                 oo_netboot_print_status(&g_netboot);
                 continue;
 

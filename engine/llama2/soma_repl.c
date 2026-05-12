@@ -4052,6 +4052,20 @@ static void llmk_repl_no_model_loop(void) {
             continue;
         }
 
+        if (my_strncmp(prompt, "/diop_", 6) == 0) {
+            /* g_diop and g_root declared in soma_boot scope via llama2_efi_final.c */
+            extern OoDiopModel g_diop;
+            extern EFI_FILE_HANDLE g_root;
+            oo_diop_repl_cmd(&g_diop, prompt, g_root);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/fed_", 5) == 0) {
+            extern OoFedCtx g_federation;
+            oo_fed_repl_cmd(&g_federation, prompt);
+            continue;
+        }
+
         Print(L"\r\nNo model loaded. Use /models then set repl.cfg: model=<file> and reboot.\r\n\r\n");
     }
 }
