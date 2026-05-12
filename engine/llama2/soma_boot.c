@@ -452,7 +452,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     llmk_boot_mark(L"irq_init");    // [Thermal] CPU temperature MSR monitor (Phase 6B)
     /* thermal: read-only, no init needed — just call oo_thermal_read() */    // [LoRA] Self-improvement adapter (Phase 6C)
     oo_lora_init(&g_lora, 12 /* n_layers */, 288 /* dim */, 4 /* rank */);
-    llmk_boot_mark(L"lora_init");    // [Evolution] DNA-gated LoRA backward (Phase 6E)
+    llmk_boot_mark(L"lora_init");
+
+    /* Phase 7D: Spawn LoRA background training task in cooperative scheduler */
+    {
+        extern void oo_lora_bg_worker(void *arg);
+        int tid = oo_sched_spawn(&g_sched, oo_lora_bg_worker, NULL, "lora_bg");
+        if (tid >= 0)
+            Print(L"[Phase7D] LoRA background worker spawned (task %d)\r\n", tid);
+        else
+            Print(L"[Phase7D] LoRA bg spawn failed — no task slot\r\n");
+    }// [Evolution] DNA-gated LoRA backward (Phase 6E)
     oo_evo_init();
     llmk_boot_mark(L"evo_init");    // [OrganBus] Biological organ IPC wiring (Phase 6F)
     oo_organ_bus_init();
@@ -1999,6 +2009,22 @@ snap_autoload_done:
     // MAIN LOOP
     while (1) { // SAFE: intentional long-running organism loop; terminates only via explicit operator command/shutdown.
         conversation_count++;
+
+        /* Phase 7D: Poll background task queue (LoRA BG worker + organ bus tick).
+         * oo_yield() runs one pending scheduler task, then returns.
+         * g_lora_checkpoint_req is set by oo_lora_bg_worker every 512 steps. */
+        oo_yield();
+        oo_organ_bus_tick();
+        {
+            extern volatile int g_lora_checkpoint_req;
+            extern volatile UINT64 g_lora_bg_steps;
+            if (g_lora_checkpoint_req && g_lora.dirty) {
+                oo_lora_persist(&g_lora, "lora.bin");
+                Print(L"[7D] LoRA auto-checkpoint (step %lu)\r\n",
+                      (unsigned long)g_lora_bg_steps);
+                g_lora_checkpoint_req = 0;
+            }
+        }
 
         // Voice pipeline tick (~60Hz cadence): drain TTS PCM buffer → HDA playback,
         // and keep wakeword engine fed with live audio. Non-blocking.
@@ -7473,8 +7499,34 @@ snap_autoload_done:
                 oo_thermal_repl_cmd(prompt);
                 continue;            // ── Phase 6C: LoRA adapter ──────────────────────────────────────
             } else if (my_strncmp(prompt, "/lora_", 6) == 0) {
+                /* Phase 7D: /lora_checkpoint → flush dirty LoRA to NVMe */
+                if (my_strncmp(prompt, "/lora_checkpoint", 16) == 0) {
+                    extern volatile UINT64 g_lora_bg_steps;
+                    if (g_lora.dirty) {
+                        Print(L"[lora] [7D] Checkpointing LoRA (steps=%lu)...\r\n",
+                              (unsigned long)g_lora_bg_steps);
+                        int r = oo_lora_persist(&g_lora, "lora.bin");
+                        Print(r == 0
+                            ? L"[lora] Checkpoint OK (lora.bin)\r\n"
+                            : L"[lora] Checkpoint failed (NVMe not ready)\r\n");
+                        g_lora_checkpoint_req = 0;
+                    } else {
+                        Print(L"[lora] No dirty weights (bg_steps=%lu)\r\n",
+                              (unsigned long)g_lora_bg_steps);
+                    }
+                    continue;
+                }
+                /* /lora_status: show bg training stats */
+                if (my_strncmp(prompt, "/lora_status", 12) == 0) {
+                    extern volatile UINT64 g_lora_bg_steps;
+                    Print(L"[lora] BG training steps: %lu  dirty=%d  checkpoint_req=%d\r\n",
+                          (unsigned long)g_lora_bg_steps,
+                          (int)g_lora.dirty, (int)g_lora_checkpoint_req);
+                    oo_lora_print(&g_lora);
+                    continue;
+                }
                 oo_lora_repl_cmd(&g_lora, prompt);
-                continue;            // ── Phase 6E: Evolution bridge ──────────────────────────────────
+                continue;// ── Phase 6E: Evolution bridge ──────────────────────────────────
             } else if (my_strncmp(prompt, "/evol_", 6) == 0) {
                 oo_evo_repl_cmd(prompt);
                 continue;            // ── Phase 6F: Organ bus IPC ─────────────────────────────────────

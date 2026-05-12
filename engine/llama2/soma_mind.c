@@ -2398,9 +2398,45 @@ static PheromionEngine g_pheromion;
 
 /* Novel engines — Phase 2 (emotional, temporal, hunger, introspection, apoptosis) */
 
-/* ── AP Dreamion Worker ─────────────────────────────────────────── */
-/* Volatile flag: AP1 sets this to 1 when the JSONL buffer needs flushing.
- * BSP checks this in the REPL loop and calls soma_dreamion_flush_to_disk(). */
+/* ── Phase 7D: LoRA background training task ────────────────────────────────
+ * Spawned by oo_sched_spawn() after boot. Runs one LoRA backward step each
+ * time it gets a scheduler tick, then yields. This runs cooperatively with
+ * the REPL loop — no locks needed since the main loop only reads g_lora.
+ *
+ * Every OO_LORA_BG_PERSIST_STEPS steps, marks dirty so REPL /lora_checkpoint
+ * can persist to NVMe (blocking I/O must not happen inside task context).
+ */
+#define OO_LORA_BG_PERSIST_STEPS 512
+
+volatile UINT64 g_lora_bg_steps = 0;  /* total background training steps */
+volatile int    g_lora_checkpoint_req = 0; /* REPL polls this to persist */
+
+static void oo_lora_bg_worker(void *arg) {
+    (void)arg;
+    /* Synthetic gradient: small constant signal on first adapter layer.
+     * In a real training loop this would come from the inference backward pass.
+     * Here it serves to keep the LoRA weights alive and score-tracked. */
+    static float _grad_buf[288]; /* matches dim used in oo_lora_init */
+    /* Init gradient buffer: small constant (simulates d_loss/d_x) */
+    for (int i = 0; i < 288; i++) _grad_buf[i] = 0.001f * (float)(i % 32 - 16);
+
+    while (1) {
+        /* One backward step on Wq of layer 0 */
+        if (g_lora.n_layers > 0 && g_lora.layers[0][0].A) {
+            oo_lora_backward_step(&g_lora, _grad_buf, 0 /* layer */, 0 /* Wq */);
+            g_lora_bg_steps++;
+            g_lora.dirty = 1;
+
+            /* Request checkpoint every N steps (REPL loop will flush) */
+            if ((g_lora_bg_steps & (OO_LORA_BG_PERSIST_STEPS - 1)) == 0)
+                g_lora_checkpoint_req = 1;
+        }
+        /* Cooperative yield — let REPL continue */
+        oo_yield();
+    }
+}
+
+/* AP Dreamion Worker (SMP AP1) — Dreamion dream cycles + DNA mutation */
 volatile int g_dreamion_flush_requested = 0;
 
 void ap_dreamion_worker(void) {
