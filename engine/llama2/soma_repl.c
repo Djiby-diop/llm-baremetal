@@ -4066,6 +4066,37 @@ static void llmk_repl_no_model_loop(void) {
             continue;
         }
 
+        /* ── Phase 5 subsystems ─────────────────────────────────────────── */
+        if (my_strncmp(prompt, "/nvme_", 6) == 0) {
+            extern OoNvmeCtx g_nvme;
+            oo_nvme_repl_cmd(&g_nvme, prompt);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/mmu_", 5) == 0) {
+            extern OoMmuCtx  g_mmu;
+            oo_mmu_repl_cmd(&g_mmu, &g_oo_boot, prompt);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/sched_", 7) == 0) {
+            extern OoScheduler g_sched;
+            oo_sched_repl_cmd(&g_sched, prompt);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/gpu_", 5) == 0) {
+            extern OoGpu g_gpu;
+            oo_gpu_repl_cmd(&g_gpu, prompt);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/sc_", 4) == 0) {
+            extern OoSelfCoding g_self_coding;
+            oo_coding_repl_cmd(&g_self_coding, prompt);
+            continue;
+        }
+
         Print(L"\r\nNo model loaded. Use /models then set repl.cfg: model=<file> and reboot.\r\n\r\n");
     }
 }

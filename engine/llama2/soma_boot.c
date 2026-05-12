@@ -439,7 +439,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     oo_nvme_init(&g_nvme);
     llmk_boot_mark(L"nvme_init");// [Federation] Peer mesh (Phase 4E)
     oo_fed_init(&g_federation, (const CHAR8*)g_netboot.node_id);
-    llmk_boot_mark(L"fed_init");
+    llmk_boot_mark(L"fed_init");    // [MMU] 4-level page tables (Phase 5B)
+    oo_mmu_init(&g_mmu);
+    llmk_boot_mark(L"mmu_init");    // [Scheduler] 8-task cooperative + LAPIC preemption (Phase 5E)
+    oo_sched_init(&g_sched, 10 /* ms quantum */);
+    llmk_boot_mark(L"sched_init");    // [GPU] GOP double-buffer + VirtIO detection (Phase 5H)
+    oo_gpu_init(&g_gpu, SystemTable);
+    llmk_boot_mark(L"gpu_init");    // [SelfCoding] DIOP→C patch pipeline (Phase 5G)
+    oo_coding_init(&g_self_coding);
+    llmk_boot_mark(L"coding_init");
 
     // Show diagnostic info if requested via repl.cfg: boot_diag=1
     if (g_boot_diag) {
@@ -7328,7 +7336,19 @@ snap_autoload_done:
                 continue;            // ── Phase 5C: NVMe storage ──────────────────────────────────────
             } else if (my_strncmp(prompt, "/nvme_", 6) == 0) {
                 oo_nvme_repl_cmd(&g_nvme, prompt);
-                continue;            // ── Phase 5F: Model growth pipeline ─────────────────────────────
+                continue;            // ── Phase 5B: MMU / page tables ─────────────────────────────────
+            } else if (my_strncmp(prompt, "/mmu_", 5) == 0) {
+                oo_mmu_repl_cmd(&g_mmu, &g_oo_boot, prompt);
+                continue;            // ── Phase 5E: Scheduler ─────────────────────────────────────────
+            } else if (my_strncmp(prompt, "/sched_", 7) == 0) {
+                oo_sched_repl_cmd(&g_sched, prompt);
+                continue;            // ── Phase 5H: GPU / framebuffer ─────────────────────────────────
+            } else if (my_strncmp(prompt, "/gpu_", 5) == 0) {
+                oo_gpu_repl_cmd(&g_gpu, prompt);
+                continue;            // ── Phase 5G: Self-coding engine ────────────────────────────────
+            } else if (my_strncmp(prompt, "/sc_", 4) == 0) {
+                oo_coding_repl_cmd(&g_self_coding, prompt);
+                continue;// ── Phase 5F: Model growth pipeline ─────────────────────────────
             } else if (my_strncmp(prompt, "/growth_", 8) == 0) {
                 oo_growth_repl_cmd(&g_growth, &g_diop, prompt, g_root);
                 continue;

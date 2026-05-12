@@ -280,7 +280,58 @@ int llmk_portable_gguf_read_summary(void *reader, void *summary)
     return -1;
 }
 
-/* ── Minimal snprintf ────────────────────────────────────────────────
+/* ── Phase 5B: MMU stubs ────────────────────────────────────────────────── */
+/* Real implementations in engine/kernel/oo_mmu.c; stubs for no-model path  */
+unsigned long oo_mmu_init(void *ctx)                        { (void)ctx; return 0; }
+unsigned long oo_mmu_build(void *ctx, const void *bs)       { (void)ctx; (void)bs; return 0; }
+unsigned long oo_mmu_map(void *ctx, uint64_t v, uint64_t p,
+                         uint64_t sz, uint64_t fl)          { (void)ctx;(void)v;(void)p;(void)sz;(void)fl; return 0; }
+unsigned long oo_mmu_map_huge(void *ctx, uint64_t v,
+                               uint64_t p, uint64_t fl)     { (void)ctx;(void)v;(void)p;(void)fl; return 0; }
+unsigned long oo_mmu_identity_map(void *ctx, uint64_t sz)   { (void)ctx;(void)sz; return 0; }
+unsigned long oo_mmu_map_fb(void *ctx, uint64_t phys,
+                             uint64_t sz)                   { (void)ctx;(void)phys;(void)sz; return 0; }
+void          oo_mmu_activate(void *ctx)                    { (void)ctx; }
+uint64_t      oo_mmu_v2p(const void *ctx, uint64_t v)      { (void)ctx; return v; }
+void          oo_mmu_print(const void *ctx)                 { (void)ctx; }
+int           oo_mmu_repl_cmd(void *ctx, const void *bs,
+                               const char *cmd)             { (void)ctx;(void)bs;(void)cmd; return 0; }
+
+/* ── Phase 5E: Scheduler stubs ──────────────────────────────────────────── */
+unsigned long oo_sched_init(void *s, uint32_t qms)          { (void)s;(void)qms; return 0; }
+int           oo_sched_spawn(void *s, void *fn, void *arg,
+                              const char *name)             { (void)s;(void)fn;(void)arg;(void)name; return -1; }
+void          oo_yield(void)                                {}
+void          oo_sched_tick(void)                           {}
+void          oo_sched_run(void *s)                         { (void)s; }
+void          oo_sched_print(const void *s)                 { (void)s; }
+int           oo_sched_repl_cmd(void *s, const char *cmd)   { (void)s;(void)cmd; return 0; }
+
+/* ── Phase 5H: GPU stubs ────────────────────────────────────────────────── */
+unsigned long oo_gpu_init(void *g, void *st)                { (void)g;(void)st; return 0; }
+void          oo_gpu_clear(void *g, uint32_t c)             { (void)g;(void)c; }
+void          oo_gpu_put_pixel(void *g,int x,int y,uint32_t c){(void)g;(void)x;(void)y;(void)c;}
+void          oo_gpu_fill_rect(void *g,int x,int y,int w,
+                                int h,uint32_t c)           {(void)g;(void)x;(void)y;(void)w;(void)h;(void)c;}
+void          oo_gpu_draw_hline(void *g,int x,int y,int l,
+                                 uint32_t c)                {(void)g;(void)x;(void)y;(void)l;(void)c;}
+void          oo_gpu_draw_vline(void *g,int x,int y,int l,
+                                 uint32_t c)                {(void)g;(void)x;(void)y;(void)l;(void)c;}
+void          oo_gpu_flip(void *g)                          { (void)g; }
+void          oo_gpu_print(const void *g)                   { (void)g; }
+int           oo_gpu_repl_cmd(void *g, const char *cmd)     { (void)g;(void)cmd; return 0; }
+
+/* ── Phase 5G: Self-coding stubs ────────────────────────────────────────── */
+unsigned long oo_coding_init(void *ctx)                     { (void)ctx; return 0; }
+int           oo_coding_generate(void *ctx, const char *p,
+                                  const char *f)            { (void)ctx;(void)p;(void)f; return 0; }
+int           oo_coding_approve(void *ctx, const char *id)  { (void)ctx;(void)id; return 0; }
+int           oo_coding_reject(void *ctx, const char *id)   { (void)ctx;(void)id; return 0; }
+int           oo_coding_apply(void *ctx, const char *id)    { (void)ctx;(void)id; return 0; }
+void          oo_coding_list_patches(const void *ctx)       { (void)ctx; }
+void          oo_coding_print(const void *ctx)              { (void)ctx; }
+int           oo_coding_repl_cmd(void *ctx, const char *cmd){ (void)ctx;(void)cmd; return 0; }
+
  *
  * my_snprintf(buf, n, fmt, ...) — supports %d, %u, %s, %%, nothing else.
  * Returns number of characters that would have been written (like snprintf).
