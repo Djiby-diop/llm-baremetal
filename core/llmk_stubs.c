@@ -384,8 +384,8 @@ int           oo_organ_bus_repl_cmd(const char *cmd)        { (void)cmd; return 
 /* ── Phase 6D: USB HID stub ─────────────────────────────────────────────── */
 int           oo_usb_hid_repl_cmd(void *ctx, const char *cmd){ (void)ctx;(void)cmd; return 0; }
 
- *
- * my_snprintf(buf, n, fmt, ...) — supports %d, %u, %s, %%, nothing else.
+/*
+ * my_snprintf(buf, n, fmt, ...) - supports %d, %u, %s, %%, nothing else.
  * Returns number of characters that would have been written (like snprintf).
  */
 static int _stub_puts(char *dst, int rem, const char *s)

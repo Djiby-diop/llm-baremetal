@@ -4068,7 +4068,7 @@ static void llmk_repl_no_model_loop(void) {
 
         /* ── Phase 5 subsystems ─────────────────────────────────────────── */
         if (my_strncmp(prompt, "/nvme_", 6) == 0) {
-            extern OoNvmeCtx g_nvme;
+            extern OoNvmeCtrl g_nvme;
             oo_nvme_repl_cmd(&g_nvme, prompt);
             continue;
         }
