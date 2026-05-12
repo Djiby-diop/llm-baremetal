@@ -54,3 +54,8 @@ int   oo_lora_load(oo_lora_state_t *st,
                    const char *nvme_path);           /* load from NVMe */
 void  oo_lora_apply_to_model(oo_lora_state_t *st,
                              void *model_weights);   /* merge into base */
+void  oo_lora_print(const oo_lora_state_t *st);    /* display adapter state */
+int   oo_lora_repl_cmd(oo_lora_state_t *st, const char *cmd);
+       /* /lora_status /lora_step /lora_score /lora_persist /lora_load */
+
+extern oo_lora_state_t g_lora;

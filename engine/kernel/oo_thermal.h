@@ -20,3 +20,5 @@ typedef struct {
 
 int  oo_thermal_read(oo_thermal_status_t *s);   /* read MSR; returns 0 or -errno */
 void oo_thermal_check_and_act(void);            /* auto-shutdown if critical */
+void oo_thermal_print(const oo_thermal_status_t *s); /* display thermal state */
+int  oo_thermal_repl_cmd(const char *cmd);      /* /thermal_status /thermal_watch */

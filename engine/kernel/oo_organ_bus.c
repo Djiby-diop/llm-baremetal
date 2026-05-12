@@ -133,3 +133,44 @@ int oo_bus_poll_cortex(void) {
     return -1;
 }
 
+/* ─── Print + REPL ───────────────────────────────────────────────────────── */
+void oo_organ_bus_print(void) {
+    Print(L"\r\n  [Organ Bus Status]\r\n");
+    Print(L"  Organs: CORTEX(0) IMMUNE(1) SENSORY(2) VITAL(3) REFLEX(4) EVOL(5)\r\n");
+    Print(L"  Globule types: RED=data WHITE=immunity YELLOW=energy/sched\r\n");
+    Print(L"  Use /organ_tick to run one bus cycle\r\n");
+    Print(L"\r\n");
+}
+
+static int _organ_cmp(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) {
+        if (!a[i] && !b[i]) return 0;
+        if (a[i] != b[i]) return 1;
+    }
+    return 0;
+}
+
+int oo_organ_bus_repl_cmd(const char *cmd) {
+    if (!cmd) return 0;
+    if (_organ_cmp(cmd, "/organ_status", 13) == 0) {
+        oo_organ_bus_print(); return 1;
+    }
+    if (_organ_cmp(cmd, "/organ_tick", 11) == 0) {
+        oo_organ_bus_tick();
+        Print(L"[organ] Bus tick done\r\n"); return 1;
+    }
+    if (_organ_cmp(cmd, "/organ_poll", 11) == 0) {
+        int ch = oo_bus_poll_cortex();
+        if (ch >= 0) Print(L"[organ] CORTEX poll: 0x%02x\r\n", (UINT32)ch);
+        else         Print(L"[organ] CORTEX queue empty\r\n");
+        return 1;
+    }
+    if (_organ_cmp(cmd, "/organ_emit_kbd ", 16) == 0) {
+        UINT8 ch = (UINT8)*(cmd + 16);
+        oo_bus_emit_keyboard(ch);
+        Print(L"[organ] Emitted kbd 0x%02x → SENSORY→CORTEX\r\n", (UINT32)ch);
+        return 1;
+    }
+    return 0;
+}
+

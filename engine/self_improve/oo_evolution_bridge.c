@@ -93,3 +93,41 @@ void oo_evo_evaluate(void) {
 
 /* ─── Public: stats ───────────────────────────────────────────────────── */
 const oo_evo_stats_t *oo_evo_stats(void) { return &_stats; }
+
+/* ─── Print + REPL ───────────────────────────────────────────────────────── */
+void oo_evo_print(void) {
+    Print(L"\r\n  [Evolution Bridge Status]\r\n");
+    Print(L"  Generation : %u\r\n", _stats.generation);
+    Print(L"  Accepted   : %u\r\n", _stats.accepted);
+    Print(L"  Rejected   : %u\r\n", _stats.rejected);
+    Print(L"  Fitness    : [float — last D+ score]\r\n");
+    Print(L"  Threshold  : %d%%\r\n", EVO_FITNESS_THRESHOLD);
+    Print(L"\r\n");
+}
+
+static int _evo_cmp(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) {
+        if (!a[i] && !b[i]) return 0;
+        if (a[i] != b[i]) return 1;
+    }
+    return 0;
+}
+
+int oo_evo_repl_cmd(const char *cmd) {
+    if (!cmd) return 0;
+    if (_evo_cmp(cmd, "/evol_status", 12) == 0 ||
+        _evo_cmp(cmd, "/evol_stats",  11) == 0) {
+        oo_evo_print(); return 1;
+    }
+    if (_evo_cmp(cmd, "/evol_step", 10) == 0) {
+        oo_evo_evaluate();
+        Print(L"[evo] Step complete — gen=%u\r\n", _stats.generation);
+        return 1;
+    }
+    if (_evo_cmp(cmd, "/evol_genome", 12) == 0) {
+        Print(L"[evo] Genome: %u accepted mutations, fitness-gated at %d%%\r\n",
+              _stats.accepted, EVO_FITNESS_THRESHOLD);
+        return 1;
+    }
+    return 0;
+}

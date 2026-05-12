@@ -40,3 +40,8 @@ void oo_bus_emit_reflex(UINT8 irq);           /* VITAL → REFLEX (YELLOW) */
 
 /* Poll helpers — called by REPL */
 int  oo_bus_poll_cortex(void);    /* returns key from keyboard queue or -1 */
+
+/* Print + REPL */
+void oo_organ_bus_print(void);
+int  oo_organ_bus_repl_cmd(const char *cmd);
+     /* /organ_status /organ_tick /organ_emit <id> <type> /organ_poll */

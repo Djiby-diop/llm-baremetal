@@ -281,7 +281,6 @@ int llmk_portable_gguf_read_summary(void *reader, void *summary)
 }
 
 /* ── Phase 5B: MMU stubs ────────────────────────────────────────────────── */
-/* Real implementations in engine/kernel/oo_mmu.c; stubs for no-model path  */
 unsigned long oo_mmu_init(void *ctx)                        { (void)ctx; return 0; }
 unsigned long oo_mmu_build(void *ctx, const void *bs)       { (void)ctx; (void)bs; return 0; }
 unsigned long oo_mmu_map(void *ctx, uint64_t v, uint64_t p,
@@ -331,6 +330,59 @@ int           oo_coding_apply(void *ctx, const char *id)    { (void)ctx;(void)id
 void          oo_coding_list_patches(const void *ctx)       { (void)ctx; }
 void          oo_coding_print(const void *ctx)              { (void)ctx; }
 int           oo_coding_repl_cmd(void *ctx, const char *cmd){ (void)ctx;(void)cmd; return 0; }
+
+/* ── Phase 6A: IRQ stubs ────────────────────────────────────────────────── */
+void          oo_irq_init(void)                              {}
+void          oo_irq_mask(uint8_t irq)                      { (void)irq; }
+void          oo_irq_unmask(uint8_t irq)                    { (void)irq; }
+int           oo_kbd_getchar(void)                          { return -1; }
+void          oo_kbd_push(uint8_t ch)                       { (void)ch; }
+void          oo_kbd_isr_handler(void)                      {}
+void          oo_irq_print_status(void)                     {}
+int           oo_irq_repl_cmd(const char *cmd)              { (void)cmd; return 0; }
+
+/* ── Phase 6B: Thermal stubs ────────────────────────────────────────────── */
+int           oo_thermal_read(void *s)                      { (void)s; return -1; }
+void          oo_thermal_check_and_act(void)                {}
+void          oo_thermal_print(const void *s)               { (void)s; }
+int           oo_thermal_repl_cmd(const char *cmd)          { (void)cmd; return 0; }
+
+/* ── Phase 6C: LoRA stubs ───────────────────────────────────────────────── */
+int           oo_lora_init(void *st, uint32_t nl, uint32_t d,
+                            uint32_t r)                     { (void)st;(void)nl;(void)d;(void)r; return 0; }
+void          oo_lora_forward(void *a, const float *x,
+                               float *o, uint32_t n)        { (void)a;(void)x;(void)o;(void)n; }
+void          oo_lora_backward_step(void *st, const float *g,
+                                     uint32_t l, uint32_t p){ (void)st;(void)g;(void)l;(void)p; }
+float         oo_lora_score(const void *st)                 { (void)st; return 0.0f; }
+int           oo_lora_persist(const void *st, const char *p){ (void)st;(void)p; return 0; }
+int           oo_lora_load(void *st, const char *p)         { (void)st;(void)p; return 0; }
+void          oo_lora_apply_to_model(void *st, void *w)     { (void)st;(void)w; }
+void          oo_lora_print(const void *st)                 { (void)st; }
+int           oo_lora_repl_cmd(void *st, const char *cmd)   { (void)st;(void)cmd; return 0; }
+
+/* ── Phase 6E: Evolution bridge stubs ──────────────────────────────────── */
+void          oo_evo_init(void)                             {}
+int           oo_evo_apply_gradient(uint32_t l, uint32_t p,
+                                     const float *g, float s){ (void)l;(void)p;(void)g;(void)s; return 0; }
+void          oo_evo_evaluate(void)                         {}
+const void   *oo_evo_stats(void)                            { return (void*)0; }
+void          oo_evo_print(void)                            {}
+int           oo_evo_repl_cmd(const char *cmd)              { (void)cmd; return 0; }
+
+/* ── Phase 6F: Organ bus stubs ──────────────────────────────────────────── */
+void          oo_organ_bus_init(void)                       {}
+void          oo_organ_bus_tick(void)                       {}
+void          oo_bus_emit_keyboard(uint8_t ch)              { (void)ch; }
+void          oo_bus_emit_scheduler_state(uint8_t s)        { (void)s; }
+void          oo_bus_emit_threat(uint8_t tl)                { (void)tl; }
+void          oo_bus_emit_reflex(uint8_t irq)               { (void)irq; }
+int           oo_bus_poll_cortex(void)                      { return -1; }
+void          oo_organ_bus_print(void)                      {}
+int           oo_organ_bus_repl_cmd(const char *cmd)        { (void)cmd; return 0; }
+
+/* ── Phase 6D: USB HID stub ─────────────────────────────────────────────── */
+int           oo_usb_hid_repl_cmd(void *ctx, const char *cmd){ (void)ctx;(void)cmd; return 0; }
 
  *
  * my_snprintf(buf, n, fmt, ...) — supports %d, %u, %s, %%, nothing else.

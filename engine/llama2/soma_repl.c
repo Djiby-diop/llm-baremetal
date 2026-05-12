@@ -4097,6 +4097,39 @@ static void llmk_repl_no_model_loop(void) {
             continue;
         }
 
+        /* ── Phase 6 subsystems ─────────────────────────────────────────── */
+        if (my_strncmp(prompt, "/irq_", 5) == 0) {
+            oo_irq_repl_cmd(prompt);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/thermal_", 9) == 0) {
+            oo_thermal_repl_cmd(prompt);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/lora_", 6) == 0) {
+            extern oo_lora_state_t g_lora;
+            oo_lora_repl_cmd(&g_lora, prompt);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/evol_", 6) == 0) {
+            oo_evo_repl_cmd(prompt);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/organ_", 7) == 0) {
+            oo_organ_bus_repl_cmd(prompt);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/usb_", 5) == 0) {
+            extern OoUsbHid g_usb_hid;
+            oo_usb_hid_repl_cmd(&g_usb_hid, prompt);
+            continue;
+        }
+
         Print(L"\r\nNo model loaded. Use /models then set repl.cfg: model=<file> and reboot.\r\n\r\n");
     }
 }

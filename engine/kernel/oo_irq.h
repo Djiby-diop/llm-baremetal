@@ -34,3 +34,5 @@ void  oo_irq_unmask(UINT8 irq);   /* unmask one IRQ line */
 int   oo_kbd_getchar(void);       /* pop char from ring (-1 if empty) */
 void  oo_kbd_push(UINT8 ch);      /* called by ISR */
 void  oo_kbd_isr_handler(void);   /* C ISR body (called from naked stub) */
+void  oo_irq_print_status(void);  /* print PIC state + ring buffer fill */
+int   oo_irq_repl_cmd(const char *cmd); /* /irq_status /irq_mask N /irq_unmask N */

@@ -447,7 +447,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     oo_gpu_init(&g_gpu, SystemTable);
     llmk_boot_mark(L"gpu_init");    // [SelfCoding] DIOP→C patch pipeline (Phase 5G)
     oo_coding_init(&g_self_coding);
-    llmk_boot_mark(L"coding_init");
+    llmk_boot_mark(L"coding_init");    // [IRQ] PS/2 keyboard + 8259A PIC (Phase 6A)
+    oo_irq_init();
+    llmk_boot_mark(L"irq_init");    // [Thermal] CPU temperature MSR monitor (Phase 6B)
+    /* thermal: read-only, no init needed — just call oo_thermal_read() */    // [LoRA] Self-improvement adapter (Phase 6C)
+    oo_lora_init(&g_lora, 12 /* n_layers */, 288 /* dim */, 4 /* rank */);
+    llmk_boot_mark(L"lora_init");    // [Evolution] DNA-gated LoRA backward (Phase 6E)
+    oo_evo_init();
+    llmk_boot_mark(L"evo_init");    // [OrganBus] Biological organ IPC wiring (Phase 6F)
+    oo_organ_bus_init();
+    llmk_boot_mark(L"organ_bus_init");
 
     // Show diagnostic info if requested via repl.cfg: boot_diag=1
     if (g_boot_diag) {
@@ -7348,6 +7357,24 @@ snap_autoload_done:
                 continue;            // ── Phase 5G: Self-coding engine ────────────────────────────────
             } else if (my_strncmp(prompt, "/sc_", 4) == 0) {
                 oo_coding_repl_cmd(&g_self_coding, prompt);
+                continue;            // ── Phase 6A: IRQ / keyboard ─────────────────────────────────────
+            } else if (my_strncmp(prompt, "/irq_", 5) == 0) {
+                oo_irq_repl_cmd(prompt);
+                continue;            // ── Phase 6B: CPU thermal monitor ───────────────────────────────
+            } else if (my_strncmp(prompt, "/thermal_", 9) == 0) {
+                oo_thermal_repl_cmd(prompt);
+                continue;            // ── Phase 6C: LoRA adapter ──────────────────────────────────────
+            } else if (my_strncmp(prompt, "/lora_", 6) == 0) {
+                oo_lora_repl_cmd(&g_lora, prompt);
+                continue;            // ── Phase 6E: Evolution bridge ──────────────────────────────────
+            } else if (my_strncmp(prompt, "/evol_", 6) == 0) {
+                oo_evo_repl_cmd(prompt);
+                continue;            // ── Phase 6F: Organ bus IPC ─────────────────────────────────────
+            } else if (my_strncmp(prompt, "/organ_", 7) == 0) {
+                oo_organ_bus_repl_cmd(prompt);
+                continue;            // ── Phase 6D: USB HID ───────────────────────────────────────────
+            } else if (my_strncmp(prompt, "/usb_", 5) == 0) {
+                oo_usb_hid_repl_cmd(&g_oo_usb_hid, prompt);
                 continue;// ── Phase 5F: Model growth pipeline ─────────────────────────────
             } else if (my_strncmp(prompt, "/growth_", 8) == 0) {
                 oo_growth_repl_cmd(&g_growth, &g_diop, prompt, g_root);

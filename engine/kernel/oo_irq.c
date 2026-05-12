@@ -102,3 +102,47 @@ void oo_irq_unmask(UINT8 irq) {
     _outb_irq(port, _inb_irq(port) & (UINT8)~(1 << irq));
 }
 
+/* ─── Status + REPL ──────────────────────────────────────────────────────── */
+void oo_irq_print_status(void) {
+    UINT8 m1 = _inb_irq(PIC1_DATA), m2 = _inb_irq(PIC2_DATA);
+    UINT32 fill = (_kbd_ring.head >= _kbd_ring.tail)
+                ? (_kbd_ring.head - _kbd_ring.tail)
+                : (KBD_RING_SIZE - _kbd_ring.tail + _kbd_ring.head);
+    Print(L"\r\n  [IRQ/PIC Status]\r\n");
+    Print(L"  PIC1 mask : 0x%02x (bit1=IRQ1/kbd=%s)\r\n",
+          m1, (m1 & 2) ? L"masked" : L"active");
+    Print(L"  PIC2 mask : 0x%02x\r\n", m2);
+    Print(L"  KBD ring  : %u chars buffered\r\n", fill);
+    Print(L"\r\n");
+}
+
+static int _irq_cstrcmp(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) {
+        if (!a[i] && !b[i]) return 0;
+        if (a[i] != b[i]) return 1;
+    }
+    return 0;
+}
+
+int oo_irq_repl_cmd(const char *cmd) {
+    if (!cmd) return 0;
+    if (_irq_cstrcmp(cmd, "/irq_status", 11) == 0) {
+        oo_irq_print_status(); return 1;
+    }
+    if (_irq_cstrcmp(cmd, "/irq_mask ", 10) == 0) {
+        int irq = 0;
+        const char *p = cmd + 10;
+        while (*p >= '0' && *p <= '9') irq = irq * 10 + (*p++ - '0');
+        oo_irq_mask((UINT8)irq);
+        Print(L"[irq] Masked IRQ %d\r\n", irq); return 1;
+    }
+    if (_irq_cstrcmp(cmd, "/irq_unmask ", 12) == 0) {
+        int irq = 0;
+        const char *p = cmd + 12;
+        while (*p >= '0' && *p <= '9') irq = irq * 10 + (*p++ - '0');
+        oo_irq_unmask((UINT8)irq);
+        Print(L"[irq] Unmasked IRQ %d\r\n", irq); return 1;
+    }
+    return 0;
+}
+

@@ -41,3 +41,8 @@ void oo_evo_evaluate(void);
 
 /* Get current stats */
 const oo_evo_stats_t *oo_evo_stats(void);
+
+/* Print + REPL */
+void oo_evo_print(void);
+int  oo_evo_repl_cmd(const char *cmd);
+     /* /evol_status /evol_stats /evol_step /evol_genome */
