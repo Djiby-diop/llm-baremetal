@@ -14,7 +14,7 @@ $ErrorActionPreference = "Stop"
 
 $QEMU   = "C:\Program Files\qemu\qemu-system-x86_64.exe"
 $OVMF   = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
-$VARS   = "C:\Program Files\qemu\share\edk2-x86_64-secure-code.fd"  # vars (writable copy)
+$VARS   = "C:\Program Files\qemu\share\edk2-i386-vars.fd"   # i386-vars works for x86_64 runtime
 $IMG    = "$PSScriptRoot\llm-baremetal-boot.img"
 $GUARD  = "$PSScriptRoot\oo-warden\guard\target\release\oo-guard"
 
@@ -59,7 +59,8 @@ $qemu_args = @(
 )
 
 if (-not $Interactive) {
-    $qemu_args += @("-nographic", "-vga", "none")
+    # -display none keeps serial working correctly (unlike -nographic)
+    $qemu_args += @("-display", "none")
 } else {
     $qemu_args += @("-vga", "std")
 }
