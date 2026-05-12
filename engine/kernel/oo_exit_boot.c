@@ -8,6 +8,32 @@
 #include <efi.h>
 #include <efilib.h>
 
+/* ── Bare-metal UART (COM1 = 0x3F8) ──────────────────────────────────────── */
+#define OO_COM1 0x3F8U
+static inline void _outb(uint16_t p, uint8_t v) {
+    __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p));
+}
+static inline uint8_t _inb(uint16_t p) {
+    uint8_t v; __asm__ volatile("inb %1,%0":"=a"(v):"Nd"(p)); return v;
+}
+static void _uart_init(void) {
+    _outb(OO_COM1+1,0x00); _outb(OO_COM1+3,0x80);
+    _outb(OO_COM1+0,0x01); _outb(OO_COM1+1,0x00); /* 115200 baud */
+    _outb(OO_COM1+3,0x03); _outb(OO_COM1+2,0xC7); _outb(OO_COM1+4,0x0B);
+}
+static void _uart_putc(char c) {
+    while (!(_inb(OO_COM1+5) & 0x20)) {}
+    _outb(OO_COM1, (uint8_t)c);
+}
+static void _uart_puts(const char *s) {
+    for (; *s; s++) { if (*s=='\n') _uart_putc('\r'); _uart_putc(*s); }
+}
+static void _uart_puthex64(uint64_t v) {
+    const char h[] = "0123456789ABCDEF";
+    _uart_puts("0x");
+    for (int i = 60; i >= 0; i -= 4) _uart_putc(h[(v>>i)&0xF]);
+}
+
 /* Global boot state */
 OoBootState g_oo_boot;
 
@@ -335,11 +361,6 @@ void oo_idt_install(void) {
     __asm__ volatile("lidt %0" :: "m"(_idt_ptr) : "memory");
 }
 
-/* Public: set/update one IDT gate — can be called by oo_irq.c post-init */
-void oo_idt_set_gate(int vec, UINT64 handler, UINT8 type_attr) {
-    _idt_set_gate(vec, (void *)handler, type_attr);
-}
-
 /* ── Enable NX (No-Execute) bit in EFER ────────────────────────────────── */
 static void _enable_nx(void) {
     /* IA32_EFER MSR = 0xC0000080, NXE = bit 11 */
@@ -365,6 +386,78 @@ void oo_ebs_post_init(OoBootState *bs) {
 
     /* Re-enable interrupts */
     __asm__ volatile("sti");
+
+    /* Init bare-metal UART and announce post-EBS state */
+    _uart_init();
+    _uart_puts("\r\n[OO] ExitBootServices complete — OO has CPU control\r\n");
+    _uart_puts("[OO] GDT loaded | IDT installed | NX enabled\r\n");
+    _uart_puts("[OO] RAM avail: ");
+    /* print available MB */
+    uint64_t mb = bs->available_ram_bytes / (1024*1024);
+    char mbuf[12]; int i = 0;
+    if (mb == 0) { mbuf[i++] = '0'; }
+    else { uint64_t t = mb; int d = 0; while(t){t/=10;d++;} for(int j=d-1;j>=0;j--){mbuf[j]=(char)('0'+(int)(mb%10));mb/=10;} i=d; }
+    mbuf[i]='\0';
+    _uart_puts(mbuf); _uart_puts(" MB\r\n");
+    _uart_puts("[OO] FB base: ");
+    _uart_puthex64(bs->fb_base);
+    _uart_puts("\r\n[OO] RSDP:    ");
+    _uart_puthex64(bs->rsdp_addr);
+    _uart_puts("\r\n[OO] Kernel active. Type commands via UART.\r\n");
+    _uart_puts("[OO] /halt  /reboot  /mmap  /status\r\n");
+
+    /* ── Post-EBS UART REPL (minimal) ─────────────────────────────── */
+    char line[128]; int pos = 0;
+    _uart_puts("\r\n[OO]> ");
+    while (1) {
+        /* Poll UART for input */
+        if (_inb(OO_COM1+5) & 0x01) {
+            char c = (char)_inb(OO_COM1);
+            if (c == '\r' || c == '\n') {
+                _uart_putc('\r'); _uart_putc('\n');
+                line[pos] = '\0';
+                /* Dispatch */
+                if (pos == 0) { /* empty */ }
+                else if (line[0]=='/' && line[1]=='h' && line[2]=='a') {
+                    _uart_puts("[OO] Halting.\r\n");
+                    __asm__ volatile("cli; hlt");
+                } else if (line[0]=='/' && line[1]=='r' && line[2]=='e') {
+                    _uart_puts("[OO] Rebooting...\r\n");
+                    _outb(0x64, 0xFE); /* keyboard controller reset */
+                } else if (line[0]=='/' && line[1]=='s') {
+                    _uart_puts("[OO] Status: GDT=");
+                    _uart_putc(bs->gdt_loaded ? '1':'0');
+                    _uart_puts(" IDT=");  _uart_putc(bs->idt_loaded  ? '1':'0');
+                    _uart_puts(" NX=");   _uart_putc(bs->nx_enabled  ? '1':'0');
+                    _uart_puts("\r\n");
+                } else if (line[0]=='/' && line[1]=='m') {
+                    for (uint64_t i = 0; i < bs->n_regions; i++) {
+                        const OoMemRegion *r = &bs->regions[i];
+                        uint64_t m = (r->num_pages*4096)/(1024*1024);
+                        if (!m) continue;
+                        _uart_puts("  ["); _uart_puthex64(r->phys_start);
+                        _uart_puts(" +"); 
+                        char tmp[8]; int ti=0; uint64_t mv=m;
+                        if(!mv){tmp[ti++]='0';}else{int d=0;uint64_t t=mv;while(t){t/=10;d++;}for(int j=d-1;j>=0;j--){tmp[j]=(char)('0'+(int)(mv%10));mv/=10;}ti=d;}
+                        tmp[ti]='\0'; _uart_puts(tmp);
+                        _uart_puts("MB type=");
+                        _uart_putc((char)('0'+(int)(r->type & 0xF)));
+                        _uart_puts("]\r\n");
+                    }
+                } else {
+                    _uart_puts("[OO] Unknown: "); _uart_puts(line); _uart_puts("\r\n");
+                }
+                pos = 0;
+                _uart_puts("[OO]> ");
+            } else if (c == 127 || c == 8) {
+                if (pos > 0) { pos--; _uart_putc(8); _uart_putc(' '); _uart_putc(8); }
+            } else if (pos < 127) {
+                line[pos++] = c; _uart_putc(c);
+            }
+        }
+        /* CPU idle — use `pause` to reduce power */
+        __asm__ volatile("pause");
+    }
 }
 
 /* ── Find largest available heap region ────────────────────────────────── */
