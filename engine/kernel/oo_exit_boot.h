@@ -119,3 +119,6 @@ int        oo_ebs_repl_cmd(OoBootState *bs, const char *cmd,
                             EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST);
 
 extern OoBootState g_oo_boot;
+
+/* Phase 7A: LAPIC timer tick counter — incremented every 10ms by ISR */
+extern volatile uint64_t g_lapic_tick_count;

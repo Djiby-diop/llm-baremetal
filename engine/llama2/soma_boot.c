@@ -477,7 +477,20 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         uint32_t ticks_per_ms = oo_lapic_calibrate_ms();
         if (g_boot_verbose)
             Print(L"[LAPIC] IOAPIC ready, %u ticks/ms\r\n", (unsigned)ticks_per_ms);
-    }
+
+        /* Phase 7A: Start LAPIC periodic timer → drives oo_sched_tick() preemption
+         * Vector OO_INT_LAPIC (32) is wired in IDT to _lapic_timer_handler.
+         * Quantum: 10ms. If calibration failed (0), skip timer start. */
+        if (ticks_per_ms > 0) {
+            extern void oo_lapic_timer_start(uint32_t ticks, uint8_t vector);
+            uint32_t quantum_ticks = ticks_per_ms * 10; /* 10ms quantum */
+            oo_lapic_timer_start(quantum_ticks, 32 /* OO_INT_LAPIC */);
+            if (g_boot_verbose)
+                Print(L"[Phase7A] LAPIC preemptive timer started: %u ticks/quantum (10ms)\r\n",
+                      (unsigned)quantum_ticks);
+        } else {
+            Print(L"[Phase7A] LAPIC calibration failed — cooperative scheduler only\r\n");
+        }
 
     /* Phase WD: HDA Audio — init capture + playback
      * Find HDA controller via PCI (vendor 8086, device 2668 for QEMU).

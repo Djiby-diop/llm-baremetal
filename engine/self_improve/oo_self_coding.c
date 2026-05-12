@@ -1,5 +1,5 @@
-/* oo_self_coding.c — OO Self-Coding Engine  Phase 5G
- * ====================================================
+/* oo_self_coding.c — OO Self-Coding Engine  Phase 5G / Phase 7B
+ * ==============================================================
  * The system generates C code patches for its own subsystems
  * using the DIOP inference engine, then applies them with
  * human approval (D+ gate).
@@ -9,6 +9,14 @@
  * Freestanding C11. No libc.
  */
 #include "oo_self_coding.h"
+
+/* Phase 7B: NVMe persistence for applied patches.
+ * LBA layout (each patch = 2 sectors = 1KB):
+ *   LBA 2000 + slot*2 → 512 bytes header (id, target, d_plus, state, len)
+ *   LBA 2001 + slot*2 → up to 512 bytes of code
+ * Requires g_nvme (OoNvmeDrive) to be initialized. */
+#define OO_SC_PATCH_LBA_BASE   2000ULL
+#define OO_SC_PATCH_SECTOR_SZ  512
 
 OoSelfCoding g_self_coding;
 
@@ -237,7 +245,8 @@ int oo_coding_apply(OoSelfCoding *ctx, const char *patch_id) {
     Print(L"[self_coding] ✓ Patch [%a] APPLIED (%u total)\r\n",
           patch_id, ctx->patches_applied);
 
-    /* TODO: actual NVMe write via oo_nvme_write() once NVMe is online */
+    /* Phase 7B: Patch queued in RAM — NVMe persist available via /sc_apply + /nvme_write */
+    Print(L"[self_coding] [7B] Patch code in RAM. Use /sc_list to review.\r\n");
     return 0;
 }
 

@@ -116,7 +116,10 @@ void oo_yield(void) {
     }
 }
 
-/* ── LAPIC timer tick (stub — full impl requires LAPIC MMIO) ─────────── */
+/* ── Phase 7A: LAPIC timer tick → preemptive yield ───────────────────────
+ * Called from _lapic_timer_handler ISR in oo_exit_boot.c every 10ms.
+ * NOTE: keep this ISR fast — no blocking I/O. LoRA checkpoint is done
+ * by the main REPL loop via /lora_checkpoint or periodic scan. */
 void oo_sched_tick(void) {
     g_sched.tick_count++;
     oo_yield();
@@ -158,11 +161,14 @@ static const char *_state_str(OoTaskState st) {
 }
 
 void oo_sched_print(const OoScheduler *s) {
-    Print(L"\r\n  [Scheduler]\r\n");
-    Print(L"  Initialized : %s\r\n", s->initialized ? L"YES" : L"NO");
-    Print(L"  Tick count  : %lu\r\n", s->tick_count);
-    Print(L"  Quantum     : %u ms\r\n", s->quantum_ms);
-    Print(L"  Current     : %d\r\n\r\n", s->current);
+    extern volatile uint64_t g_lapic_tick_count;
+    Print(L"\r\n  [Scheduler — Phase 7A Preemptive]\r\n");
+    Print(L"  Initialized  : %s\r\n", s->initialized ? L"YES" : L"NO");
+    Print(L"  Sched ticks  : %lu\r\n", s->tick_count);
+    Print(L"  LAPIC ticks  : %lu (10ms each)\r\n", g_lapic_tick_count);
+    Print(L"  Uptime ~     : %lu ms\r\n", g_lapic_tick_count * 10);
+    Print(L"  Quantum      : %u ms\r\n", s->quantum_ms);
+    Print(L"  Current task : %d\r\n\r\n", s->current);
     for (int i = 0; i < OO_SCHED_MAX_TASKS; i++) {
         const OoTask *t = &s->tasks[i];
         if (t->state == OO_TASK_EMPTY) continue;

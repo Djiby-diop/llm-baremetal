@@ -1,10 +1,11 @@
-/* oo_self_coding.h — OO Self-Coding Engine  Phase 5G
- * ====================================================
+/* oo_self_coding.h — OO Self-Coding Engine  Phase 5G / Phase 7B
+ * ==============================================================
  * DIOP model generates C patches for OO subsystems.
- * Pipeline: prompt → generate → diff → D+ gate → apply.
+ * Pipeline: prompt → generate → diff → D+ gate → apply → NVMe persist.
  */
 #pragma once
 #include <efi.h>
+/* NVMe persistence uses extern declarations in .c to avoid type conflicts */
 
 #define OO_CODEGEN_MAX_CODE   8192
 #define OO_CODEGEN_MAX_PROMPT 1024

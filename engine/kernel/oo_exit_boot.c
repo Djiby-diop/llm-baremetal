@@ -306,12 +306,21 @@ DEFINE_EXC_ERR(17)    /* #AC */
 DEFINE_EXC_NOERR(18)  /* #MC */
 DEFINE_EXC_NOERR(19)  /* #XF */
 
-/* LAPIC timer stub (will be replaced by scheduler in Phase 5E) */
+/* ── Phase 7A: LAPIC timer → preemptive scheduler tick ──────────────────── */
+/* oo_sched_tick() is defined in oo_scheduler.c and linked in */
+extern void oo_sched_tick(void);
+
+/* Global tick counter (readable by REPL via /sched_status) */
+volatile uint64_t g_lapic_tick_count = 0;
+
 OO_ISR_ATTR
-static void _lapic_timer_stub(struct __attribute__((packed)){
+static void _lapic_timer_handler(struct __attribute__((packed)){
     UINT64 ip,cs,fl,sp,ss;} *f) {
     (void)f;
-    /* EOI to LAPIC (0xFEE000B0) */
+    g_lapic_tick_count++;
+    /* Cooperative preemption: call scheduler yield on every tick */
+    oo_sched_tick();
+    /* EOI to LAPIC (LAPIC_EOI = 0xFEE000B0) */
     volatile UINT32 *lapic_eoi = (volatile UINT32*)0xFEE000B0ULL;
     *lapic_eoi = 0;
 }
@@ -353,7 +362,7 @@ void oo_idt_install(void) {
     _idt_set_gate(17, _exc_17, GATE_INT);
     _idt_set_gate(18, _exc_18, GATE_INT);
     _idt_set_gate(19, _exc_19, GATE_TRAP);
-    _idt_set_gate(OO_INT_LAPIC,   _lapic_timer_stub, GATE_INT);
+    _idt_set_gate(OO_INT_LAPIC,   _lapic_timer_handler, GATE_INT);
     _idt_set_gate(OO_INT_SPURIOUS, _spurious_stub,   GATE_INT);
 
     _idt_ptr.limit = (UINT16)(sizeof(_idt) - 1);
