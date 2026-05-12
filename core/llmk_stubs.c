@@ -144,6 +144,123 @@ uint64_t llmk_get_ticks(void) { return 0; }
 
 void llmk_oo_trigger_nfs_save(void) {}
 
+/* ── Scheduler / bot ─────────────────────────────────────────────────
+ * oo_scheduler_get_state: 0 = HOMEOSTASIS_NORMAL
+ * bot_get_threat_level:   0 = no threat detected
+ */
+int     oo_scheduler_get_state(void)  { return 0; }
+uint8_t bot_get_threat_level(void)    { return 0; }
+
+/* ── EBS phase hook ──────────────────────────────────────────────────── */
+void efi_phase_exit_boot_services(void) {}
+
+/* ── Evolution engine ────────────────────────────────────────────────── */
+void evolution_init(void) {}
+int  evolution_apply_mutation(const void *lora_weights, uint32_t size) {
+    (void)lora_weights; (void)size; return 0;
+}
+void evolution_evaluate_fitness(uint32_t pattern_id, uint8_t success_rate) {
+    (void)pattern_id; (void)success_rate;
+}
+
+/* ── GGUF K-quant dequantization stubs ──────────────────────────────── */
+void oo_dequant_q4_k(const void *blocks, uint64_t n_blocks, float *out) {
+    (void)blocks; (void)n_blocks; (void)out;
+}
+void oo_dequant_q5_k(const void *blocks, uint64_t n_blocks, float *out) {
+    (void)blocks; (void)n_blocks; (void)out;
+}
+void oo_dequant_q6_k(const void *blocks, uint64_t n_blocks, float *out) {
+    (void)blocks; (void)n_blocks; (void)out;
+}
+
+/* ── IDT gate stub ───────────────────────────────────────────────────── */
+void oo_idt_set_gate(int vec, uint64_t handler, uint8_t type_attr) {
+    (void)vec; (void)handler; (void)type_attr;
+}
+
+/* ── LLM inference stubs ─────────────────────────────────────────────── */
+int oo_llm_infer_classify(void *ctx, const char *prompt, int plen,
+                          char *out_token, int out_cap, float *confidence) {
+    (void)ctx; (void)prompt; (void)plen;
+    if (out_token && out_cap) out_token[0] = '\0';
+    if (confidence) *confidence = 0.0f;
+    return -1;
+}
+int oo_llm_infer_generate(void *ctx, const char *prompt, int plen,
+                          char *out_text, int out_cap,
+                          int max_tokens, float temperature) {
+    (void)ctx; (void)prompt; (void)plen;
+    (void)max_tokens; (void)temperature;
+    if (out_text && out_cap) out_text[0] = '\0';
+    return -1;
+}
+
+/* ── Network boot stubs ──────────────────────────────────────────────── */
+unsigned long oo_netboot_http_get(void *ctx, const void *url, void *buf,
+                                  unsigned long max_len, unsigned long *out_len) {
+    (void)ctx; (void)url; (void)buf; (void)max_len;
+    if (out_len) *out_len = 0;
+    return 3UL; /* EFI_UNSUPPORTED */
+}
+unsigned long oo_netboot_http_post_json(void *ctx, const void *url,
+                                        const void *json, void *resp,
+                                        unsigned long resp_max) {
+    (void)ctx; (void)url; (void)json;
+    if (resp && resp_max) ((char *)resp)[0] = '\0';
+    return 3UL; /* EFI_UNSUPPORTED */
+}
+
+/* ── NVMe stubs ──────────────────────────────────────────────────────── */
+int oo_nvme_read_lba(void *ctx, uint64_t lba, uint32_t cnt, void *buf) {
+    (void)ctx; (void)lba; (void)cnt; (void)buf; return -1;
+}
+int oo_nvme_write_lba(void *ctx, uint64_t lba, uint32_t cnt, const void *buf) {
+    (void)ctx; (void)lba; (void)cnt; (void)buf; return -1;
+}
+
+/* ── Storage stubs ───────────────────────────────────────────────────── */
+int oo_pressure_sample(void) { return 0; }
+int oo_storage_exists(const char *path) { (void)path; return 0; }
+int oo_storage_read_all(const char *path, void *buf, uint64_t cap,
+                        uint64_t *out) {
+    (void)path; (void)buf; (void)cap;
+    if (out) *out = 0;
+    return -1;
+}
+int oo_storage_write_all(const char *path, const void *buf, uint64_t len) {
+    (void)path; (void)buf; (void)len; return -1;
+}
+
+/* ── REPL / task stubs ───────────────────────────────────────────────── */
+void repl_register_cmd(const char *name, void *fn, const char *help) {
+    (void)name; (void)fn; (void)help;
+}
+void oo_repl_native_run(void *ctx, const char *cmd) { (void)ctx; (void)cmd; }
+void _task_wrapper(void) {}
+
+/* ── Reflex module ───────────────────────────────────────────────────── */
+void reflex_init(void)            {}
+void reflex_on_thermal_burn(void) {}
+
+/* ── Misc ────────────────────────────────────────────────────────────── */
+void trigger_diop_sleep_learning(void) {}
+void __stack_chk_fail(void) { for (;;) {} }
+
+/* ── Render / sense / united-bus stubs ──────────────────────────────── */
+void render_dna_helix(uint32_t tick, int x, int y, int h) {
+    (void)tick; (void)x; (void)y; (void)h;
+}
+void sense_init(void) {}
+void sense_transduce_keystroke(uint16_t scancode, uint16_t unicode) {
+    (void)scancode; (void)unicode;
+}
+void united_bus_init(void) {}
+void united_bus_absorb(uint32_t channel, const void *data, uint32_t len) {
+    (void)channel; (void)data; (void)len;
+}
+void united_bus_pump(void) {}
+
 /* ── Portable GGUF reader stubs ─────────────────────────────────────── */
 
 void llmk_portable_efi_init_reader(void *reader, void *buf, uint64_t len)

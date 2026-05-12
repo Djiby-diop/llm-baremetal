@@ -4033,6 +4033,14 @@ static void llmk_repl_no_model_loop(void) {
             Print(L"\r\n[SSM] State reset (no active model to reset)\r\n\r\n");
             continue;
         }
+        /* ── Phase 5A: ExitBootServices — available even without model ─── */
+        if (my_strncmp(prompt, "/ebs_", 5) == 0) {
+            /* g_oo_boot and oo_ebs_repl_cmd declared via engine/kernel/oo_exit_boot.h
+             * which is #include'd in llama2_efi_final.c before soma_repl.c. */
+            extern EFI_HANDLE LibImageHandle;
+            oo_ebs_repl_cmd(&g_oo_boot, prompt, LibImageHandle, ST);
+            continue;
+        }
 
         Print(L"\r\nNo model loaded. Use /models then set repl.cfg: model=<file> and reboot.\r\n\r\n");
     }

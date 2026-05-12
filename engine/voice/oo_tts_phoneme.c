@@ -167,7 +167,8 @@ int oo_tts_speak_phoneme(OoTtsSynth *s, OoTtsPcmBuffer *buf,
     const PhProps *p = &_ph_props[ph];
 
     int dur_ms = (duration_ms > 0) ? duration_ms : p->duration_ms;
-    dur_ms = (dur_ms * 100) / s->speech_rate;  // adjust for rate
+    int _rate  = (s->speech_rate > 0) ? s->speech_rate : 100;  /* guard div/0 */
+    dur_ms = (dur_ms * 100) / _rate;  // adjust for rate
     int n_samples = (SR * dur_ms) / 1000;
 
     // Silence/word boundary
