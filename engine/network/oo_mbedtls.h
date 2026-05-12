@@ -49,6 +49,7 @@ typedef struct {
     UINTN          rx_len;
     /* TLS context (opaque — set to NULL in stub mode) */
     void          *tls_ctx;
+    void          *ssl_ctx;  /* mbedtls_ssl_context* when OO_MBEDTLS_REAL=1 */
     /* Skip cert verification (research/dev mode) */
     int            insecure;
 } OoTlsCon;

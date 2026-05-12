@@ -1,5 +1,3 @@
-#include "../drivers/oo_acpi.h"
-
 #ifndef LLM_SPLIT_EFI_MAIN
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     /* Enable OSXSAVE + YMM state (CR4 bit 18 + XCR0 bits 1:2) so that VZEROUPPER
@@ -69,7 +67,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     /* Novel engines — Phase 2 */
     limbion_init(&g_limbion);
-    chronion_init(&g_chronion, 0, 0, 0);  /* boot_count + dna_generation filled after persist load */
+    chronion_init(&g_chronion, 0, 0);  /* boot_count + dna_generation filled after persist load */
     trophion_init(&g_trophion);
     mirrorion_init(&g_mirrorion);
     thanatosion_init(&g_thanatosion, NULL);  /* g_root not yet open; rebind after volume open */
@@ -435,48 +433,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     oo_mbedtls_init(ImageHandle, SystemTable);
     llmk_boot_mark(L"mbedtls_init");    // [DIOP] Custom model engine (Phase 4D)
     oo_diop_init(&g_diop);
-#ifndef LLMK_SKIP_EXPERIMENTAL_UNITY
     llmk_boot_mark(L"diop_init");    // [Growth] Model self-expansion engine (Phase 5F)
     oo_growth_init(&g_growth);
     llmk_boot_mark(L"growth_init");    // [NVMe] Bare-metal NVMe driver (Phase 5C)
     oo_nvme_init(&g_nvme);
-    llmk_boot_mark(L"nvme_init");    // [MMU] Page tables Phase 5B
-    oo_mmu_init(&g_mmu);
-    llmk_boot_mark(L"mmu_init");     // [USB HID] Keyboard Phase 5D
-    oo_usb_hid_init(&g_usb_hid);
-    llmk_boot_mark(L"hid_init");     // [Scheduler] Cooperative tasks Phase 5E
-    oo_sched_init(&g_sched, 10);
-    llmk_boot_mark(L"sched_init");   // [Self-coding] Patch engine Phase 5G
-    oo_coding_init(&g_self_coding);
-    llmk_boot_mark(L"coding_init");  // [GPU] Double-buffer Phase 5H
-    oo_gpu_init(&g_gpu, SystemTable);
-    llmk_boot_mark(L"gpu_init");
-
-    // Phase 6A: IRQ wiring — PS/2 keyboard via 8259A PIC (post-EBS)
-    oo_irq_init();
-    llmk_boot_mark(L"irq_init");
-
-    // Phase 6B: CPU thermal — MSR-based temperature monitoring
-    {
-        oo_thermal_status_t _ts;
-        int tr = oo_thermal_read(&_ts);
-        if (tr == 0) llmk_boot_mark(L"thermal_ok");
-        else         llmk_boot_mark(L"thermal_skip");
-    }
-
-    // Phase 6C: LoRA — load saved adapter from NVMe (if any)
-    oo_lora_init(&g_lora, 22, 288, 8);   /* Tinyllama: 22 layers, dim=288 */
-    oo_lora_load(&g_lora, (void*)0);      /* load from NVMe LBA if present */
-    llmk_boot_mark(L"lora_init");
-
-    // Phase 6E: Evolution bridge — connects genetic mutations to LoRA backward
-    oo_evo_init();
-    llmk_boot_mark(L"evo_bridge_init");
-
-    // Phase 6F: Organ bus — connect all biological organs to united_bus IPC
-    oo_organ_bus_init();
-    llmk_boot_mark(L"organ_bus_init");
-#endif
     llmk_boot_mark(L"nvme_init");// [Federation] Peer mesh (Phase 4E)
     oo_fed_init(&g_federation, (const CHAR8*)g_netboot.node_id);
     llmk_boot_mark(L"fed_init");
@@ -513,7 +473,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 (_pd->device_id == 0x2668 ||   /* QEMU HDA */
                  _pd->device_id == 0x1C20 ||   /* Intel 6-series */
                  _pd->device_id == 0x8C20)) {  /* Intel 8-series */
-                hda_bdf = (uint32_t)((_pd->bus << 8) | (_pd->dev << 3) | _pd->fn);
+                hda_bdf = (uint32_t)((_pd->bus << 8) | (_pd->device << 3) | _pd->func);
                 break;
             }
         }
@@ -1795,7 +1755,6 @@ gguf_fallback_done:
     // Phase Q: Apply DNA-driven sampler bias (after config/profile, before autotune).
     // Soft blend: 80% config + 20% DNA. Warden pressure reduces temperature further.
     if (g_soma_initialized && g_soma_dna.generation > 0) {
-        int soma_domain_used = SOMA_DOMAIN_CHAT;
         temperature = soma_dna_blend_temperature(&g_soma_dna, soma_domain_used, temperature);
         top_p       = soma_dna_blend_top_p     (&g_soma_dna, soma_domain_used, top_p);
         temperature = soma_dna_pressure_temperature(temperature, g_soma_warden.pressure_level);
@@ -4402,10 +4361,10 @@ snap_autoload_done:
                     char lbuf[64]; limbion_format_context(&g_limbion, lbuf, sizeof(lbuf));
                     Print(L"  limbion    %a\r\n", lbuf);
                 }
-                    Print(L"  chronion   boot=%u steps=%lu tokens=%lu\r\n",
-                        (unsigned)g_chronion.epoch.boot_count,
-                        (unsigned long)g_chronion.epoch.steps_this_boot,
-                        (unsigned long)g_chronion.epoch.tokens_lifetime);
+                Print(L"  chronion   boot=%u steps=%lu tokens=%lu\r\n",
+                      (unsigned)g_chronion.boot_count,
+                      (unsigned long)g_chronion.steps_this_boot,
+                      (unsigned long)g_chronion.tokens_lifetime);
                 {
                     const char *tstate[] = {"starved","hungry","satiated","gorged"};
                     unsigned ts = (unsigned)g_trophion.state;
@@ -7367,93 +7326,11 @@ snap_autoload_done:
             } else if (my_strncmp(prompt, "/ebs_", 5) == 0) {
                 oo_ebs_repl_cmd(&g_oo_boot, prompt, ImageHandle, SystemTable);
                 continue;            // ── Phase 5C: NVMe storage ──────────────────────────────────────
-            }
-#ifndef LLMK_SKIP_EXPERIMENTAL_UNITY
-            else if (my_strncmp(prompt, "/nvme", 5) == 0) {
+            } else if (my_strncmp(prompt, "/nvme_", 6) == 0) {
                 oo_nvme_repl_cmd(&g_nvme, prompt);
                 continue;            // ── Phase 5F: Model growth pipeline ─────────────────────────────
             } else if (my_strncmp(prompt, "/growth_", 8) == 0) {
                 oo_growth_repl_cmd(&g_growth, &g_diop, prompt, g_root);
-                continue;            // ── Phase 5B: MMU paging ────────────────────────────────────────
-            } else if (my_strncmp(prompt, "/mmu_", 5) == 0) {
-                oo_mmu_repl_cmd(&g_mmu, &g_oo_boot, prompt);
-                continue;            // ── Phase 5D: USB HID keyboard ──────────────────────────────────
-            } else if (my_strncmp(prompt, "/hid_", 5) == 0) {
-                oo_usb_hid_repl_cmd(&g_usb_hid, prompt);
-                continue;            // ── Phase 5E: Scheduler ─────────────────────────────────────────
-            } else if (my_strncmp(prompt, "/sched_", 7) == 0) {
-                oo_sched_repl_cmd(&g_sched, prompt);
-                continue;            // ── Phase 5G: Self-coding engine ────────────────────────────────
-            } else if (my_strncmp(prompt, "/code_", 6) == 0) {
-                oo_coding_repl_cmd(&g_self_coding, prompt);
-                continue;            // ── Phase 5H: GPU / framebuffer ─────────────────────────────────
-            } else if (my_strncmp(prompt, "/gpu_", 5) == 0) {
-                oo_gpu_repl_cmd(&g_gpu, prompt);
-                continue;
-            }
-
-#endif /* LLMK_SKIP_EXPERIMENTAL_UNITY — Phase 5 experimental block ends here */
-
-            // ── Phase 6A: IRQ status ─────────────────────────────────────────
-            else if (my_strncmp(prompt, "/irq_status", 11) == 0) {
-                Print(L"\r\n[IRQ] PS/2 keyboard interrupt active (IDT[33], IRQ1)\r\n");
-                int ch = oo_kbd_getchar();
-                if (ch > 0) { Print(L"[IRQ] Buffered key: %c\r\n\r\n", (CHAR16)ch); }
-                else        { Print(L"[IRQ] Key buffer empty\r\n\r\n"); }
-                continue;
-
-            // ── Phase 6B: ACPI thermal ───────────────────────────────────────
-            } else if (my_strncmp(prompt, "/thermal", 8) == 0) {
-                oo_thermal_status_t ts;
-                int tr = oo_thermal_read(&ts);
-                if (tr == 0) {
-                    Print(L"\r\n[ACPI] CPU temp: %u°C  throttle:%u  emergency:%u\r\n\r\n",
-                          ts.temperature_C, ts.throttle, ts.emergency);
-                } else {
-                    Print(L"\r\n[ACPI] Thermal MSR not available (r=%d)\r\n\r\n", tr);
-                }
-                continue;
-            } else if (my_strncmp(prompt, "/shutdown", 9) == 0) {
-                Print(L"\r\n[ACPI] Initiating clean S5 shutdown...\r\n");
-                oo_acpi_shutdown();   /* drivers/oo_acpi.h */
-                /* Should not reach here */
-                continue;
-
-            // ── Phase 6C: LoRA self-improvement ─────────────────────────────
-            } else if (my_strncmp(prompt, "/lora_status", 12) == 0) {
-                float sc = oo_lora_score(&g_lora);
-                Print(L"\r\n[LoRA] layers=%u steps=%llu score=%.3f dirty=%u\r\n\r\n",
-                      g_lora.n_layers,
-                      (unsigned long long)g_lora.step_count,
-                      (int)(sc * 1000), g_lora.dirty);
-                continue;
-            } else if (my_strncmp(prompt, "/lora_save", 10) == 0) {
-                int ls = oo_lora_persist(&g_lora, (void*)0);
-                Print(L"\r\n[LoRA] persist: %s\r\n\r\n", ls == 0 ? L"OK" : L"FAIL");
-                continue;
-
-            // ── Phase 6E: Evolution bridge stats ────────────────────────────
-            } else if (my_strncmp(prompt, "/evo_status", 11) == 0) {
-                const oo_evo_stats_t *es = oo_evo_stats();
-                Print(L"\r\n[Evo] gen=%u accepted=%u rejected=%u fitness=%.3f\r\n\r\n",
-                      es->generation, es->accepted, es->rejected,
-                      (int)(es->fitness_score * 1000));
-                continue;
-            } else if (my_strncmp(prompt, "/evo_eval", 9) == 0) {
-                oo_evo_evaluate();
-                Print(L"\r\n[Evo] Fitness evaluated — genome updated if threshold met.\r\n\r\n");
-                continue;
-
-            // ── Phase 6F: Organ bus status ───────────────────────────────────
-            } else if (my_strncmp(prompt, "/bus_status", 11) == 0) {
-                UINT8 sched = (UINT8)oo_scheduler_get_state();
-                const char *states[] = {"RELAXED","VIGILANT","COMBAT","SURVIVAL"};
-                const char *sname = (sched < 4) ? states[sched] : "UNKNOWN";
-                Print(L"\r\n[OrganBus] homeostasis=%s  kbd_ring=%s\r\n\r\n",
-                      sname[0] == 'R' ? L"RELAXED" :
-                      sname[0] == 'V' ? L"VIGILANT" :
-                      sname[0] == 'C' ? L"COMBAT" : L"SURVIVAL",
-                      (oo_kbd_getchar() != -1) ? L"pending" : L"empty");
                 continue;
 
             // ── Phase NB: Network Boot commands ──────────────────────────────

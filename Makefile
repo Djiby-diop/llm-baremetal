@@ -36,7 +36,6 @@ CFLAGS = -ffreestanding -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
 BUILD_ID ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILD_ID := $(BUILD_ID)
 CFLAGS += -DLLMB_BUILD_ID=L\"$(BUILD_ID)\"
-CFLAGS += -DLLMK_SKIP_EXPERIMENTAL_UNITY=1
 
 LDFLAGS = -nostdlib -znocombreloc -T $(EFI_LDS) \
 		  -shared -Bsymbolic -L$(EFI_LIBDIR) $(EFI_CRT0)
@@ -61,36 +60,12 @@ OO_LINK_ARCHIVES = \
 	$(OO_BUILD_DIR)/liboo-engine.a \
 	$(OO_BUILD_DIR)/liboo-modules.a \
 	$(OO_BUILD_DIR)/liboo-bus.a \
-	$(OO_BUILD_DIR)/librust_guard.a \
-	../vital-baremetal/liboo-vital.a
+	$(OO_BUILD_DIR)/librust_guard.a
 
-# OO Biological Organ object files (linked when available)
-OO_ORGAN_OBJS := $(wildcard \
-	../united-baremetal/build/*.o \
-	../kernel-baremetal/build/*.o \
-	../memory-baremetal/build/*.o \
-	../network-baremetal/build/*.o \
-	../identity-baremetal/build/*.o \
-	../sense-baremetal/build/*.o \
-	../vocal-baremetal/build/*.o \
-	../reflex-baremetal/build/*.o \
-	../evolution-baremetal/build/*.o \
-	../dream-baremetal/build/*.o \
-	../regen-baremetal/build/*.o \
-	../swarm-baremetal/build/*.o \
-	../shadow-baremetal/build/*.o \
-	../proprioception-baremetal/build/*.o \
-)
-
-# P1 split build: build efi_phases/efi_entry locally because cached OO archives
-# may be placeholder stubs during host-only iteration.
+# P1 split build: no god-file object (efi_phases.c inside liboo-kernel.a)
 TARGET = llama2.efi
-EFI_PHASES_SRC = $(OO_WORKTREE)/oo-kernel/boot/efi_phases.c
-EFI_PHASES_OBJ = efi_phases.o
-EFI_ENTRY_SRC = $(OO_WORKTREE)/oo-kernel/boot/efi_entry.c
-EFI_ENTRY_OBJ = efi_entry.o
-OO_STUBS_SRC = core/worktree_archive_stubs.c
-OO_STUBS_OBJ = worktree_archive_stubs.o
+REPL_SRC = engine/llama2/llama2_efi_final.c
+REPL_OBJ = llama2_repl.o
 
 # Phase 5 (Zig): metabolism profile selection
 METABION_PROFILE ?= balanced
@@ -114,7 +89,7 @@ SOMA_OBJS = engine/ssm/soma_router.o engine/ssm/soma_dna.o engine/ssm/soma_dual.
 
 REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	llmk_stubs.o \
-	djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o gguf_kquant.o \
+	djiblas.o djiblas_avx2.o attention_avx2.o gguf_loader.o gguf_infer.o \
 	ssm_infer.o mamba_block.o mamba_weights.o bpe_tokenizer.o \
 	oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o \
 	$(SOMA_OBJS) \
@@ -148,8 +123,7 @@ REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	oo-modules/pheromion-engine/core/pheromion.o \
 	oo-modules/evolvion-engine/core/evolvion.o \
 	oo-modules/evolvion-engine/core/oo_driver_probe.o \
-	oo-modules/ghost-engine/core/oo_net_packet.o \
-	$(EFI_PHASES_OBJ) $(EFI_ENTRY_OBJ) $(OO_STUBS_OBJ)
+	oo-modules/ghost-engine/core/oo_net_packet.o
 REPL_SO  = llama2_repl.so
 
 all: repl
@@ -187,14 +161,8 @@ $(METABION_PROFILE_HDR): $(METABION_PROFILE_DEFAULT)
 	fi
 
 # Rebuild when key headers change (Make doesn't auto-detect includes).
-$(EFI_PHASES_OBJ): $(EFI_PHASES_SRC) engine/llama2/llama2_efi_final.c $(METABION_PROFILE_HDR)
-	$(CC) -I$(OO_WORKTREE) $(CFLAGS) -c $(EFI_PHASES_SRC) -o $(EFI_PHASES_OBJ)
-
-$(EFI_ENTRY_OBJ): $(EFI_ENTRY_SRC)
-	$(CC) -I$(OO_WORKTREE) $(CFLAGS) -c $(EFI_ENTRY_SRC) -o $(EFI_ENTRY_OBJ)
-
-$(OO_STUBS_OBJ): $(OO_STUBS_SRC)
-	$(CC) $(CFLAGS) -c $(OO_STUBS_SRC) -o $(OO_STUBS_OBJ)
+$(REPL_OBJ): $(REPL_SRC) engine/djiblas/djiblas.h engine/ssm/interface.h $(METABION_PROFILE_HDR)
+	$(CC) $(CFLAGS) -c $(REPL_SRC) -o $(REPL_OBJ)
 
 llmk_zones.o: core/llmk_zones.c core/llmk_zones.h core/llmk_log.h
 	$(CC) $(CFLAGS) -c core/llmk_zones.c -o llmk_zones.o
@@ -216,9 +184,6 @@ gguf_loader.o: engine/gguf/gguf_loader.c engine/gguf/gguf_loader.h
 
 gguf_infer.o: engine/gguf/gguf_infer.c engine/gguf/gguf_infer.h
 	$(CC) $(CFLAGS) -c engine/gguf/gguf_infer.c -o gguf_infer.o
-
-gguf_kquant.o: engine/gguf/gguf_kquant.c engine/gguf/gguf_kquant.h
-	$(CC) $(CFLAGS) -c engine/gguf/gguf_kquant.c -o gguf_kquant.o
 
 oo-modules/djibion-engine/core/djibion.o: oo-modules/djibion-engine/core/djibion.c oo-modules/djibion-engine/core/djibion.h
 	$(CC) $(CFLAGS) -c oo-modules/djibion-engine/core/djibion.c -o oo-modules/djibion-engine/core/djibion.o
@@ -286,9 +251,8 @@ oo-modules/evolvion-engine/core/oo_driver_probe.o: oo-modules/evolvion-engine/co
 oo-modules/ghost-engine/core/oo_net_packet.o: oo-modules/ghost-engine/core/oo_net_packet.c oo-modules/ghost-engine/core/oo_net_packet.h
 	$(CC) $(CFLAGS) -c oo-modules/ghost-engine/core/oo_net_packet.c -o oo-modules/ghost-engine/core/oo_net_packet.o
 
-$(REPL_SO): $(REPL_OBJS) $(OO_LINK_ARCHIVES) | oo-subsystems
+$(REPL_SO): $(REPL_OBJS) | oo-subsystems
 	ld $(LDFLAGS) --allow-multiple-definition $(REPL_OBJS) \
-		$(OO_ORGAN_OBJS) \
 		--start-group $(OO_LINK_ARCHIVES) --end-group \
 		-o $(REPL_SO) $(LIBS)
 
@@ -400,14 +364,8 @@ clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
 	rm -f oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o llmk_oo_infer.o
 	rm -f engine/ssm/core/soma_mind.o
-	@echo "OK: Clean complete (oo-subsystems cache preserved; use 'make clean-all' to also wipe worktree)"
-
-clean-all:
-	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
-	rm -f oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o llmk_oo_infer.o
-	rm -f engine/ssm/core/soma_mind.o
 	rm -rf $(OO_BUILD_DIR)
-	@echo "OK: Full clean complete"
+	@echo "OK: Clean complete"
 
 rebuild: clean all
 

@@ -9,6 +9,9 @@
 #include "oo_mbedtls.h"
 #include "oo_netboot.h"   /* for HTTP fallback (proxy mode) */
 #include "oo_tls.h"
+#ifdef OO_MBEDTLS_REAL
+#include "oo_mbedtls_port.h"
+#endif
 #include <efi.h>
 #include <efilib.h>
 
@@ -239,11 +242,13 @@ EFI_STATUS oo_mbedtls_connect(OoTlsCon *con,
     if (EFI_ERROR(st)) return st;
 
 #ifdef OO_MBEDTLS_REAL
-    /* Real TLS handshake — connect TCP4 + mbedtls_ssl_handshake() */
-    /* TODO: wire mbedtls_ssl_setup(), mbedtls_ssl_set_bio(), mbedtls_ssl_handshake() */
-    Print(L"[mbedtls] TLS handshake (real mbedTLS) — not yet wired\r\n");
-    con->state = OO_TLS_CON_ERROR;
-    return EFI_UNSUPPORTED;
+    /* Real TLS handshake via oo_mbedtls_port.c */
+    EFI_STATUS hret = oo_mbedtls_do_handshake(con);
+    if (EFI_ERROR(hret)) {
+        oo_mbedtls_close(con);
+        return hret;
+    }
+    return EFI_SUCCESS;
 #else
     Print(L"[mbedtls] Stub: TCP4 open OK but TLS handshake requires mbedTLS source\r\n");
     Print(L"[mbedtls] Tip: use /tls_proxy mode for now, run tools/fetch-mbedtls.sh\r\n");
@@ -369,8 +374,15 @@ void oo_mbedtls_print_status(void) {
     Print(L"\r\n  [OO mbedTLS Status]\r\n");
     Print(L"  Initialized : %s\r\n", g_mbedtls_initialized ? L"yes" : L"no");
     Print(L"  TCP4 SvcBnd : %s\r\n", g_tcp4_svc_handle ? L"FOUND" : L"NOT FOUND");
-    Print(L"  Real TLS    : %s\r\n", oo_mbedtls_is_real() ? L"YES (mbedTLS compiled in)" : L"NO (stub — proxy fallback)");
+    Print(L"  Real TLS    : %s\r\n", oo_mbedtls_is_real() ?
+          L"YES (mbedTLS compiled in)" : L"NO (stub — proxy fallback)");
+#ifdef OO_MBEDTLS_REAL
+    UINT32 used = 0, total = 0;
+    oo_mbedtls_pool_stats(&used, &total);
+    Print(L"  Heap pool   : %u / %u bytes used\r\n", used, total);
+#else
     Print(L"  Next step   : run tools/fetch-mbedtls.sh + rebuild with OO_MBEDTLS_REAL=1\r\n");
+#endif
     Print(L"\r\n");
 }
 

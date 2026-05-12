@@ -4042,6 +4042,16 @@ static void llmk_repl_no_model_loop(void) {
             continue;
         }
 
+        if (my_strncmp(prompt, "/mbedtls_", 9) == 0) {
+            oo_mbedtls_repl_cmd(prompt);
+            continue;
+        }
+
+        if (my_strncmp(prompt, "/tls_", 5) == 0) {
+            oo_tls_repl_cmd(&g_oo_tls, prompt);
+            continue;
+        }
+
         Print(L"\r\nNo model loaded. Use /models then set repl.cfg: model=<file> and reboot.\r\n\r\n");
     }
 }
