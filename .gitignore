@@ -1,0 +1,11 @@
+*.o
+*.so
+*.efi
+llama2.efi
+llama2.so
+*.img
+*.fd
+*.log
+__pycache__/
+.pytest_cache/
+*.pyc

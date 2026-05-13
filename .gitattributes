@@ -1,0 +1,4 @@
+# Git attributes for Operating Organism prototype
+* text=auto
+*.efi binary
+*.bin binary
