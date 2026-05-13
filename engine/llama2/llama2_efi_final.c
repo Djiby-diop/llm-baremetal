@@ -216,6 +216,10 @@
 #include "../self_improve/oo_self_improve.h"
 #include "../self_improve/oo_self_improve.c"
 
+// Phase 10A: WASM module loader + interpreter (bare-metal MVP)
+#include "../wasm/oo_wasm.h"
+#include "../wasm/oo_wasm.c"
+
 // Phase 6A: PS/2 keyboard IRQ + 8259A PIC wiring (post-ExitBootServices)
 #include "../kernel/oo_irq.h"
 #include "../kernel/oo_irq.c"
@@ -406,6 +410,8 @@ static void llmk_copy_ascii_bounded(char *dst, int dst_cap, const char *src) {
 #include "thanatosion-engine/core/thanatosion.h"
 /* tentative forward definition — soma_loader.c provides the actual definition */
 static SomaDNA g_soma_dna;
+/* Phase 10A: WASM singleton — loaded module state */
+static OoWasmMod g_wasm_mod;
 #include "soma_mind.c"
 #include "soma_loader.c"
 #include "soma_repl.c"

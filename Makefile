@@ -101,6 +101,7 @@ REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o \
 	$(SOMA_OBJS) \
 	engine/network/oo_mbedtls_port.o \
+	engine/wasm/oo_wasm.o \
 	engine/voice/oo_voice_router.o \
 	engine/voice/oo_voice_context.o \
 	engine/voice/oo_persona.o \

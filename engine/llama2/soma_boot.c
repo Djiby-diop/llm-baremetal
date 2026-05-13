@@ -423,6 +423,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     oo_si_check_rebuild_flag(Root);   /* Phase 3: warn if rebuild needed */
     llmk_boot_mark(L"si_init");
 
+    // [WASM] Phase 10A: WASM module loader — init empty module
+    oo_wasm_init(&g_wasm_mod);
+    llmk_boot_mark(L"wasm_init");
+
     // [TLS] OO TLS abstraction layer (Phase 3)
     oo_tls_init(&g_oo_tls, OO_TLS_MODE_PROXY);
     llmk_boot_mark(L"tls_init");
@@ -7403,6 +7407,11 @@ snap_autoload_done:
                     Print(L"[tls] Query failed (%r). Check DNS + key + network.\r\n\r\n", tst);
                 }
                 continue;
+            /* Phase 10A: WASM module loader — /wasm_load <path>, /wasm_call <fn>, /wasm_info */
+            } else if (my_strncmp(prompt, "/wasm_", 6) == 0) {
+                oo_wasm_repl_cmd(&g_wasm_mod, g_root, prompt);
+                continue;
+
             } else if (my_strncmp(prompt, "/net_push", 9) == 0) {
                 Print(L"\r\n[netboot] Push delta to federation: Phase 4 TODO\r\n\r\n");
                 oo_netboot_print_status(&g_netboot);
