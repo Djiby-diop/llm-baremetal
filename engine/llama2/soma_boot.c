@@ -2025,6 +2025,8 @@ snap_autoload_done:
                 g_lora_checkpoint_req = 0;
             }
         }
+        /* Phase 8A: Poll for incoming OO-DISCOVER UDP packets and auto-reply */
+        oo_fed_udp_listen_tick(&g_federation);
 
         // Voice pipeline tick (~60Hz cadence): drain TTS PCM buffer → HDA playback,
         // and keep wakeword engine fed with live audio. Non-blocking.

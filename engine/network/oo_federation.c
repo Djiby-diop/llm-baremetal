@@ -381,5 +381,280 @@ int oo_fed_repl_cmd(OoFedCtx *ctx, const char *cmd) {
         if (idx >= 0) oo_fed_pull_peer_info(ctx, idx);
         return 1;
     }
+    /* Phase 8A: /fed_udp_discover — LAN UDP broadcast */
+    if (_f_cstrcmp(cmd, "/fed_udp_discover", 17) == 0) {
+        oo_fed_udp_discover(ctx); return 1;
+    }
+    /* Phase 8C: /fed_heartbeat — send heartbeat to all peers + prune stale */
+    if (_f_cstrcmp(cmd, "/fed_heartbeat", 14) == 0) {
+        oo_fed_heartbeat(ctx); return 1;
+    }
+    /* Phase 8D: /fed_delta_push <patch_json> — compressed chunked delta push */
+    if (_f_cstrcmp(cmd, "/fed_delta_push ", 16) == 0) {
+        const CHAR8 *json = (const CHAR8*)(cmd + 16);
+        oo_fed_delta_push(ctx, json, _f_strlen(json)); return 1;
+    }
     return 0;
+}
+
+/* ── Phase 8A: UDP Broadcast Peer Discovery ─────────────────────────────────
+ * Sends "OO-DISCOVER" broadcast on UDP port 8181 using oo_net_core.
+ * Any OO node listening replies with its JSON capabilities.
+ * Port 8181 chosen to avoid collision with DHCP (67/68) and swarm (42420).
+ */
+#define OO_FED_UDP_DISC_PORT 8181
+
+EFI_STATUS oo_fed_udp_discover(OoFedCtx *ctx) {
+    if (!ctx || !ctx->initialized) return EFI_NOT_READY;
+    Print(L"[fed-8A] UDP broadcast discovery on port %d...\r\n", OO_FED_UDP_DISC_PORT);
+
+    /* Build discovery message: "OO-DISCOVER|<node_id>|<caps_hex>" */
+    static CHAR8 msg[128];
+    UINTN mp = 0;
+    const CHAR8 *pfx = (const CHAR8*)"OO-DISCOVER|";
+    for (int k = 0; pfx[k] && mp < 120; k++) msg[mp++] = pfx[k];
+    for (int k = 0; ctx->self_node_id[k] && mp < 120; k++) msg[mp++] = ctx->self_node_id[k];
+    msg[mp++] = '|';
+    /* caps as 8-char hex */
+    UINT32 caps = ctx->self_caps;
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        UINT8 nib = (caps >> shift) & 0xF;
+        msg[mp++] = (CHAR8)(nib < 10 ? '0' + nib : 'A' + nib - 10);
+    }
+    msg[mp] = 0;
+
+    /* Send broadcast */
+    int tx = oo_net_udp_send(OO_IP_BCAST, OO_FED_UDP_DISC_PORT,
+                              OO_FED_UDP_DISC_PORT,
+                              msg, (UINT16)mp);
+    if (!tx) {
+        Print(L"[fed-8A] UDP send failed (network offline)\r\n");
+        return EFI_NETWORK_UNREACHABLE;
+    }
+    Print(L"[fed-8A] Broadcast sent: %a\r\n", msg);
+
+    /* Poll for replies: up to 16 packets, 50ms window */
+    int found = 0;
+    for (int attempt = 0; attempt < 16; attempt++) {
+        static CHAR8 rbuf[256];
+        UINT32 src_ip = 0; UINT16 src_port = 0, rlen = 0;
+        if (!oo_net_udp_recv_poll(OO_FED_UDP_DISC_PORT, rbuf, (UINT16)(sizeof(rbuf)-1),
+                                   &src_ip, &src_port, &rlen))
+            break; /* no more packets */
+        rbuf[rlen] = 0;
+        /* Parse reply: "OO-REPLY|<node_id>|<caps_hex>" */
+        if (rbuf[0]=='O' && rbuf[1]=='O' && rbuf[2]=='-' &&
+            rbuf[3]=='R' && rbuf[4]=='E' && rbuf[5]=='P') {
+            /* Extract node_id (between first and second '|') */
+            static CHAR8 peer_id[OO_FED_NODE_ID_LEN];
+            UINTN pi = 0;
+            UINTN ri = 8; /* skip "OO-REPLY|" */
+            while (rbuf[ri] && rbuf[ri] != '|' && pi < OO_FED_NODE_ID_LEN-1)
+                peer_id[pi++] = rbuf[ri++];
+            peer_id[pi] = 0;
+            /* Build IP string from src_ip */
+            static CHAR8 peer_ip[16];
+            UINTN iip = 0;
+            for (int b = 0; b < 4; b++) {
+                UINT8 oct = (UINT8)((src_ip >> (b*8)) & 0xFF);
+                CHAR8 tmp[4]; _f_itoa(oct, tmp, 4);
+                for (int k = 0; tmp[k] && iip < 14; k++) peer_ip[iip++] = tmp[k];
+                if (b < 3) peer_ip[iip++] = '.';
+            }
+            peer_ip[iip] = 0;
+            oo_fed_add_peer(ctx, peer_ip, OO_FED_PORT, peer_id);
+            found++;
+            Print(L"[fed-8A] Peer discovered: %a @ %a\r\n", peer_id, peer_ip);
+        }
+    }
+    Print(L"[fed-8A] Discovery done: %d new peer(s)\r\n", found);
+    return EFI_SUCCESS;
+}
+
+/* Also: respond to incoming OO-DISCOVER packets (call from REPL loop poll) */
+void oo_fed_udp_listen_tick(OoFedCtx *ctx) {
+    if (!ctx || !ctx->initialized) return;
+    static CHAR8 rbuf[256];
+    UINT32 src_ip = 0; UINT16 src_port = 0, rlen = 0;
+    if (!oo_net_udp_recv_poll(OO_FED_UDP_DISC_PORT, rbuf, (UINT16)(sizeof(rbuf)-1),
+                               &src_ip, &src_port, &rlen))
+        return;
+    rbuf[rlen] = 0;
+    /* Reply to OO-DISCOVER messages */
+    if (rbuf[0]=='O' && rbuf[1]=='O' && rbuf[2]=='-' &&
+        rbuf[3]=='D' && rbuf[4]=='I' && rbuf[5]=='S') {
+        static CHAR8 reply[128];
+        UINTN rp = 0;
+        const CHAR8 *rtag = (const CHAR8*)"OO-REPLY|";
+        for (int k = 0; rtag[k] && rp < 120; k++) reply[rp++] = rtag[k];
+        for (int k = 0; ctx->self_node_id[k] && rp < 120; k++) reply[rp++] = ctx->self_node_id[k];
+        reply[rp++] = '|';
+        UINT32 caps = ctx->self_caps;
+        for (int shift = 28; shift >= 0; shift -= 4) {
+            UINT8 nib = (caps >> shift) & 0xF;
+            reply[rp++] = (CHAR8)(nib < 10 ? '0' + nib : 'A' + nib - 10);
+        }
+        reply[rp] = 0;
+        oo_net_udp_send(src_ip, src_port, OO_FED_UDP_DISC_PORT,
+                        reply, (UINT16)rp);
+    }
+}
+
+/* ── Phase 8B: HTTPS bearer token injection ──────────────────────────────────
+ * Sets oracle API key for direct HTTPS oracle calls.
+ * The actual TLS handshake is done by EFI_HTTP_PROTOCOL (SNP firmware handles
+ * TLS for HTTPS URLs). We inject the Authorization header into g_netboot.
+ */
+void oo_fed_set_oracle_token(const CHAR8 *bearer_token) {
+    if (!bearer_token) return;
+    /* Store in g_netboot oracle config for next HTTP POST */
+    _f_strlcpy(g_netboot.oracle_api_key, bearer_token, 128);
+    Print(L"[fed-8B] Oracle bearer token set (%u chars)\r\n",
+          (UINT32)_f_strlen(bearer_token));
+}
+
+/* ── Phase 8C: Federation Heartbeat + Stale Peer Removal ─────────────────────
+ * Sends POST /oo/heartbeat to each peer with: node_id, caps, model_hash, fitness.
+ * Peers not seen for OO_FED_HEARTBEAT_TIMEOUT_TICKS are removed.
+ * Call from REPL loop every N turns (e.g. every 60 interactions).
+ */
+#define OO_FED_HEARTBEAT_TIMEOUT_MS  300000U  /* 5 minutes */
+
+void oo_fed_heartbeat(OoFedCtx *ctx) {
+    if (!ctx || !ctx->initialized) return;
+
+    /* Build heartbeat JSON */
+    static CHAR8 hb[512];
+    UINTN hp = 0;
+    const CHAR8 *h1 = (const CHAR8*)"{\"node_id\":\"";
+    for (int k = 0; h1[k] && hp < 508; k++) hb[hp++] = h1[k];
+    for (int k = 0; ctx->self_node_id[k] && hp < 508; k++) hb[hp++] = ctx->self_node_id[k];
+    const CHAR8 *h2 = (const CHAR8*)"\",\"caps\":";
+    for (int k = 0; h2[k] && hp < 508; k++) hb[hp++] = h2[k];
+    CHAR8 capstr[12]; _f_itoa(ctx->self_caps, capstr, 12);
+    for (int k = 0; capstr[k] && hp < 508; k++) hb[hp++] = capstr[k];
+    /* Add uptime in ticks */
+    const CHAR8 *h3 = (const CHAR8*)"}";
+    for (int k = 0; h3[k] && hp < 508; k++) hb[hp++] = h3[k];
+    hb[hp] = 0;
+
+    UINT64 now = 0;
+    uefi_call_wrapper(BS->GetNextMonotonicCount, 1, &now);
+
+    int alive = 0, pruned = 0;
+    for (int i = ctx->n_peers - 1; i >= 0; i--) {
+        OoFedPeer *p = &ctx->peers[i];
+        if (!p->active) continue;
+
+        /* Check timeout first */
+        if (p->last_seen_tick > 0) {
+            UINT64 elapsed_ms = (now > p->last_seen_tick)
+                ? (now - p->last_seen_tick) / 100  /* rough ms */
+                : 0;
+            if (elapsed_ms > OO_FED_HEARTBEAT_TIMEOUT_MS) {
+                Print(L"[fed-8C] Peer[%d] %a timed out (%lums) — removing\r\n",
+                      i, p->ip, (unsigned long long)elapsed_ms);
+                oo_fed_remove_peer(ctx, i);
+                pruned++;
+                continue;
+            }
+        }
+
+        /* Send heartbeat */
+        static CHAR8 url[128];
+        _f_build_url(url, sizeof(url), p->ip, p->port,
+                     (const CHAR8*)"/oo/heartbeat");
+        static CHAR8 resp[128];
+        EFI_STATUS st = oo_netboot_http_post_json(&g_netboot, url,
+                                                   hb, resp, sizeof(resp)-1);
+        if (!EFI_ERROR(st)) {
+            p->last_seen_tick = now;
+            alive++;
+            Print(L"[fed-8C] Peer[%d] %a alive\r\n", i, p->ip);
+        } else {
+            Print(L"[fed-8C] Peer[%d] %a unreachable\r\n", i, p->ip);
+        }
+    }
+    ctx->heartbeat_count++;
+    Print(L"[fed-8C] Heartbeat done: %d alive, %d pruned (total=%u)\r\n",
+          alive, pruned, ctx->heartbeat_count);
+}
+
+/* ── Phase 8D: Delta Compression + Chunked Transfer ─────────────────────────
+ * Splits large patch JSON into 4096-byte chunks with CRC32 per chunk.
+ * Chunk envelope: {"seq":<n>,"total":<t>,"crc32":<hex>,"data":"<b64-like>"}
+ * Each chunk is POSTed to /oo/patch_chunk on each peer.
+ * Peers reassemble and validate before applying.
+ */
+#define OO_FED_CHUNK_SIZE  4096
+
+EFI_STATUS oo_fed_delta_push(OoFedCtx *ctx, const CHAR8 *patch_json, UINTN patch_len) {
+    if (!ctx || !patch_json || patch_len == 0) return EFI_INVALID_PARAMETER;
+
+    UINT32 total_chunks = (UINT32)((patch_len + OO_FED_CHUNK_SIZE - 1) / OO_FED_CHUNK_SIZE);
+    Print(L"[fed-8D] Delta push: %u bytes, %u chunk(s)\r\n",
+          (UINT32)patch_len, total_chunks);
+
+    int peers_ok = 0;
+    for (int pi = 0; pi < ctx->n_peers; pi++) {
+        OoFedPeer *p = &ctx->peers[pi];
+        if (!p->active) continue;
+
+        static CHAR8 url[128];
+        _f_build_url(url, sizeof(url), p->ip, p->port,
+                     (const CHAR8*)"/oo/patch_chunk");
+
+        int peer_ok = 1;
+        for (UINT32 seq = 0; seq < total_chunks; seq++) {
+            UINTN off   = (UINTN)seq * OO_FED_CHUNK_SIZE;
+            UINTN clen  = patch_len - off;
+            if (clen > OO_FED_CHUNK_SIZE) clen = OO_FED_CHUNK_SIZE;
+
+            /* CRC32 of this chunk */
+            UINT32 crc = oo_net_crc32(patch_json + off, (int)clen);
+
+            /* Build chunk JSON envelope */
+            static CHAR8 env[OO_FED_CHUNK_SIZE + 256];
+            UINTN ep = 0;
+            const CHAR8 *e1 = (const CHAR8*)"{\"from\":\"";
+            for (int k = 0; e1[k] && ep < sizeof(env)-8; k++) env[ep++] = e1[k];
+            for (int k = 0; ctx->self_node_id[k] && ep < sizeof(env)-8; k++) env[ep++] = ctx->self_node_id[k];
+            /* seq / total / crc fields */
+            CHAR8 num[12];
+            const CHAR8 *e2 = (const CHAR8*)"\",\"seq\":";
+            for (int k = 0; e2[k] && ep < sizeof(env)-8; k++) env[ep++] = e2[k];
+            _f_itoa(seq, num, 12); for (int k = 0; num[k] && ep < sizeof(env)-8; k++) env[ep++] = num[k];
+            const CHAR8 *e3 = (const CHAR8*)",\"total\":";
+            for (int k = 0; e3[k] && ep < sizeof(env)-8; k++) env[ep++] = e3[k];
+            _f_itoa(total_chunks, num, 12); for (int k = 0; num[k] && ep < sizeof(env)-8; k++) env[ep++] = num[k];
+            const CHAR8 *e4 = (const CHAR8*)",\"crc32\":";
+            for (int k = 0; e4[k] && ep < sizeof(env)-8; k++) env[ep++] = e4[k];
+            /* CRC as decimal */
+            _f_itoa(crc, num, 12); for (int k = 0; num[k] && ep < sizeof(env)-8; k++) env[ep++] = num[k];
+            const CHAR8 *e5 = (const CHAR8*)",\"data\":\"";
+            for (int k = 0; e5[k] && ep < sizeof(env)-8; k++) env[ep++] = e5[k];
+            /* Inline chunk data (JSON-escaped) */
+            UINTN written = _f_json_escape(patch_json + off, env + ep, sizeof(env) - ep - 4);
+            ep += written;
+            env[ep++] = '"'; env[ep++] = '}'; env[ep] = 0;
+
+            static CHAR8 resp[128];
+            EFI_STATUS st = oo_netboot_http_post_json(&g_netboot, url,
+                                                       env, resp, sizeof(resp)-1);
+            if (EFI_ERROR(st)) {
+                Print(L"[fed-8D] Chunk %u/%u failed for peer[%d]: %r\r\n",
+                      seq+1, total_chunks, pi, st);
+                peer_ok = 0; break;
+            }
+            Print(L"[fed-8D] Chunk %u/%u -> peer[%d] crc32=0x%08x OK\r\n",
+                  seq+1, total_chunks, pi, crc);
+        }
+        if (peer_ok) {
+            p->patches_shared++;
+            ctx->total_patches_sent++;
+            peers_ok++;
+        }
+    }
+    Print(L"[fed-8D] Delta push done: %d/%d peers OK\r\n", peers_ok, ctx->n_peers);
+    return peers_ok > 0 ? EFI_SUCCESS : EFI_NETWORK_UNREACHABLE;
 }

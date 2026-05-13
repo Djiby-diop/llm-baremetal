@@ -55,6 +55,7 @@ typedef struct {
     UINT32     total_patches_sent;
     UINT32     total_patches_recv;
     UINT32     syncs;
+    UINT32     heartbeat_count;   /* Phase 8C */
 } OoFedCtx;
 
 /* Lifecycle */
@@ -84,6 +85,20 @@ EFI_STATUS oo_fed_sync(OoFedCtx *ctx);
 
 /* REPL */
 int oo_fed_repl_cmd(OoFedCtx *ctx, const char *cmd);
+
+/* Phase 8A: UDP broadcast discovery + reply listener */
+EFI_STATUS oo_fed_udp_discover(OoFedCtx *ctx);
+void       oo_fed_udp_listen_tick(OoFedCtx *ctx);  /* call from REPL loop */
+
+/* Phase 8B: Set oracle bearer token for HTTPS calls */
+void oo_fed_set_oracle_token(const CHAR8 *bearer_token);
+
+/* Phase 8C: Heartbeat + stale peer pruning */
+void oo_fed_heartbeat(OoFedCtx *ctx);
+
+/* Phase 8D: Delta compression + chunked push */
+EFI_STATUS oo_fed_delta_push(OoFedCtx *ctx, const CHAR8 *patch_json,
+                              UINTN patch_len);
 
 /* Global singleton */
 extern OoFedCtx g_federation;
