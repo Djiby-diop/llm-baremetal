@@ -307,14 +307,18 @@ EFI_STATUS oo_mbedtls_https_get(OoTlsCon *con,
 #endif
 }
 
+/* Phase 9C: extra_headers = pre-built "Key: Value\r\n" block (NULL = none).
+ * If bearer_token != NULL → injects "Authorization: Bearer <token>\r\n".
+ * extra_headers are appended AFTER Content-Length, BEFORE Accept. */
 EFI_STATUS oo_mbedtls_https_post_json(OoTlsCon *con,
                                         const CHAR8 *sni_host, const CHAR8 *path,
                                         const CHAR8 *bearer_token,
+                                        const CHAR8 *extra_headers,
                                         const CHAR8 *json_body,
                                         CHAR8 *resp_buf, UINTN *resp_len) {
 #ifdef OO_MBEDTLS_REAL
     /* Build HTTP/1.1 POST request */
-    static CHAR8 req[4096]; UINTN rp=0;
+    static CHAR8 req[8192]; UINTN rp=0;
     UINTN body_len = _mt_strlen(json_body ? json_body : (const CHAR8*)"");
 
     /* POST <path> HTTP/1.1\r\nHost: <host>\r\n */
@@ -332,11 +336,19 @@ EFI_STATUS oo_mbedtls_https_post_json(OoTlsCon *con,
     else{do{lenbuf[li--]='0'+(CHAR8)(tmp%10);tmp/=10;}while(tmp&&li>=0);}
     UINTN ll=_mt_strlen(lenbuf+li+1);
     _mt_memcpy(req+rp,lenbuf+li+1,ll); rp+=ll;
-    /* Authorization Bearer if token present */
+    /* Authorization Bearer (GPT-4/Gemini OAuth) — skip if extra_headers used instead */
     if (bearer_token && bearer_token[0]) {
         const CHAR8 *ah=(const CHAR8*)"\r\nAuthorization: Bearer ";
         _mt_memcpy(req+rp,ah,24); rp+=24;
         UINTN bl=_mt_strlen(bearer_token); _mt_memcpy(req+rp,bearer_token,bl); rp+=bl;
+    }
+    /* Oracle-specific extra headers (e.g. x-api-key + anthropic-version for Claude) */
+    if (extra_headers && extra_headers[0]) {
+        req[rp++]='\r'; req[rp++]='\n'; /* end previous header line */
+        UINTN el=_mt_strlen(extra_headers);
+        if (rp + el < sizeof(req)-128) { _mt_memcpy(req+rp,extra_headers,el); rp+=el; }
+        /* strip trailing \r\n — we add it below */
+        while (rp>2 && req[rp-1]=='\n' && req[rp-2]=='\r') rp-=2;
     }
     /* Accept + Connection close + end of headers */
     const CHAR8 *te=(const CHAR8*)"\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
@@ -390,7 +402,7 @@ EFI_STATUS oo_mbedtls_https_post_json(OoTlsCon *con,
 
     return (raw_pos > 0) ? EFI_SUCCESS : EFI_ABORTED;
 #else
-    (void)con;
+    (void)con; (void)extra_headers;
     return _https_via_proxy(sni_host, 443, path, bearer_token, json_body, resp_buf, resp_len);
 #endif
 }
@@ -561,17 +573,53 @@ EFI_STATUS oo_mbedtls_oracle_query(int oracle_id,
         json_body[jlen]=0;
     }
 
-    /* POST + receive */
+    /* POST + receive — oracle-specific headers */
     UINTN rlen = resp_max - 1;
-    st = oo_mbedtls_https_post_json(&_oracle_con, host, path,
-                                     api_key, json_body, resp_buf, &rlen);
+    const CHAR8 *bearer   = NULL;
+    const CHAR8 *x_hdrs   = NULL;
+    static CHAR8 path_buf[256];   /* for Gemini URL key param */
+    const CHAR8 *post_path = path;
+
+    if (oracle_id == 2) {
+        /* Claude: x-api-key + anthropic-version (NO Bearer) */
+        static CHAR8 claude_hdrs[192];
+        UINTN ci = 0;
+        const CHAR8 *k1 = (const CHAR8*)"x-api-key: ";
+        while (*k1) claude_hdrs[ci++]=*k1++;
+        for (UINTN k=0; api_key[k] && ci < 180; k++) claude_hdrs[ci++]=api_key[k];
+        const CHAR8 *k2 = (const CHAR8*)"\r\nanthropic-version: 2023-06-01";
+        while (*k2) claude_hdrs[ci++]=*k2++;
+        claude_hdrs[ci] = 0;
+        x_hdrs = claude_hdrs;
+        bearer = NULL;  /* no Authorization header for Claude */
+    } else if (oracle_id == 3) {
+        /* Gemini: ?key=<api_key> appended to path */
+        UINTN pi = 0;
+        for (; path[pi] && pi < sizeof(path_buf)-130; pi++) path_buf[pi]=path[pi];
+        const CHAR8 *qk = (const CHAR8*)"?key=";
+        for (UINTN k=0; k<5; k++) path_buf[pi++]=qk[k];
+        for (UINTN k=0; api_key[k] && pi < sizeof(path_buf)-2; k++) path_buf[pi++]=api_key[k];
+        path_buf[pi]=0;
+        post_path = path_buf;
+        bearer = NULL;  /* key is in URL */
+        x_hdrs = NULL;
+    } else {
+        /* GPT-4 and others: standard Bearer */
+        bearer = api_key;
+        x_hdrs = NULL;
+    }
+
+    st = oo_mbedtls_https_post_json(&_oracle_con, host, post_path,
+                                     bearer, x_hdrs, json_body, resp_buf, &rlen);
     oo_mbedtls_close(&_oracle_con);
 
     if (!EFI_ERROR(st) && rlen > 0) {
-        /* Try to extract "content" then "text" from JSON response */
         static CHAR8 extracted[4096];
-        if (_mbedtls_json_extract(resp_buf, (const CHAR8*)"content", extracted, sizeof(extracted))
-         || _mbedtls_json_extract(resp_buf, (const CHAR8*)"text",    extracted, sizeof(extracted))) {
+        int ok = 0;
+        if (!ok) ok = _mbedtls_json_extract(resp_buf, (const CHAR8*)"text",    extracted, sizeof(extracted)); /* Gemini + Claude */
+        if (!ok) ok = _mbedtls_json_extract(resp_buf, (const CHAR8*)"content", extracted, sizeof(extracted)); /* GPT-4 nested */
+        if (!ok) ok = _mbedtls_json_extract(resp_buf, (const CHAR8*)"message", extracted, sizeof(extracted)); /* fallback */
+        if (ok) {
             UINTN elen = _mt_strlen(extracted);
             if (elen >= resp_max) elen = resp_max-1;
             _mt_memcpy(resp_buf, extracted, elen);

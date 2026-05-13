@@ -73,10 +73,16 @@ EFI_STATUS oo_mbedtls_https_get(OoTlsCon *con,
                                   const CHAR8 *bearer_token,  /* NULL = no auth */
                                   CHAR8 *resp_buf, UINTN *resp_len);
 
+/* Send HTTP/POST over TLS — Phase 9C: extra_headers = "Key: Val\r\nKey2: Val2" block (NULL=none).
+ * If bearer_token != NULL → injects Authorization: Bearer.
+ * Claude: pass bearer_token=NULL + extra_headers="x-api-key: ...\r\nanthropic-version: 2023-06-01"
+ * Gemini: path includes ?key=<api_key>, bearer_token=NULL, extra_headers=NULL
+ * GPT-4:  bearer_token=api_key, extra_headers=NULL */
 EFI_STATUS oo_mbedtls_https_post_json(OoTlsCon *con,
                                         const CHAR8 *sni_host,
                                         const CHAR8 *path,
-                                        const CHAR8 *bearer_token,
+                                        const CHAR8 *bearer_token,  /* NULL = skip Bearer header */
+                                        const CHAR8 *extra_headers, /* NULL or "Key: Val\r\n..." */
                                         const CHAR8 *json_body,
                                         CHAR8 *resp_buf, UINTN *resp_len);
 
