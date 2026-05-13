@@ -92,6 +92,15 @@ int oo_mbedtls_repl_cmd(const char *cmd);
 /* True if mbedTLS source is compiled in (not stub) */
 int oo_mbedtls_is_real(void);
 
+/* Phase 9B: Direct TLS oracle — DNS resolve → TLS connect → POST → extract
+ * oracle_id: 1=GPT4, 2=Claude, 3=Gemini
+ * api_key: bearer token (in-memory, from /net_oracle_key)
+ * Returns EFI_SUCCESS + extracted content in resp_buf */
+EFI_STATUS oo_mbedtls_oracle_query(int oracle_id,
+                                    const CHAR8 *api_key,
+                                    const CHAR8 *prompt,
+                                    CHAR8 *resp_buf, UINTN resp_max);
+
 /* Singleton TCP4 service binding handle */
 extern EFI_HANDLE g_tcp4_svc_handle;
 extern int        g_mbedtls_initialized;

@@ -82,9 +82,8 @@
 // OO Hardware Drivers (Phase Z)
 #include "../drivers/oo_audio_hda.h"
 #include "../drivers/oo_audio_hda.c"
-/* NOTE: oo_nvme driver is provided by engine/kernel/oo_nvme.{h,c} (included at line ~195).
- * The drivers/ version uses a different API (OoNvmeCtrl, 3-arg init) and would conflict.
- * Do NOT include drivers/oo_nvme.h here. */
+#include "../drivers/oo_nvme.h"
+#include "../drivers/oo_nvme.c"
 
 // OO USB HID keyboard (Phase Z2)
 #include "../drivers/oo_usb_hid.h"
@@ -194,12 +193,7 @@
 #include "../kernel/oo_exit_boot.c"// Phase 5C: NVMe bare-metal PCI driver
 #ifndef LLMK_SKIP_EXPERIMENTAL_UNITY
 #include "../kernel/oo_nvme.h"
-#include "../kernel/oo_nvme.c"
-/* Compat alias: soma_mind.c / soma_repl.c use OoNvmeCtrl (drivers API name).
- * Both refer to the same kernel NVMe context struct (OoNvmeCtx). */
-#ifndef OoNvmeCtrl
-typedef OoNvmeCtx OoNvmeCtrl;
-#endif
+#include "../kernel/oo_nvme.c"// Phase 4E: Federation protocol — peer discovery + patch sharing
 #endif
 #include "../network/oo_federation.h"
 #include "../network/oo_federation.c"// Phase 5B: MMU — 4-level page tables, higher-half kernel, huge pages
@@ -412,14 +406,6 @@ static void llmk_copy_ascii_bounded(char *dst, int dst_cap, const char *src) {
 #include "thanatosion-engine/core/thanatosion.h"
 /* tentative forward definition — soma_loader.c provides the actual definition */
 static SomaDNA g_soma_dna;
-/* OoNvmeCtrl forward-compat: soma_mind.c and soma_repl.c reference this type.
- * When NVMe driver headers are excluded (LLMK_SKIP_EXPERIMENTAL_UNITY), provide
- * an opaque stub so the unity build type-checks cleanly. */
-#if !defined(OO_DRIVERS_NVME_H) && !defined(OO_KERNEL_NVME_H)
-typedef struct { uint8_t _raw[512]; } OoNvmeCtrl;
-typedef OoNvmeCtrl OoNvmeCtx;
-static inline void oo_nvme_repl_cmd(OoNvmeCtrl *c, const char *cmd) { (void)c; (void)cmd; }
-#endif
 #include "soma_mind.c"
 #include "soma_loader.c"
 #include "soma_repl.c"

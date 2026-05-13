@@ -16,6 +16,7 @@
  */
 #include "oo_netboot.h"
 #include "../network/oo_net_core.h"   /* g_oo_net — IP already acquired by DHCP */
+#include "oo_mbedtls.h"               /* Phase 9B: direct TLS oracle */
 #include <efi.h>
 #include <efilib.h>
 
@@ -861,9 +862,17 @@ EFI_STATUS oo_netboot_oracle_query(OoNetContext *ctx,
 
     /* Add Authorization header value for oracle if API key set */
     if (ctx->oracle_api_key[0]) {
-        /* The HTTP POST function doesn't support dynamic headers yet.
-         * Phase 3 will add Bearer token injection. For now, prefix key in URL
-         * or rely on local proxy to inject the header. */
+#ifdef OO_MBEDTLS_REAL
+        /* Phase 9B: direct TLS path — bypass local proxy entirely */
+        if (oracle <= OO_ORACLE_GEMINI && !ctx->oracle_endpoint[0]) {
+            Print(L"[netboot] Direct TLS oracle (mbedTLS real) — no proxy needed\r\n");
+            return oo_mbedtls_oracle_query((int)oracle,
+                                           ctx->oracle_api_key,
+                                           prompt,
+                                           resp_buf, resp_max);
+        }
+#endif
+        /* Plain HTTP path — proxy must inject Authorization header */
         Print(L"[netboot] API key set (%u chars) — proxy must forward Authorization\r\n",
               (UINT32)_nb_strlen(ctx->oracle_api_key));
     }

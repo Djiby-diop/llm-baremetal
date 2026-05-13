@@ -439,34 +439,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     oo_nvme_init(&g_nvme);
     llmk_boot_mark(L"nvme_init");// [Federation] Peer mesh (Phase 4E)
     oo_fed_init(&g_federation, (const CHAR8*)g_netboot.node_id);
-    llmk_boot_mark(L"fed_init");    // [MMU] 4-level page tables (Phase 5B)
-    oo_mmu_init(&g_mmu);
-    llmk_boot_mark(L"mmu_init");    // [Scheduler] 8-task cooperative + LAPIC preemption (Phase 5E)
-    oo_sched_init(&g_sched, 10 /* ms quantum */);
-    llmk_boot_mark(L"sched_init");    // [GPU] GOP double-buffer + VirtIO detection (Phase 5H)
-    oo_gpu_init(&g_gpu, SystemTable);
-    llmk_boot_mark(L"gpu_init");    // [SelfCoding] DIOP→C patch pipeline (Phase 5G)
-    oo_coding_init(&g_self_coding);
-    llmk_boot_mark(L"coding_init");    // [IRQ] PS/2 keyboard + 8259A PIC (Phase 6A)
-    oo_irq_init();
-    llmk_boot_mark(L"irq_init");    // [Thermal] CPU temperature MSR monitor (Phase 6B)
-    /* thermal: read-only, no init needed — just call oo_thermal_read() */    // [LoRA] Self-improvement adapter (Phase 6C)
-    oo_lora_init(&g_lora, 12 /* n_layers */, 288 /* dim */, 4 /* rank */);
-    llmk_boot_mark(L"lora_init");
-
-    /* Phase 7D: Spawn LoRA background training task in cooperative scheduler */
-    {
-        extern void oo_lora_bg_worker(void *arg);
-        int tid = oo_sched_spawn(&g_sched, oo_lora_bg_worker, NULL, "lora_bg");
-        if (tid >= 0)
-            Print(L"[Phase7D] LoRA background worker spawned (task %d)\r\n", tid);
-        else
-            Print(L"[Phase7D] LoRA bg spawn failed — no task slot\r\n");
-    }// [Evolution] DNA-gated LoRA backward (Phase 6E)
-    oo_evo_init();
-    llmk_boot_mark(L"evo_init");    // [OrganBus] Biological organ IPC wiring (Phase 6F)
-    oo_organ_bus_init();
-    llmk_boot_mark(L"organ_bus_init");
+    llmk_boot_mark(L"fed_init");
 
     // Show diagnostic info if requested via repl.cfg: boot_diag=1
     if (g_boot_diag) {
@@ -487,20 +460,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         uint32_t ticks_per_ms = oo_lapic_calibrate_ms();
         if (g_boot_verbose)
             Print(L"[LAPIC] IOAPIC ready, %u ticks/ms\r\n", (unsigned)ticks_per_ms);
-
-        /* Phase 7A: Start LAPIC periodic timer → drives oo_sched_tick() preemption
-         * Vector OO_INT_LAPIC (32) is wired in IDT to _lapic_timer_handler.
-         * Quantum: 10ms. If calibration failed (0), skip timer start. */
-        if (ticks_per_ms > 0) {
-            extern void oo_lapic_timer_start(uint32_t ticks, uint8_t vector);
-            uint32_t quantum_ticks = ticks_per_ms * 10; /* 10ms quantum */
-            oo_lapic_timer_start(quantum_ticks, 32 /* OO_INT_LAPIC */);
-            if (g_boot_verbose)
-                Print(L"[Phase7A] LAPIC preemptive timer started: %u ticks/quantum (10ms)\r\n",
-                      (unsigned)quantum_ticks);
-        } else {
-            Print(L"[Phase7A] LAPIC calibration failed — cooperative scheduler only\r\n");
-        }
+    }
 
     /* Phase WD: HDA Audio — init capture + playback
      * Find HDA controller via PCI (vendor 8086, device 2668 for QEMU).
@@ -2009,24 +1969,6 @@ snap_autoload_done:
     // MAIN LOOP
     while (1) { // SAFE: intentional long-running organism loop; terminates only via explicit operator command/shutdown.
         conversation_count++;
-
-        /* Phase 7D: Poll background task queue (LoRA BG worker + organ bus tick).
-         * oo_yield() runs one pending scheduler task, then returns.
-         * g_lora_checkpoint_req is set by oo_lora_bg_worker every 512 steps. */
-        oo_yield();
-        oo_organ_bus_tick();
-        {
-            extern volatile int g_lora_checkpoint_req;
-            extern volatile UINT64 g_lora_bg_steps;
-            if (g_lora_checkpoint_req && g_lora.dirty) {
-                oo_lora_persist(&g_lora, "lora.bin");
-                Print(L"[7D] LoRA auto-checkpoint (step %lu)\r\n",
-                      (unsigned long)g_lora_bg_steps);
-                g_lora_checkpoint_req = 0;
-            }
-        }
-        /* Phase 8A: Poll for incoming OO-DISCOVER UDP packets and auto-reply */
-        oo_fed_udp_listen_tick(&g_federation);
 
         // Voice pipeline tick (~60Hz cadence): drain TTS PCM buffer → HDA playback,
         // and keep wakeword engine fed with live audio. Non-blocking.
@@ -7376,103 +7318,8 @@ snap_autoload_done:
                 oo_mbedtls_repl_cmd(prompt);
                 continue;            // ── Phase 4D: DIOP model commands ──────────────────────────────
             } else if (my_strncmp(prompt, "/diop_", 6) == 0) {
-                /* Phase 7C: /diop_await — drain pending DIOP inference request */
-                if (my_strncmp(prompt, "/diop_await", 11) == 0) {
-                    if (!g_diop_req.pending) {
-                        Print(L"[diop] No pending request.\r\n");
-                    } else {
-                        Print(L"[diop] [7C] Running DIOP inference (model=%a max_tok=%d)...\r\n",
-                              g_diop.name, g_diop_req.max_tok);
-                        /* Use DIOP model weights for inference.
-                         * We temporarily swap the weights pointer and run a short
-                         * inference loop, then restore. DIOP is in llama2 BIN format. */
-                        if (g_diop.fmt == DIOP_FMT_BIN && g_diop.weights_len >= 28) {
-                            /* Parse DIOP config (7 ints = 28 bytes) */
-                            Config d_cfg;
-                            const int *icfg = (const int*)g_diop.weights;
-                            d_cfg.dim       = icfg[0]; d_cfg.hidden_dim = icfg[1];
-                            d_cfg.n_layers  = icfg[2]; d_cfg.n_heads    = icfg[3];
-                            d_cfg.n_kv_heads= icfg[3]; d_cfg.vocab_size = icfg[5];
-                            d_cfg.seq_len   = icfg[6];
-                            if (d_cfg.vocab_size < 0) d_cfg.vocab_size = -d_cfg.vocab_size;
-                            /* Cap to avoid OOM in QEMU test */
-                            if (d_cfg.seq_len > 256) d_cfg.seq_len = 256;
-                            int d_kv_dim = d_cfg.dim;
-
-                            Print(L"[diop] Config: dim=%d layers=%d vocab=%d seq=%d\r\n",
-                                  d_cfg.dim, d_cfg.n_layers, d_cfg.vocab_size, d_cfg.seq_len);
-
-                            /* Alloc minimal RunState for DIOP using zone allocator */
-                            RunState ds;
-                            ds.x    = (float*)simple_alloc(d_cfg.dim * sizeof(float));
-                            ds.xb   = (float*)simple_alloc(d_cfg.dim * sizeof(float));
-                            ds.xb2  = (float*)simple_alloc(d_cfg.dim * sizeof(float));
-                            ds.hb   = (float*)simple_alloc(d_cfg.hidden_dim * sizeof(float));
-                            ds.hb2  = (float*)simple_alloc(d_cfg.hidden_dim * sizeof(float));
-                            ds.q    = (float*)simple_alloc(d_cfg.dim * sizeof(float));
-                            ds.k    = (float*)simple_alloc(d_kv_dim * sizeof(float));
-                            ds.v    = (float*)simple_alloc(d_kv_dim * sizeof(float));
-                            ds.att  = (float*)simple_alloc(d_cfg.n_heads * d_cfg.seq_len * sizeof(float));
-                            ds.logits = (float*)simple_alloc(d_cfg.vocab_size * sizeof(float));
-                            ds.key_cache   = (float*)llmk_alloc_kv(
-                                (UINT64)d_cfg.n_layers * d_cfg.seq_len * d_kv_dim * sizeof(float), L"d_key");
-                            ds.value_cache = (float*)llmk_alloc_kv(
-                                (UINT64)d_cfg.n_layers * d_cfg.seq_len * d_kv_dim * sizeof(float), L"d_val");
-
-                            if (ds.x && ds.logits && ds.key_cache && ds.value_cache) {
-                                /* Map DIOP weights (shared_weights=1 for BIN signed vocab) */
-                                TransformerWeights dw;
-                                float *dw_ptr = (float*)((UINT8*)g_diop.weights + 7*sizeof(int));
-                                int shared = (icfg[5] > 0) ? 0 : 1;
-                                memory_map_weights(&dw, &d_cfg, dw_ptr, shared);
-
-                                /* Simple prompt tokenization: byte-level (ASCII) */
-                                int d_tok[128]; int d_n = 0;
-                                const CHAR8 *dp = g_diop_req.prompt;
-                                while (*dp && d_n < 127) d_tok[d_n++] = (unsigned char)*dp++;
-
-                                /* Run generation loop */
-                                int max_gen = g_diop_req.max_tok;
-                                if (max_gen > 64) max_gen = 64; /* cap for QEMU speed */
-                                int ri = 0;
-                                int token = d_tok[0];
-                                for (int pos = 0; pos < max_gen; pos++) {
-                                    transformer_forward(&ds, &dw, &d_cfg, token, pos);
-                                    /* Greedy: argmax of logits */
-                                    int next = 0; float best = ds.logits[0];
-                                    for (int vi = 1; vi < d_cfg.vocab_size; vi++) {
-                                        if (ds.logits[vi] > best) { best = ds.logits[vi]; next = vi; }
-                                    }
-                                    /* Write printable byte to result */
-                                    if (next >= 32 && next < 127) {
-                                        if (ri < OO_DIOP_RESULT_MAX - 1)
-                                            g_diop_req.result[ri++] = (CHAR8)next;
-                                    } else if (next == '\n' || next == ' ') {
-                                        if (ri < OO_DIOP_RESULT_MAX - 1)
-                                            g_diop_req.result[ri++] = (CHAR8)next;
-                                    }
-                                    token = next;
-                                    /* Feed next prompt token if still in prompt */
-                                    if (pos + 1 < d_n) token = d_tok[pos + 1];
-                                }
-                                g_diop_req.result[ri] = 0;
-                                g_diop_req.pending = 0;
-                                g_diop_req.done    = 1;
-                                Print(L"[diop] [7C] Inference done: %d chars\r\n", ri);
-                                Print(L"[diop] Result: %a\r\n", g_diop_req.result);
-                            } else {
-                                Print(L"[diop] OOM: cannot alloc RunState for DIOP model\r\n");
-                                g_diop_req.pending = 0;
-                            }
-                        } else {
-                            Print(L"[diop] DIOP model not in BIN format — cannot run inference\r\n");
-                            g_diop_req.pending = 0;
-                        }
-                    }
-                    continue;
-                }
                 oo_diop_repl_cmd(&g_diop, prompt, g_root);
-                continue;// ── Phase 4E: Federation commands ───────────────────────────────
+                continue;            // ── Phase 4E: Federation commands ───────────────────────────────
             } else if (my_strncmp(prompt, "/fed_", 5) == 0) {
                 oo_fed_repl_cmd(&g_federation, prompt);
                 continue;            // ── Phase 5A: ExitBootServices (full CPU takeover) ─────────────
@@ -7481,63 +7328,7 @@ snap_autoload_done:
                 continue;            // ── Phase 5C: NVMe storage ──────────────────────────────────────
             } else if (my_strncmp(prompt, "/nvme_", 6) == 0) {
                 oo_nvme_repl_cmd(&g_nvme, prompt);
-                continue;            // ── Phase 5B: MMU / page tables ─────────────────────────────────
-            } else if (my_strncmp(prompt, "/mmu_", 5) == 0) {
-                oo_mmu_repl_cmd(&g_mmu, &g_oo_boot, prompt);
-                continue;            // ── Phase 5E: Scheduler ─────────────────────────────────────────
-            } else if (my_strncmp(prompt, "/sched_", 7) == 0) {
-                oo_sched_repl_cmd(&g_sched, prompt);
-                continue;            // ── Phase 5H: GPU / framebuffer ─────────────────────────────────
-            } else if (my_strncmp(prompt, "/gpu_", 5) == 0) {
-                oo_gpu_repl_cmd(&g_gpu, prompt);
-                continue;            // ── Phase 5G: Self-coding engine ────────────────────────────────
-            } else if (my_strncmp(prompt, "/sc_", 4) == 0) {
-                oo_coding_repl_cmd(&g_self_coding, prompt);
-                continue;            // ── Phase 6A: IRQ / keyboard ─────────────────────────────────────
-            } else if (my_strncmp(prompt, "/irq_", 5) == 0) {
-                oo_irq_repl_cmd(prompt);
-                continue;            // ── Phase 6B: CPU thermal monitor ───────────────────────────────
-            } else if (my_strncmp(prompt, "/thermal_", 9) == 0) {
-                oo_thermal_repl_cmd(prompt);
-                continue;            // ── Phase 6C: LoRA adapter ──────────────────────────────────────
-            } else if (my_strncmp(prompt, "/lora_", 6) == 0) {
-                /* Phase 7D: /lora_checkpoint → flush dirty LoRA to NVMe */
-                if (my_strncmp(prompt, "/lora_checkpoint", 16) == 0) {
-                    extern volatile UINT64 g_lora_bg_steps;
-                    if (g_lora.dirty) {
-                        Print(L"[lora] [7D] Checkpointing LoRA (steps=%lu)...\r\n",
-                              (unsigned long)g_lora_bg_steps);
-                        int r = oo_lora_persist(&g_lora, "lora.bin");
-                        Print(r == 0
-                            ? L"[lora] Checkpoint OK (lora.bin)\r\n"
-                            : L"[lora] Checkpoint failed (NVMe not ready)\r\n");
-                        g_lora_checkpoint_req = 0;
-                    } else {
-                        Print(L"[lora] No dirty weights (bg_steps=%lu)\r\n",
-                              (unsigned long)g_lora_bg_steps);
-                    }
-                    continue;
-                }
-                /* /lora_status: show bg training stats */
-                if (my_strncmp(prompt, "/lora_status", 12) == 0) {
-                    extern volatile UINT64 g_lora_bg_steps;
-                    Print(L"[lora] BG training steps: %lu  dirty=%d  checkpoint_req=%d\r\n",
-                          (unsigned long)g_lora_bg_steps,
-                          (int)g_lora.dirty, (int)g_lora_checkpoint_req);
-                    oo_lora_print(&g_lora);
-                    continue;
-                }
-                oo_lora_repl_cmd(&g_lora, prompt);
-                continue;// ── Phase 6E: Evolution bridge ──────────────────────────────────
-            } else if (my_strncmp(prompt, "/evol_", 6) == 0) {
-                oo_evo_repl_cmd(prompt);
-                continue;            // ── Phase 6F: Organ bus IPC ─────────────────────────────────────
-            } else if (my_strncmp(prompt, "/organ_", 7) == 0) {
-                oo_organ_bus_repl_cmd(prompt);
-                continue;            // ── Phase 6D: USB HID ───────────────────────────────────────────
-            } else if (my_strncmp(prompt, "/usb_", 5) == 0) {
-                oo_usb_hid_repl_cmd(&g_oo_usb_hid, prompt);
-                continue;// ── Phase 5F: Model growth pipeline ─────────────────────────────
+                continue;            // ── Phase 5F: Model growth pipeline ─────────────────────────────
             } else if (my_strncmp(prompt, "/growth_", 8) == 0) {
                 oo_growth_repl_cmd(&g_growth, &g_diop, prompt, g_root);
                 continue;
@@ -7583,18 +7374,37 @@ snap_autoload_done:
                 g_netboot.oracle_api_key[ki] = 0;
                 Print(L"\r\n[netboot] API key stored in RAM (%lu chars). Never written to disk.\r\n\r\n", (UINTN)ki);
                 continue;
-            } else if (my_strncmp(prompt, "/net_push", 9) == 0) {
-                /* Push last self-improve patch to all federation peers */
-                if (g_self_improve.n_patches > 0) {
-                    int last = g_self_improve.n_patches - 1;
-                    const CHAR8 *pjson = (const CHAR8*)g_self_improve.patches[last].json;
-                    UINTN plen = 0;
-                    while (pjson[plen]) plen++;
-                    EFI_STATUS fst = oo_fed_share_patch(&g_federation, pjson, plen);
-                    Print(L"\r\n[netboot] Pushed patch to federation: %r\r\n\r\n", fst);
-                } else {
-                    Print(L"\r\n[netboot] No patches to push (run /si_patch first)\r\n\r\n");
+
+            /* Phase 9B: Direct TLS oracle — /tls_oracle [gpt4|claude|gemini] <prompt> */
+            } else if (my_strncmp(prompt, "/tls_oracle ", 12) == 0) {
+                const char *oargs = prompt + 12;
+                while (*oargs == ' ') oargs++;
+                int oid = 1; /* default GPT4 */
+                if (my_strncmp(oargs, "claude", 6) == 0) { oid = 2; oargs += 6; }
+                else if (my_strncmp(oargs, "gemini", 6) == 0) { oid = 3; oargs += 6; }
+                else if (my_strncmp(oargs, "gpt4", 4) == 0)   { oid = 1; oargs += 4; }
+                while (*oargs == ' ') oargs++;
+                if (!g_netboot.oracle_api_key[0]) {
+                    Print(L"\r\n[tls] No API key — set it first:\r\n");
+                    Print(L"  /net_oracle_key sk-...\r\n\r\n");
+                    continue;
                 }
+                static CHAR8 tls_resp[4096];
+                tls_resp[0] = 0;
+                Print(L"\r\n[tls] Direct oracle query (no proxy)...\r\n");
+                EFI_STATUS tst = oo_mbedtls_oracle_query(oid,
+                    g_netboot.oracle_api_key, (const CHAR8*)oargs,
+                    tls_resp, sizeof(tls_resp));
+                if (!EFI_ERROR(tst) && tls_resp[0]) {
+                    Print(L"[oracle/tls] ");
+                    for (const CHAR8 *rp = tls_resp; *rp; rp++) Print(L"%c", (CHAR16)*rp);
+                    Print(L"\r\n\r\n");
+                } else {
+                    Print(L"[tls] Query failed (%r). Check DNS + key + network.\r\n\r\n", tst);
+                }
+                continue;
+            } else if (my_strncmp(prompt, "/net_push", 9) == 0) {
+                Print(L"\r\n[netboot] Push delta to federation: Phase 4 TODO\r\n\r\n");
                 oo_netboot_print_status(&g_netboot);
                 continue;
 

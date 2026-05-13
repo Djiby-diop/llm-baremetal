@@ -313,37 +313,281 @@ EFI_STATUS oo_mbedtls_https_post_json(OoTlsCon *con,
                                         const CHAR8 *json_body,
                                         CHAR8 *resp_buf, UINTN *resp_len) {
 #ifdef OO_MBEDTLS_REAL
-    /* Build POST request */
-    static CHAR8 req[2048]; UINTN rp=0;
-    UINTN body_len = _mt_strlen(json_body);
+    /* Build HTTP/1.1 POST request */
+    static CHAR8 req[4096]; UINTN rp=0;
+    UINTN body_len = _mt_strlen(json_body ? json_body : (const CHAR8*)"");
+
+    /* POST <path> HTTP/1.1\r\nHost: <host>\r\n */
     const CHAR8 *m=(const CHAR8*)"POST "; _mt_memcpy(req+rp,m,5); rp+=5;
     UINTN pl=_mt_strlen(path); _mt_memcpy(req+rp,path,pl); rp+=pl;
     const CHAR8 *h1=(const CHAR8*)" HTTP/1.1\r\nHost: ";
     _mt_memcpy(req+rp,h1,17); rp+=17;
     UINTN hl=_mt_strlen(sni_host); _mt_memcpy(req+rp,sni_host,hl); rp+=hl;
+    /* Content-Type */
     const CHAR8 *h2=(const CHAR8*)"\r\nContent-Type: application/json\r\nContent-Length: ";
     _mt_memcpy(req+rp,h2,50); rp+=50;
-    /* body_len as decimal */
-    CHAR8 lenbuf[12]; int li=10; lenbuf[11]=0;
-    UINTN tmp=body_len; do{lenbuf[li--]='0'+(tmp%10);tmp/=10;}while(tmp&&li>=0);
+    /* Content-Length as decimal */
+    CHAR8 lenbuf[16]={0}; int li=14; lenbuf[15]=0;
+    UINTN tmp=body_len; if(!tmp){lenbuf[li--]='0';}
+    else{do{lenbuf[li--]='0'+(CHAR8)(tmp%10);tmp/=10;}while(tmp&&li>=0);}
     UINTN ll=_mt_strlen(lenbuf+li+1);
     _mt_memcpy(req+rp,lenbuf+li+1,ll); rp+=ll;
+    /* Authorization Bearer if token present */
     if (bearer_token && bearer_token[0]) {
         const CHAR8 *ah=(const CHAR8*)"\r\nAuthorization: Bearer ";
         _mt_memcpy(req+rp,ah,24); rp+=24;
         UINTN bl=_mt_strlen(bearer_token); _mt_memcpy(req+rp,bearer_token,bl); rp+=bl;
     }
-    const CHAR8 *te=(const CHAR8*)"\r\nConnection: close\r\n\r\n";
-    _mt_memcpy(req+rp,te,23); rp+=23;
-    if (rp + body_len < sizeof(req)-1) {
+    /* Accept + Connection close + end of headers */
+    const CHAR8 *te=(const CHAR8*)"\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
+    _mt_memcpy(req+rp,te,49); rp+=49;
+    /* Body */
+    if (json_body && body_len > 0 && rp + body_len < sizeof(req)-1) {
         _mt_memcpy(req+rp,json_body,body_len); rp+=body_len;
     }
     req[rp]=0;
-    _tcp4_send(con, req, rp);
-    return _tcp4_recv(con, resp_len);
+
+    /* Send via TLS (mbedtls_ssl_write through oo_mbedtls_tls_write) */
+    int wret = oo_mbedtls_tls_write(con, (const unsigned char*)req, (uint32_t)rp);
+    if (wret <= 0) {
+        Print(L"[mbedtls] TLS write failed: %d\r\n", wret);
+        return EFI_ABORTED;
+    }
+
+    /* Receive response via TLS */
+    static CHAR8 raw_resp[32768]; UINTN raw_pos = 0;
+    int rret;
+    do {
+        rret = oo_mbedtls_tls_read(con,
+                (unsigned char*)raw_resp + raw_pos,
+                (uint32_t)(sizeof(raw_resp)-1-raw_pos));
+        if (rret > 0) raw_pos += (UINTN)rret;
+    } while (rret > 0 && raw_pos < sizeof(raw_resp)-1);
+    raw_resp[raw_pos] = 0;
+
+    /* Skip HTTP headers — find \r\n\r\n */
+    CHAR8 *body_start = NULL;
+    for (UINTN i = 0; i + 3 < raw_pos; i++) {
+        if (raw_resp[i]=='\r' && raw_resp[i+1]=='\n' &&
+            raw_resp[i+2]=='\r' && raw_resp[i+3]=='\n') {
+            body_start = raw_resp + i + 4;
+            break;
+        }
+    }
+    if (!body_start) {
+        /* No headers separator — return raw (might be an error response) */
+        body_start = raw_resp;
+    }
+
+    /* Copy body into caller buffer */
+    UINTN blen = (UINTN)(raw_resp + raw_pos - body_start);
+    if (resp_buf && resp_len) {
+        UINTN copy = blen < (*resp_len - 1) ? blen : (*resp_len - 1);
+        _mt_memcpy(resp_buf, body_start, copy);
+        resp_buf[copy] = 0;
+        *resp_len = copy;
+    }
+
+    return (raw_pos > 0) ? EFI_SUCCESS : EFI_ABORTED;
 #else
     (void)con;
     return _https_via_proxy(sni_host, 443, path, bearer_token, json_body, resp_buf, resp_len);
+#endif
+}
+
+/* ── Phase 9B: All-in-one oracle query via direct TLS ───────────────────── */
+/*
+ * Maps OoOracleId → HTTPS host + path + model name.
+ * Resolves hostname via oo_dns, opens TLS, POSTs JSON, extracts content.
+ *
+ * oracle_host_out / oracle_path_out: optional, filled if non-NULL.
+ * Returns EFI_SUCCESS + response in resp_buf on success.
+ */
+static void _mbedtls_oracle_host_path(int oracle_id,
+                                       const CHAR8 **host_out,
+                                       const CHAR8 **path_out,
+                                       const CHAR8 **model_out) {
+    switch (oracle_id) {
+    case 1: /* OO_ORACLE_GPT4 */
+        *host_out  = (const CHAR8*)"api.openai.com";
+        *path_out  = (const CHAR8*)"/v1/chat/completions";
+        *model_out = (const CHAR8*)"gpt-4o";
+        break;
+    case 2: /* OO_ORACLE_CLAUDE */
+        *host_out  = (const CHAR8*)"api.anthropic.com";
+        *path_out  = (const CHAR8*)"/v1/messages";
+        *model_out = (const CHAR8*)"claude-3-5-sonnet-20241022";
+        break;
+    case 3: /* OO_ORACLE_GEMINI */
+        *host_out  = (const CHAR8*)"generativelanguage.googleapis.com";
+        *path_out  = (const CHAR8*)"/v1beta/models/gemini-1.5-pro:generateContent";
+        *model_out = (const CHAR8*)"gemini-1.5-pro";
+        break;
+    default: /* custom / none */
+        *host_out  = NULL;
+        *path_out  = (const CHAR8*)"/";
+        *model_out = (const CHAR8*)"unknown";
+        break;
+    }
+}
+
+/* Minimal JSON escaping for the prompt (only \n, \r, \t, \", \\) */
+static UINTN _mbedtls_json_escape(const CHAR8 *in, CHAR8 *out, UINTN out_cap) {
+    UINTN i=0, o=0;
+    while (in[i] && o+4 < out_cap) {
+        CHAR8 c = in[i++];
+        if      (c=='"')  { out[o++]='\\'; out[o++]='"';  }
+        else if (c=='\\') { out[o++]='\\'; out[o++]='\\'; }
+        else if (c=='\n') { out[o++]='\\'; out[o++]='n';  }
+        else if (c=='\r') { out[o++]='\\'; out[o++]='r';  }
+        else if (c=='\t') { out[o++]='\\'; out[o++]='t';  }
+        else              { out[o++]=c; }
+    }
+    out[o]=0;
+    return o;
+}
+
+/* Find first occurrence of key in JSON and copy value string */
+static int _mbedtls_json_extract(const CHAR8 *json, const CHAR8 *key,
+                                  CHAR8 *out, UINTN out_cap) {
+    if (!json || !key || !out) return 0;
+    /* Search for "key": " */
+    UINTN kl = _mt_strlen(key);
+    for (UINTN i = 0; json[i]; i++) {
+        if (json[i]=='"') {
+            /* check if key matches */
+            int match=1;
+            for (UINTN k=0; k<kl; k++) {
+                if (!json[i+1+k] || json[i+1+k]!=key[k]) { match=0; break; }
+            }
+            if (match && json[i+1+kl]=='"') {
+                UINTN j=i+1+kl+1;
+                while (json[j]==' '||json[j]=='\t') j++;
+                if (json[j]==':') { j++;
+                    while (json[j]==' '||json[j]=='\t') j++;
+                    if (json[j]=='"') {
+                        j++;
+                        UINTN o=0;
+                        while (json[j] && json[j]!='"' && o+1<out_cap) {
+                            if (json[j]=='\\' && json[j+1]) {
+                                char c=json[++j];
+                                if(c=='n') out[o++]='\n';
+                                else if(c=='t') out[o++]='\t';
+                                else out[o++]=(CHAR8)c;
+                            } else out[o++]=json[j];
+                            j++;
+                        }
+                        out[o]=0;
+                        return (int)o;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+EFI_STATUS oo_mbedtls_oracle_query(int oracle_id,
+                                    const CHAR8 *api_key,
+                                    const CHAR8 *prompt,
+                                    CHAR8 *resp_buf, UINTN resp_max) {
+#ifdef OO_MBEDTLS_REAL
+    if (!api_key || !api_key[0]) {
+        Print(L"[tls] No API key — use /net_oracle_key <key> first\r\n");
+        return EFI_NOT_READY;
+    }
+    if (!prompt || !resp_buf || resp_max < 2) return EFI_INVALID_PARAMETER;
+    if (!g_mbedtls_initialized) {
+        Print(L"[tls] mbedTLS not init — call oo_mbedtls_init() first\r\n");
+        return EFI_NOT_READY;
+    }
+
+    const CHAR8 *host = NULL, *path = NULL, *model = NULL;
+    _mbedtls_oracle_host_path(oracle_id, &host, &path, &model);
+    if (!host) {
+        Print(L"[tls] Unknown oracle id %d\r\n", oracle_id);
+        return EFI_INVALID_PARAMETER;
+    }
+
+    Print(L"[tls] Oracle %a → %a\r\n", model, host);
+
+    /* DNS resolve hostname → IP */
+    extern OoDnsCtx g_oo_dns;
+    CHAR8 host_ip[16] = {0};
+    EFI_STATUS dns_st = oo_dns_resolve(&g_oo_dns, host, host_ip, sizeof(host_ip));
+    if (EFI_ERROR(dns_st) || !host_ip[0]) {
+        Print(L"[tls] DNS resolve failed for %a (%r)\r\n", host, dns_st);
+        Print(L"[tls] Use /dns_add %a <ip> to set manually\r\n", host);
+        return EFI_NOT_FOUND;
+    }
+    Print(L"[tls] DNS: %a → %a\r\n", host, host_ip);
+
+    /* TLS connect */
+    static OoTlsCon _oracle_con;
+    EFI_STATUS st = oo_mbedtls_connect(&_oracle_con, host_ip, host, 443, 1 /*insecure*/);
+    if (EFI_ERROR(st)) {
+        Print(L"[tls] Connect failed: %r\r\n", st);
+        return st;
+    }
+
+    /* Build JSON body */
+    static CHAR8 escaped[4096]; UINTN esc_len;
+    esc_len = _mbedtls_json_escape(prompt, escaped, sizeof(escaped));
+    (void)esc_len;
+
+    static CHAR8 json_body[6144];
+    UINTN jlen;
+    if (oracle_id == 2) { /* Claude: different format */
+        jlen = 0;
+        const CHAR8 *p1 = (const CHAR8*)"{\"model\":\"";
+        while (*p1) json_body[jlen++]=*p1++;
+        for (UINTN k=0; model[k]; k++) json_body[jlen++]=model[k];
+        const CHAR8 *p2 = (const CHAR8*)"\",\"max_tokens\":2048,\"messages\":[{\"role\":\"user\",\"content\":\"";
+        while (*p2) json_body[jlen++]=*p2++;
+        for (UINTN k=0; escaped[k] && jlen < sizeof(json_body)-20; k++) json_body[jlen++]=escaped[k];
+        const CHAR8 *p3 = (const CHAR8*)"\"}]}";
+        while (*p3) json_body[jlen++]=*p3++;
+        json_body[jlen]=0;
+    } else {
+        jlen = 0;
+        const CHAR8 *p1 = (const CHAR8*)"{\"model\":\"";
+        while (*p1) json_body[jlen++]=*p1++;
+        for (UINTN k=0; model[k]; k++) json_body[jlen++]=model[k];
+        const CHAR8 *p2 = (const CHAR8*)"\",\"max_tokens\":2048,\"messages\":[{\"role\":\"user\",\"content\":\"";
+        while (*p2) json_body[jlen++]=*p2++;
+        for (UINTN k=0; escaped[k] && jlen < sizeof(json_body)-20; k++) json_body[jlen++]=escaped[k];
+        const CHAR8 *p3 = (const CHAR8*)"\"}]}";
+        while (*p3) json_body[jlen++]=*p3++;
+        json_body[jlen]=0;
+    }
+
+    /* POST + receive */
+    UINTN rlen = resp_max - 1;
+    st = oo_mbedtls_https_post_json(&_oracle_con, host, path,
+                                     api_key, json_body, resp_buf, &rlen);
+    oo_mbedtls_close(&_oracle_con);
+
+    if (!EFI_ERROR(st) && rlen > 0) {
+        /* Try to extract "content" then "text" from JSON response */
+        static CHAR8 extracted[4096];
+        if (_mbedtls_json_extract(resp_buf, (const CHAR8*)"content", extracted, sizeof(extracted))
+         || _mbedtls_json_extract(resp_buf, (const CHAR8*)"text",    extracted, sizeof(extracted))) {
+            UINTN elen = _mt_strlen(extracted);
+            if (elen >= resp_max) elen = resp_max-1;
+            _mt_memcpy(resp_buf, extracted, elen);
+            resp_buf[elen] = 0;
+        }
+        Print(L"[tls] Oracle response: %u bytes\r\n", (UINT32)_mt_strlen(resp_buf));
+    } else {
+        Print(L"[tls] Oracle POST failed: %r\r\n", st);
+    }
+    return st;
+#else
+    /* Stub mode: fall through to netboot proxy */
+    (void)oracle_id; (void)api_key; (void)prompt;
+    if (resp_buf && resp_max > 0) { resp_buf[0]='['; resp_buf[1]=0; }
+    Print(L"[tls] Stub mode — use /net_oracle instead (proxy)\r\n");
+    return EFI_UNSUPPORTED;
 #endif
 }
 
