@@ -78,9 +78,18 @@ void oo_mbedtls_free(void *ptr) {
     }
 }
 
+/* ── calloc stub (mbedtls uses calloc for MBEDTLS_PLATFORM_CALLOC_MACRO) ── */
+void *oo_mbedtls_calloc_stub(unsigned long n, unsigned long size) {
+    void *p = oo_mbedtls_malloc((uint32_t)(n * size));
+    if (p) {
+        unsigned char *b = (unsigned char *)p;
+        for (unsigned long i = 0; i < n * size; i++) b[i] = 0;
+    }
+    return p;
+}
+
 /* ── printf/snprintf stubs (required by MBEDTLS_PLATFORM_NO_STD_FUNCTIONS) */
 int oo_mbedtls_printf(const char *fmt, ...) {
-    /* Route to UEFI Print — only used for debug; stripped in release */
     (void)fmt;
     return 0;
 }
@@ -110,7 +119,6 @@ int oo_mbedtls_entropy_poll(void *data, unsigned char *output,
     *olen = 0;
     for (uint32_t i = 0; i + 8 <= len; i += 8) {
         uint64_t r = 0;
-        /* Retry up to 10 times (RDRAND can fail transiently) */
         int ok = 0;
         for (int t = 0; t < 10; t++) {
             if (_rdrand64(&r) == 0) { ok = 1; break; }
@@ -120,6 +128,17 @@ int oo_mbedtls_entropy_poll(void *data, unsigned char *output,
         *olen += 8;
     }
     return (*olen > 0) ? 0 : -1;
+}
+
+/* mbedTLS 2.28 MBEDTLS_ENTROPY_HARDWARE_ALT hook:
+ * Called from entropy.c when MBEDTLS_ENTROPY_HARDWARE_ALT is defined.
+ * We re-route to our RDRAND poll above. */
+int mbedtls_hardware_poll(void *data, unsigned char *output,
+                          size_t len, size_t *olen) {
+    uint32_t o32 = 0;
+    int ret = oo_mbedtls_entropy_poll(data, output, (uint32_t)len, &o32);
+    if (olen) *olen = (size_t)o32;
+    return ret;
 }
 
 /* ── mbedTLS TCP4 bio callbacks ─────────────────────────────────────────── */

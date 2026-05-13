@@ -27,8 +27,15 @@ CFLAGS = -ffreestanding -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
 		 -I/usr/include/efi -I/usr/include/efi/$(ARCH) -DEFI_FUNCTION_WRAPPER \
 		 -Icore -Iengine/llama2 -Iengine/gguf -Iengine/djiblas -Iengine/ssm \
 		 -I../oo-system/shared/oo-proto/include \
+		 -Iengine/network/vendor/mbedtls/include \
 		 -I. \
-		 -O2 -msse2 -DDJIBLAS_DISABLE_CPUID=1 -DUEFI_BUILD=1
+		 -O2 -msse2 -DDJIBLAS_DISABLE_CPUID=1 -DUEFI_BUILD=1 \
+		 -DOO_MBEDTLS_REAL=1
+
+# mbedTLS unity build flags: same freestanding base but suppress third-party warnings
+MBEDTLS_CFLAGS = $(CFLAGS) -w \
+	-Iengine/network/vendor/mbedtls/include \
+	-Iengine/network/vendor/mbedtls
 
 # Embed a build identifier for /version output (UTC). Override: make BUILD_ID=...
 # NOTE: $(shell ...) in a recursively-expanded variable would re-run on each expansion,
@@ -93,6 +100,7 @@ REPL_OBJS = llmk_zones.o llmk_log.o llmk_sentinel.o llmk_oo.o llmk_oo_infer.o \
 	ssm_infer.o mamba_block.o mamba_weights.o bpe_tokenizer.o \
 	oosi_loader.o oosi_infer.o oosi_v3_loader.o oosi_v3_infer.o \
 	$(SOMA_OBJS) \
+	engine/network/oo_mbedtls_port.o \
 	engine/voice/oo_voice_router.o \
 	engine/voice/oo_voice_context.o \
 	engine/voice/oo_persona.o \
@@ -251,9 +259,9 @@ oo-modules/evolvion-engine/core/oo_driver_probe.o: oo-modules/evolvion-engine/co
 oo-modules/ghost-engine/core/oo_net_packet.o: oo-modules/ghost-engine/core/oo_net_packet.c oo-modules/ghost-engine/core/oo_net_packet.h
 	$(CC) $(CFLAGS) -c oo-modules/ghost-engine/core/oo_net_packet.c -o oo-modules/ghost-engine/core/oo_net_packet.o
 
-$(REPL_SO): $(REPL_OBJS) | oo-subsystems
+$(REPL_SO): $(REPL_OBJS) $(MBEDTLS_LIB) | oo-subsystems
 	ld $(LDFLAGS) --allow-multiple-definition $(REPL_OBJS) \
-		--start-group $(OO_LINK_ARCHIVES) --end-group \
+		--start-group $(OO_LINK_ARCHIVES) $(MBEDTLS_LIB) --end-group \
 		-o $(REPL_SO) $(LIBS)
 
 $(TARGET): $(REPL_SO)
@@ -359,6 +367,68 @@ engine/ssm/core/soma_mind.o: engine/ssm/core/soma_mind.c engine/ssm/core/soma_mi
 
 llmk_stubs.o: core/llmk_stubs.c
 	$(CC) $(CFLAGS) -c core/llmk_stubs.c -o llmk_stubs.o
+
+# ── Phase 9A: mbedTLS 2.28 bare-metal TLS static archive ───────────────────
+# Compile each mbedTLS source as a separate object to avoid static symbol
+# conflicts that occur with unity builds. Link as libmbedtls.a.
+MBEDTLS_DIR = engine/network/vendor/mbedtls
+MBEDTLS_SRCS = \
+	$(MBEDTLS_DIR)/platform.c \
+	$(MBEDTLS_DIR)/platform_util.c \
+	$(MBEDTLS_DIR)/error.c \
+	$(MBEDTLS_DIR)/version.c \
+	$(MBEDTLS_DIR)/version_features.c \
+	$(MBEDTLS_DIR)/md.c \
+	$(MBEDTLS_DIR)/md5.c \
+	$(MBEDTLS_DIR)/sha1.c \
+	$(MBEDTLS_DIR)/sha256.c \
+	$(MBEDTLS_DIR)/aes.c \
+	$(MBEDTLS_DIR)/aesni.c \
+	$(MBEDTLS_DIR)/gcm.c \
+	$(MBEDTLS_DIR)/ccm.c \
+	$(MBEDTLS_DIR)/cipher.c \
+	$(MBEDTLS_DIR)/cipher_wrap.c \
+	$(MBEDTLS_DIR)/entropy.c \
+	$(MBEDTLS_DIR)/ctr_drbg.c \
+	$(MBEDTLS_DIR)/hmac_drbg.c \
+	$(MBEDTLS_DIR)/bignum.c \
+	$(MBEDTLS_DIR)/rsa.c \
+	$(MBEDTLS_DIR)/ecp.c \
+	$(MBEDTLS_DIR)/ecp_curves.c \
+	$(MBEDTLS_DIR)/ecdh.c \
+	$(MBEDTLS_DIR)/ecdsa.c \
+	$(MBEDTLS_DIR)/pk.c \
+	$(MBEDTLS_DIR)/pk_wrap.c \
+	$(MBEDTLS_DIR)/pkparse.c \
+	$(MBEDTLS_DIR)/pkwrite.c \
+	$(MBEDTLS_DIR)/asn1parse.c \
+	$(MBEDTLS_DIR)/asn1write.c \
+	$(MBEDTLS_DIR)/oid.c \
+	$(MBEDTLS_DIR)/base64.c \
+	$(MBEDTLS_DIR)/pem.c \
+	$(MBEDTLS_DIR)/x509.c \
+	$(MBEDTLS_DIR)/x509_crt.c \
+	$(MBEDTLS_DIR)/ssl_tls.c \
+	$(MBEDTLS_DIR)/ssl_msg.c \
+	$(MBEDTLS_DIR)/ssl_ciphersuites.c \
+	$(MBEDTLS_DIR)/ssl_cli.c
+
+MBEDTLS_OBJS = $(MBEDTLS_SRCS:.c=.o)
+MBEDTLS_LIB  = engine/network/vendor/mbedtls/libmbedtls.a
+
+# Pattern rule: compile each mbedTLS .c with -w to suppress third-party warnings
+$(MBEDTLS_DIR)/%.o: $(MBEDTLS_DIR)/%.c
+	$(CC) $(MBEDTLS_CFLAGS) -c $< -o $@
+
+$(MBEDTLS_LIB): $(MBEDTLS_OBJS)
+	ar rcs $@ $(MBEDTLS_OBJS)
+	@echo "OK: libmbedtls.a built ($(words $(MBEDTLS_OBJS)) objects)"
+
+# Port layer: our malloc pool, RDRAND entropy, TCP4 bio, TLS handshake wiring.
+engine/network/oo_mbedtls_port.o: engine/network/oo_mbedtls_port.c \
+		engine/network/oo_mbedtls_port.h engine/network/oo_mbedtls.h
+	$(CC) $(CFLAGS) -c engine/network/oo_mbedtls_port.c \
+		-o engine/network/oo_mbedtls_port.o
 
 clean:
 	rm -f $(REPL_OBJS) $(REPL_SO) $(TARGET) $(METABION_PROFILE_HDR)
