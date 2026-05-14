@@ -41,7 +41,7 @@ jobs:
 
       - name: Upload audit JSONL artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: oo-dplus-audit-jsonl
           path: oo-dplus/artifacts/dplus_audit_smoke.jsonl
