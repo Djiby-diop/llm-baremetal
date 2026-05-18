@@ -1,6 +1,5 @@
-/* soma_swarm_net.c — Phase Y: Distributed Swarm Consensus Implementation */
-
 #include "soma_swarm_net.h"
+#include "oo_swarm_packet.h"
 #ifdef UEFI_BUILD
 #include <efi.h>
 #include <efilib.h>
@@ -107,6 +106,7 @@ void soma_swarm_net_init(SomaSwarmNetCtx *ctx, int my_peer_id,
     ctx->use_fixed_addr = use_fixed_addr;
     ctx->initialized    = 1;
     /* enabled=0 by default — user enables via /swarm_net on */
+    oo_swarm_packet_init();
 }
 
 /* ── Publish local vote ─────────────────────────────────────────────────────── */
@@ -143,6 +143,7 @@ void soma_swarm_net_publish(SomaSwarmNetCtx *ctx,
     s.crc32 = soma_swarm_net_crc32(&s, (int)(sizeof(s) - 4));
 
     slot_write(ctx, ctx->my_peer_id, &s);
+    oo_swarm_packet_broadcast(&s);
     ctx->total_net_votes++;
 }
 
@@ -158,6 +159,14 @@ SomaSwarmNetResult soma_swarm_net_consensus(SomaSwarmNetCtx *ctx,
 
     if (!ctx->enabled || !ctx->initialized) {
         return res;
+    }
+
+    /* Poll for incoming swarm packets and update peer cache */
+    SomaSwarmNetSlot recv_slot;
+    while (oo_swarm_packet_poll(&recv_slot) == 0) {
+        if (recv_slot.peer_id < SWARM_NET_PEERS) {
+            net_memcpy(&ctx->peers[recv_slot.peer_id], &recv_slot, sizeof(SomaSwarmNetSlot));
+        }
     }
 
     /* Accumulate weighted votes across peers */

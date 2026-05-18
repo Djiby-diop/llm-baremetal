@@ -44,6 +44,11 @@ All gates must be green before switching to public.
 - Commands in docs are copy/paste-safe.
 - Build artifacts are excluded from source control.
 
+6. Public scope discipline
+- Repository remains focused on baremetal runtime/prototype concerns.
+- Out-of-scope private ecosystem material is not exposed in public docs.
+- Run scope checker: `./scripts/public-scope-check.ps1`.
+
 ## EN - Recommended publish flow
 
 1. Run local preflight:
@@ -57,6 +62,9 @@ All gates must be green before switching to public.
 - Scope, known limitations, migration notes.
 
 5. Tag and publish only after legal review is complete.
+
+6. Run scope check before final push:
+- `./scripts/public-scope-check.ps1 -Strict`
 
 ---
 
@@ -100,6 +108,11 @@ Toutes les portes doivent etre vertes avant passage en public.
 - Commandes docs copiables directement.
 - Artefacts de build exclus du controle de version.
 
+6. Discipline de perimetre public
+- Le depot reste concentre sur le runtime/prototype baremetal.
+- Le contenu prive hors perimetre n'est pas expose dans la documentation publique.
+- Lancer le controle de perimetre: `./scripts/public-scope-check.ps1`.
+
 ## FR - Flux de publication recommande
 
 1. Lancer le preflight local:
@@ -113,3 +126,6 @@ Toutes les portes doivent etre vertes avant passage en public.
 - Portee, limites connues, notes de migration.
 
 5. Tag + publication uniquement apres validation legale.
+
+6. Lancer le controle de perimetre en mode bloquant avant push final:
+- `./scripts/public-scope-check.ps1 -Strict`

@@ -38,6 +38,8 @@ typedef enum {
     SOMA_DOMAIN_CREATIVE = 6, // Stories, ideas, exploration
 } SomaDomain;
 
+#include "ssm_types.h"  // ssm_f32, MambaLayerState
+
 // ============================================================
 // Routing context (persistent across session)
 // ============================================================
@@ -50,6 +52,15 @@ typedef struct {
     int   external_count;
     int   soma_model_ready;      // 1 if SomaMind model is loaded
     int   external_model_ready;  // 1 if Mamba/LLaMA2 is loaded
+
+    /* Vomerion Primer (V1) */
+    int             vomerion_enabled;
+    float           saliency_threshold;
+    float           last_saliency;
+    MambaLayerState vomerion_state;
+    
+    /* Phase 7 Personality Genomion */
+    Genomion        *genomion;
 } SomaRouterCtx;
 
 // ============================================================
@@ -68,7 +79,7 @@ typedef struct {
 // ============================================================
 
 // Initialize router with defaults
-void soma_router_init(SomaRouterCtx *ctx);
+void soma_router_init(SomaRouterCtx *ctx, struct SomaDNA_t *dna);
 
 // Classify domain from raw input text
 SomaDomain soma_classify_domain(const char *input, int len);

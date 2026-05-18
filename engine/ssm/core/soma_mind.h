@@ -13,6 +13,10 @@
 #include "soma_logic.h"
 #include "../../../oo-modules/cellion-engine/core/cellion.h"
 #include "../../../oo-modules/collectivion-engine/core/collectivion.h"
+#include "../../../oo-modules/mercatorion-engine/core/mercatorion.h"
+#include "../../../oo-modules/symbion-engine/core/symbion.h"
+#include "../../../oo-modules/mnemion-engine/core/mnemion.h"
+#include "../../../oo-modules/morphion-engine/core/morphion.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -78,6 +82,35 @@ typedef enum {
     SOMA_ENGINE_SOLAR = 1, /* Symbolic/Logical (Syllogism) */
 } SomaMindEngineType;
 
+typedef struct __attribute__((packed)) {
+    // Identity
+    uint32_t magic;              // SOMA_GENOMION_MAGIC
+    uint32_t version;            // SOMA_GENOMION_VERSION
+    uint32_t generation;         // Mutation counter
+    uint32_t parent_hash;        // Lineage
+    
+    float    cognition_bias;     // [0=logic, 1=creative]
+    float    halt_threshold;
+    
+    // Personality Genes (Phase 7+)
+    float    curiosity_level;
+    float    risk_tolerance;
+    float    intuition_power;
+    uint32_t biometric_seed;
+    
+    // Specialization
+    uint32_t domain_mask;
+    
+    uint32_t total_interactions;
+    uint32_t successful_reflexes;
+    uint32_t successful_internals;
+    uint32_t escalations;
+    float    avg_confidence;
+    
+    uint8_t  dplus_mode;
+    uint8_t  _reserved[15];
+} Genomion;
+
 typedef struct {
     int                 active;
     SomaRouterCtx      *router;
@@ -102,6 +135,25 @@ typedef struct {
     /* Physical awareness */
     float               core_temp;    /* Received from calibrion */
     float               halt_pressure; /* Sum of halting signals */
+    
+    /* Octopoda Soma-Breath (V1) */
+    float               breath_rate;
+    uint64_t            basal_pulses;
+
+    /* Phase 7 Personality Genomion */
+    Genomion           *genomion;
+
+    /* Mercatorion Trading Organ */
+    MercatorCtx        *mercator;
+
+    /* Symbion Hardware Muscle */
+    SymbionCtx         *symbion;
+
+    /* Mnemion Dream Memory */
+    MnemionCtx         *mnemion;
+
+    /* Morphion Self-Repair */
+    MorphionCtx        *morphion;
 } SomaMindCtx;
 
 /* --- V2: Dual Engine & Graph Operations --- */
@@ -126,7 +178,12 @@ void soma_mind_init(SomaMindCtx *m, SomaRouterCtx *router,
                     OosiV3GenCtx *core, SomaLogicCtx *logic,
                     CellionEngine *vision,
                     CollectivionEngine *comm,
-                    GhostEngine *ghost);
+                    GhostEngine *ghost,
+                    Genomion *genomion,
+                    MercatorCtx *mercator,
+                    SymbionCtx *symbion,
+                    MnemionCtx *mnemion,
+                    MorphionCtx *morphion);
 
 /* Create a new cognitive object from a prompt or observation */
 SomaMindObject* soma_mind_spawn(SomaMindCtx *m, const char *name, float priority);

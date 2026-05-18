@@ -84,7 +84,22 @@ pub extern "C" fn rust_validate_oo_entity(ptr: *const OoEntity) -> i32 {
     let entity = unsafe { &*ptr };
 
     // Run validation
-    match validate_oo_entity_internal(entity) {
+    let result = validate_oo_entity_internal(entity);
+    
+    if result != ValidationResult::Ok {
+        // Phase D Integration: Direct United Bus alert
+        let globule = Globule {
+            globule_id: 0,
+            globule_type: GlobuleType::White,
+            source_organ: 2, // ORGAN_IMMUNE
+            target_organ: 1, // ORGAN_SOMA
+            payload_addr: ptr as *mut core::ffi::c_void,
+            payload_size: core::mem::size_of::<OoEntity>() as u32,
+        };
+        unsafe { united_bus_pump(globule); }
+    }
+
+    match result {
         ValidationResult::Ok => VALIDATE_OK,
         ValidationResult::CorruptedHeader => VALIDATE_ERR_CORRUPTED_HEADER,
         ValidationResult::CorruptedStrings => VALIDATE_ERR_CORRUPTED_STRINGS,
@@ -101,6 +116,60 @@ pub extern "C" fn rust_check_oo_entity_used(ptr: *const OoEntity) -> i32 {
     }
     let entity = unsafe { &*ptr };
     if entity.used != 0 { 1 } else { 0 }
+}
+
+/// Globule types (must match C globule_type_t)
+#[repr(C)]
+pub enum GlobuleType {
+    Red = 1,
+    White = 2,
+    Yellow = 3,
+    Gold = 4,
+    Silver = 5,
+}
+
+/// Trade signal validation rules
+pub const MAX_TRADE_VOLUME: f32 = 10.0;
+pub const MIN_CONFIDENCE: f32 = 0.7;
+
+#[no_mangle]
+pub extern "C" fn rust_validate_trade_signal(side: i32, price: f32, volume: f32, surprise: f32) -> i32 {
+    // Phase 8.1: Adaptive Risk Control
+    // More surprise = less allowed volume (Safety first)
+    let dynamic_max_volume = if surprise > 0.8 {
+        MAX_TRADE_VOLUME * 0.1 // Cut volume by 90% in chaos
+    } else if surprise > 0.5 {
+        MAX_TRADE_VOLUME * 0.5 // Cut volume by 50%
+    } else {
+        MAX_TRADE_VOLUME
+    };
+
+    if volume > dynamic_max_volume {
+        return -10; // Error: Adaptive volume limit exceeded
+    }
+    
+    if price <= 0.0 {
+        return -11; // Error: Invalid price
+    }
+
+    // Success
+    0
+}
+
+/// Globule structure (must match C globule_t exactly)
+#[repr(C)]
+pub struct Globule {
+    pub globule_id: u32,
+    pub globule_type: GlobuleType,
+    pub source_organ: u8,
+    pub target_organ: u8,
+    pub payload_addr: *mut core::ffi::c_void,
+    pub payload_size: u32,
+}
+
+extern "C" {
+    /// Pushes a globule onto the united bus
+    pub fn united_bus_pump(globule: Globule) -> i32;
 }
 
 /// Get entity ID (returns -1 if invalid)

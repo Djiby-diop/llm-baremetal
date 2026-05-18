@@ -19,6 +19,8 @@ int oo_virtio_probe(OoPciDevice *pci_dev) {
                 virtio_io_base = bar0 & 0xFFFFFFFC;
                 return 1; // Found block device
             }
+        } else if (pci_dev->device_id == VIRTIO_DEV_NET) {
+            return 2; // Found network device
         }
     }
     return 0;

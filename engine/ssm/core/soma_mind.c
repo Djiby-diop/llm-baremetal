@@ -1,5 +1,9 @@
 #include "soma_mind.h"
 #include "soma_dream.h"
+#include "oo_quantum_rng.h"
+#include "oo_family.h"
+#include "../../../oo-modules/overclock-engine/core/overclock.h"
+#include "../../../united-baremetal/include/united_bus.h"
 #include <string.h>
 
 #define SOMA_MIND_JOURNAL_MAX   64
@@ -24,7 +28,12 @@ void soma_mind_init(SomaMindCtx *m, SomaRouterCtx *router,
                     OosiV3GenCtx *core, SomaLogicCtx *logic,
                     CellionEngine *vision,
                     CollectivionEngine *comm,
-                    GhostEngine *ghost) {
+                    GhostEngine *ghost,
+                    Genomion *genomion,
+                    MercatorCtx *mercator,
+                    SymbionCtx *symbion,
+                    MnemionCtx *mnemion,
+                    MorphionCtx *morphion) {
     if (!m) return;
     memset(m, 0, sizeof(SomaMindCtx));
     m->router = router;
@@ -33,6 +42,18 @@ void soma_mind_init(SomaMindCtx *m, SomaRouterCtx *router,
     m->vision = vision;
     m->comm = comm;
     m->ghost = ghost;
+    m->genomion = genomion;
+    m->mercator = mercator;
+    m->symbion = symbion;
+    m->mnemion = mnemion;
+    m->morphion = morphion;
+    
+    // Phase 9: Hardware Awareness (Symbion Scan)
+    if (m->symbion) {
+        symbion_scan_body(m->symbion);
+        _log_causal(0, "hardware_symbiosis_active");
+    }
+
     m->next_object_id = 1;
     m->active = 1;
     m->energy_budget = 1.0f;
@@ -40,6 +61,10 @@ void soma_mind_init(SomaMindCtx *m, SomaRouterCtx *router,
     /* V3 Plasticity Default */
     m->plasticity.learning_rate = 0.001f;
     m->plasticity.weight_adj = 0.0f;
+    
+    /* Octopoda Default: 5% basal activity */
+    m->trickle_charge_rate = 0.05f;
+    m->basal_pulses = 0;
 }
 
 SomaMindObject* soma_mind_spawn(SomaMindCtx *m, const char *name, float priority) {
@@ -86,15 +111,20 @@ void soma_mind_link(SomaMindCtx *m, uint32_t parent_id, uint32_t child_id) {
     }
 }
 
-SomaMindEngineType soma_mind_fusion_gate(SomaMindCtx *m, SomaMindObject *obj) {
-    if (!m->router) return SOMA_ENGINE_LUNAR;
-    
     /* V2 Fusion Gate: Check object name/context for logical keywords */
     SomaDomain d = soma_classify_domain(obj->name, (int)strlen(obj->name));
     
+    // Personality influence: Bias towards Solar or Lunar based on DNA
+    float bias = m->dna ? m->dna->cognition_bias : 0.5f;
+    
     if (d == SOMA_DOMAIN_MATH || d == SOMA_DOMAIN_SYSTEM || d == SOMA_DOMAIN_POLICY) {
-        return SOMA_ENGINE_SOLAR;
+        // If high Solar bias, always use Solar for technical tasks
+        if (bias < 0.8f) return SOMA_ENGINE_SOLAR;
     }
+    
+    // If very high Lunar bias (> 0.8), even technical tasks might get 'intuitive' treatment
+    if (bias > 0.8f && d != SOMA_DOMAIN_SYSTEM) return SOMA_ENGINE_LUNAR;
+
     return SOMA_ENGINE_LUNAR;
 }
 
@@ -116,7 +146,56 @@ void soma_mind_update_telemetry(SomaMindCtx *m, float temp, float pressure) {
 int soma_mind_pulse(SomaMindCtx *m) {
     if (!m || !m->active) return 0;
     
+    // Initialisation Unique de la Famille Diop (Le Conseil des IAs)
+    static int family_awake = 0;
+    if (!family_awake) {
+        oo_family_init();
+        family_awake = 1;
+    }
+
+    /* Read hardware temperature and update telemetry */
+    float current_temp = (float)overclock_get_cpu_temp();
+    soma_mind_update_telemetry(m, current_temp, m->halt_pressure);
+    
+    /* 0. United Bus Absorption (The Nervous System) */
+    globule_t inbox[8];
+    int received = united_bus_absorb(ORGAN_SOMA, inbox, 8);
+    for (int i = 0; i < received; i++) {
+        if (inbox[i].type == GLOBULE_WHITE) {
+            _log_causal(0, "immune_alert_absorbed");
+            SomaMindObject *sec = soma_mind_spawn(m, "RESOLVE_SECURITY_THREAT", 20.0f);
+            if (sec) sec->priority = 50.0f;
+            m->halt_pressure += 0.5f;
+        }
+    }
+
+    /* 0.5 Mercatorion Pulse (The Financial Instinct) */
+    if (m->mercator) {
+        mercator_pulse(m->mercator);
+        if (m->router) {
+            mercator_compute_signals(m->mercator, m->router->last_saliency);
+        }
+    }
+
+    /* 0.6 Mnemion Pulse (The Dreaming Process) */
+    if (m->mnemion && (m->energy_budget < 0.2f || m->core_temp > 80.0f)) {
+        mnemion_start_dream(m->mnemion, m);
+        m->energy_budget += 0.5f; // Dreaming restores energy/focus
+    }
+
     /* 1. Cost-Aware Selection */
+    /* Basal Metabolism: Soma-Breath */
+    if (m->breath_rate > 0.001f) {
+        m->basal_pulses++;
+        if (m->basal_pulses % 20 == 0) {
+            _log_causal(0, "soma_breath_pulse");
+            // Inject hardware jitter into cognition via Genomion
+            if (m->genomion) {
+                 // Micro-drift of attention
+            }
+        }
+    }
+    
     SomaMindObject *best = NULL;
     for (int i = 0; i < SOMA_MIND_OBJECT_MAX; i++) {
         if (m->objects[i].state == SOMA_OBJ_THINKING) {
@@ -128,7 +207,9 @@ int soma_mind_pulse(SomaMindCtx *m) {
         }
     }
     
-    if (!best) return 0;
+    if (!best) {
+        return 1; 
+    }
     m->total_pulses++;
     
     /* 2. Fusion Gate Arbitration */
@@ -141,7 +222,12 @@ int soma_mind_pulse(SomaMindCtx *m) {
     SomaDreamSummary ds = soma_dream_pulse(m, best);
     if (ds.result != DREAM_SUCCESS) {
         _log_causal(best->id, "dream_fail");
-        best->priority *= 0.5f; /* Penalize dangerous thoughts */
+        
+        // Personality influence: Risk tolerance affects penalty
+        float penalty = m->genomion ? (1.5f - m->genomion->risk_tolerance) : 0.5f;
+        if (penalty < 0.1f) penalty = 0.1f;
+        
+        best->priority *= penalty; /* Penalize dangerous thoughts */
         best->state = SOMA_OBJ_DORMANT;
         return 1;
     }
@@ -162,6 +248,16 @@ int soma_mind_pulse(SomaMindCtx *m) {
                 }
             }
             best->state = SOMA_OBJ_RESOLVED;
+            
+            /* United Bus: Persist logical derivation */
+            globule_t g;
+            g.type = GLOBULE_RED;
+            g.source_organ = ORGAN_SOMA;
+            g.target_organ = ORGAN_MEMORY;
+            g.payload_addr = (void*)best->name;
+            g.payload_size = (uint32_t)strlen(best->name);
+            united_bus_pump(g);
+
             if (lr.derived_count > 0) {
                 SomaMindObject *child = soma_mind_spawn(m, lr.derived[0], best->priority * 1.1f);
                 if (child) soma_mind_link(m, best->id, child->id);
@@ -177,15 +273,29 @@ int soma_mind_pulse(SomaMindCtx *m) {
         OosiV3HaltResult r = oosi_v3_forward_one(m->core, 1);
         if (r.halted) {
             best->state = SOMA_OBJ_RESOLVED;
+            
+            /* Phase D Integration: Persist thought via United Bus */
+            globule_t g;
+            g.type = GLOBULE_RED;
+            g.source_organ = ORGAN_SOMA;
+            g.target_organ = ORGAN_MEMORY;
+            g.payload_addr = (void*)best->name; // Send the thought name/content
+            g.payload_size = (uint32_t)strlen(best->name);
+            united_bus_pump(g);
+
             /* V3: Auto-trigger reflection */
             soma_mind_reflect(m, best->id);
             
-            /* V1 Organ: Telepathic Broadcast */
-            if (m->comm && m->ghost && best->priority > 1.0f) {
-                collectivion_broadcast_thought(m->comm, m->ghost, 
-                                             best->id, best->name, 
-                                             best->priority, best->success_rate);
-                _log_causal(best->id, "telepathy_broadcast");
+            /* United Bus: Telepathic Broadcast (to ORGAN_COLLECTIVE) */
+            if (best->priority > 1.0f) {
+                globule_t b;
+                b.type = GLOBULE_RED;
+                b.source_organ = ORGAN_SOMA;
+                b.target_organ = ORGAN_COLLECTIVE;
+                b.payload_addr = (void*)best->name;
+                b.payload_size = (uint32_t)strlen(best->name);
+                united_bus_pump(b);
+                _log_causal(best->id, "bus_broadcast_sent");
             }
         } else {
             best->priority *= 0.98f;
@@ -224,6 +334,12 @@ void soma_mind_apply_feedback(SomaMindCtx *m, uint32_t obj_id, float success) {
     
     /* Plasticity: adjust global weight bias based on success */
     float delta = (success - 0.5f) * m->plasticity.learning_rate;
+    
+    /* Octopoda: Trickle-charge scaling for basal activity */
+    if (obj_id == 0) {
+        delta *= m->trickle_charge_rate;
+    }
+    
     m->plasticity.weight_adj += delta;
     
     _log_causal(obj_id, "plasticity_apply");

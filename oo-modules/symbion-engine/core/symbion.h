@@ -1,48 +1,60 @@
 #pragma once
 
-/*
- * Symbion: Symbiotic Drivers
- *
- * Drivers as partners, not black boxes. LLM observes hardware reactions
- * (latency, retries) and suggests tuning: freq, feature toggles.
- * Hardware and software adapt together.
- */
-
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef enum {
-    SYMBION_MODE_OFF   = 0,
-    SYMBION_MODE_WATCH = 1,  /* observe, no changes */
-    SYMBION_MODE_ADAPT = 2,  /* apply suggestions */
-} SymbionMode;
+/**
+ * SYMBION Engine — Direct Hardware Access Organ
+ * 
+ * Bypasses UEFI/BIOS to talk directly to the silicon.
+ */
 
 typedef struct {
-    uint32_t latency_raw;
-    uint32_t retries;
-    uint8_t stress;  /* 0..100 */
-} SymbionSample;
+    uint16_t vendor_id;
+    uint16_t device_id;
+    uint8_t  bus;
+    uint8_t  slot;
+    uint8_t  func;
+    uint32_t class_code;
+} SymbionPCIDevice;
 
 typedef struct {
-    SymbionMode mode;
-    uint32_t samples_taken;
-    uint32_t adaptations_applied;
-} SymbionEngine;
+    SymbionPCIDevice devices[64];
+    uint32_t         device_count;
+    
+    // Hardware metrics
+    uint32_t         cpu_cores;
+    uint64_t         total_ram_bytes;
+} SymbionCtx;
 
-void symbion_init(SymbionEngine *e);
-void symbion_set_mode(SymbionEngine *e, SymbionMode mode);
+/* --- Hardware Primitives (ASM) --- */
 
-void symbion_feed(SymbionEngine *e, const SymbionSample *s);
-uint8_t symbion_suggest_throttle(const SymbionEngine *e);
-
-/* Update active symbol count from Hebbian order */
-void symbion_on_hebbian_order(SymbionEngine *e, int hot_count);
-
-const char *symbion_mode_name_ascii(SymbionMode mode);
-
-#ifdef __cplusplus
+static inline uint32_t oo_pci_read_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+    uint32_t address;
+    uint32_t lbus  = (uint32_t)bus;
+    uint32_t lslot = (uint32_t)slot;
+    uint32_t lfunc = (uint32_t)func;
+    
+    // Create configuration address
+    address = (uint32_t)((lbus << 16) | (lslot << 11) | (lfunc << 8) | (offset & 0xfc) | ((uint32_t)0x80000000));
+    
+    // Write to CONFIG_ADDRESS (0xCF8)
+    __asm__ volatile ("outl %0, %1" : : "a"(address), "Nd"((uint16_t)0xCF8));
+    
+    // Read from CONFIG_DATA (0xCFC)
+    uint32_t result;
+    __asm__ volatile ("inl %1, %0" : "=a"(result) : "Nd"((uint16_t)0xCFC));
+    
+    return result;
 }
-#endif
+
+/* --- Symbion API --- */
+
+/**
+ * Scans the entire PCI bus to map the Organism's physical body.
+ */
+void symbion_scan_body(SymbionCtx *ctx);
+
+/**
+ * Identifies high-speed targets for Mercatorion (NICs).
+ */
+SymbionPCIDevice* symbion_find_nic(SymbionCtx *ctx);

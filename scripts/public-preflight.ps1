@@ -38,6 +38,7 @@ try {
     "LICENSE",
     "NOTICE",
     "docs/PUBLIC_RELEASE_PLAYBOOK.md",
+    "docs/PUBLIC_SCOPE.md",
     "docs/THIRD_PARTY_LICENSE_AUDIT.md",
     "docs/TRANSLATIONS.md"
   )
@@ -96,7 +97,15 @@ try {
     $failed = $true
   }
 
-  # 5) Summary
+  # 5) Public scope check
+  $scopeArgs = @()
+  if ($Strict) { $scopeArgs += "-Strict" }
+  & (Join-Path $PSScriptRoot "public-scope-check.ps1") @scopeArgs
+  $scopeOk = ($LASTEXITCODE -eq 0)
+  Write-Check -Name "Public scope" -Ok $scopeOk -Details "see scope checker output"
+  if (-not $scopeOk) { $failed = $true }
+
+  # 6) Summary
   if ($failed) {
     Write-Host "`nPreflight result: FAIL" -ForegroundColor Red
     exit 1

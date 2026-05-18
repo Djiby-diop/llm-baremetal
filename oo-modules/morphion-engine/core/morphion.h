@@ -1,48 +1,35 @@
 #pragma once
 
-/*
- * Morphion: Morphological Boot
- *
- * At boot, LLM inspects hardware (CPUID, ACPI) and chooses a skeleton:
- * which modules to load, order, params. Same firmware morphs per platform.
- */
-
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#define MORPHION_SKELETON_MAX 16
-
-typedef enum {
-    MORPHION_MODE_OFF   = 0,
-    MORPHION_MODE_PROBE = 1,  /* probe only, no morph */
-    MORPHION_MODE_MORPH = 2,  /* adapt boot skeleton */
-} MorphionMode;
+/**
+ * MORPHION Engine — The Self-Repairing Organ
+ * 
+ * Heals the Organism by rewriting failing code at runtime.
+ */
 
 typedef struct {
-    uint32_t vendor_ebx;
-    uint32_t vendor_ecx;
-    uint32_t vendor_edx;
-    uint32_t features_ebx;
-} MorphionProbe;
+    uint32_t repairs_count;
+    int      healing_active;
+} MorphionCtx;
 
 typedef struct {
-    MorphionMode mode;
-    MorphionProbe probe;
-    uint32_t modules_to_load[MORPHION_SKELETON_MAX];
-    uint32_t module_count;
-} MorphionEngine;
+    uint32_t organ_id;
+    uint32_t error_code;
+    void*    failing_addr;
+} MorphionTrappedError;
 
-void morphion_init(MorphionEngine *e);
-void morphion_set_mode(MorphionEngine *e, MorphionMode mode);
+/**
+ * Initializes the Morphion organ.
+ */
+void morphion_init(MorphionCtx *ctx);
 
-void morphion_probe(MorphionEngine *e);
-uint32_t morphion_suggest_load_order(MorphionEngine *e, uint32_t *out, uint32_t cap);
+/**
+ * Traps a system error and prepares a diagnostic for the Cortex.
+ */
+void morphion_trap_error(MorphionCtx *ctx, MorphionTrappedError *err);
 
-const char *morphion_mode_name_ascii(MorphionMode mode);
-
-#ifdef __cplusplus
-}
-#endif
+/**
+ * Applies a binary patch or hot-swaps a function pointer to heal an organ.
+ */
+int morphion_heal_organ(MorphionCtx *ctx, uint32_t organ_id, void *new_func_addr);

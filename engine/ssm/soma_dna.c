@@ -3,6 +3,7 @@
 // Freestanding C11 — no libc.
 
 #include "soma_dna.h"
+#include "oo_quantum_rng.h"
 
 #ifndef NULL
 #define NULL ((void*)0)
@@ -32,17 +33,17 @@ static float _clampf(float x, float lo, float hi) {
 }
 
 // ============================================================
-// soma_dna_init_default
+// soma_genomion_init_default
 // ============================================================
-void soma_dna_init_default(SomaDNA *dna) {
+void soma_genomion_init_default(Genomion *dna) {
     if (!dna) return;
 
     // Zero everything first
     unsigned char *p = (unsigned char *)dna;
-    for (int i = 0; i < (int)sizeof(SomaDNA); i++) p[i] = 0;
+    for (int i = 0; i < (int)sizeof(Genomion); i++) p[i] = 0;
 
-    dna->magic   = SOMA_DNA_MAGIC;
-    dna->version = SOMA_DNA_VERSION;
+    dna->magic   = SOMA_GENOMION_MAGIC;
+    dna->version = SOMA_GENOMION_VERSION;
     dna->generation = 0;
     dna->parent_hash = 0;
 
@@ -69,29 +70,39 @@ void soma_dna_init_default(SomaDNA *dna) {
     dna->successful_internals = 0;
     dna->escalations          = 0;
     dna->avg_confidence       = 0.0f;
+
+    // Phase 7: Biometric Identity & Personality
+    dna->biometric_seed = oo_quantum_seed();
+    uint32_t seed_copy = dna->biometric_seed;
+    
+    // Derived Personality from hardware entropy
+    dna->cognition_bias    = _clampf(0.5f + _rand_float(&seed_copy) * 0.2f, 0.0f, 1.0f);
+    dna->curiosity_level   = _clampf(1.0f + _rand_float(&seed_copy) * 0.5f, 0.5f, 2.0f);
+    dna->risk_tolerance    = _clampf(1.0f + _rand_float(&seed_copy) * 0.5f, 0.5f, 2.0f);
+    dna->intuition_power   = _clampf(0.5f + _rand_float(&seed_copy) * 0.3f, 0.1f, 0.9f);
 }
 
 // ============================================================
-// soma_dna_validate
+// soma_genomion_validate
 // ============================================================
-int soma_dna_validate(const SomaDNA *dna) {
+int soma_genomion_validate(const Genomion *dna) {
     if (!dna) return 0;
-    if (dna->magic != SOMA_DNA_MAGIC) return 0;
-    if (dna->version != SOMA_DNA_VERSION) return 0;
+    if (dna->magic != SOMA_GENOMION_MAGIC) return 0;
+    if (dna->version != SOMA_GENOMION_VERSION) return 0;
     if (dna->confidence_threshold < 0.0f || dna->confidence_threshold > 1.0f) return 0;
     if (dna->cognition_bias < 0.0f || dna->cognition_bias > 1.0f) return 0;
     return 1;
 }
 
 // ============================================================
-// soma_dna_hash (FNV-1a 32-bit over DNA bytes)
+// soma_genomion_hash (FNV-1a 32-bit over Genomion bytes)
 // ============================================================
-uint32_t soma_dna_hash(const SomaDNA *dna) {
+uint32_t soma_genomion_hash(const Genomion *dna) {
     if (!dna) return 0;
     const unsigned char *bytes = (const unsigned char *)dna;
     uint32_t hash = 0x811C9DC5u;  // FNV offset basis
     // Skip first 8 bytes (magic + version) for content hash
-    for (int i = 8; i < (int)sizeof(SomaDNA); i++) {
+    for (int i = 8; i < (int)sizeof(Genomion); i++) {
         hash ^= bytes[i];
         hash *= 0x01000193u;  // FNV prime
     }
@@ -99,9 +110,9 @@ uint32_t soma_dna_hash(const SomaDNA *dna) {
 }
 
 // ============================================================
-// soma_dna_mutate
+// soma_genomion_mutate
 // ============================================================
-void soma_dna_mutate(SomaDNA *dna, uint32_t *rng, float magnitude) {
+void soma_genomion_mutate(Genomion *dna, uint32_t *rng, float magnitude) {
     if (!dna || !rng) return;
     if (magnitude < 0.001f) magnitude = 0.001f;
     if (magnitude > 0.5f)   magnitude = 0.5f;
@@ -133,25 +144,35 @@ void soma_dna_mutate(SomaDNA *dna, uint32_t *rng, float magnitude) {
     dna->halt_threshold = _clampf(
         dna->halt_threshold + _rand_float(rng) * magnitude * 0.2f, 0.1f, 0.9f);
 
+    // Personality Mutation
+    dna->curiosity_level = _clampf(
+        dna->curiosity_level + _rand_float(rng) * magnitude * 0.4f, 0.5f, 2.0f);
+    
+    dna->risk_tolerance = _clampf(
+        dna->risk_tolerance + _rand_float(rng) * magnitude * 0.4f, 0.5f, 2.0f);
+        
+    dna->intuition_power = _clampf(
+        dna->intuition_power + _rand_float(rng) * magnitude * 0.3f, 0.0f, 1.0f);
+
     // Reflex threshold: careful, don't go too low (false positives)
     dna->reflex_threshold = _clampf(
         dna->reflex_threshold + _rand_float(rng) * magnitude * 0.15f, 0.4f, 0.95f);
 }
 
 // ============================================================
-// soma_dna_reproduce
+// soma_genomion_reproduce
 // ============================================================
-void soma_dna_reproduce(const SomaDNA *parent, SomaDNA *child,
+void soma_genomion_reproduce(const Genomion *parent, Genomion *child,
                         uint32_t *rng, float magnitude) {
     if (!parent || !child || !rng) return;
 
-    // Copy parent DNA
+    // Copy parent Genomion
     const unsigned char *src = (const unsigned char *)parent;
     unsigned char *dst = (unsigned char *)child;
-    for (int i = 0; i < (int)sizeof(SomaDNA); i++) dst[i] = src[i];
+    for (int i = 0; i < (int)sizeof(Genomion); i++) dst[i] = src[i];
 
     // Set lineage
-    child->parent_hash = soma_dna_hash(parent);
+    child->parent_hash = soma_genomion_hash(parent);
 
     // Reset child stats
     child->total_interactions   = 0;
@@ -161,5 +182,5 @@ void soma_dna_reproduce(const SomaDNA *parent, SomaDNA *child,
     child->avg_confidence       = 0.0f;
 
     // Mutate child
-    soma_dna_mutate(child, rng, magnitude);
+    soma_genomion_mutate(child, rng, magnitude);
 }

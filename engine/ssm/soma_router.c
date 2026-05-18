@@ -3,6 +3,7 @@
 // Freestanding C11 — no libc, no UEFI headers.
 
 #include "soma_router.h"
+#include "oo_quantum_rng.h"
 
 #ifndef NULL
 #define NULL ((void*)0)
@@ -118,16 +119,38 @@ static int _match_keywords(const char *input, int len, const char **keywords) {
 // ============================================================
 // soma_router_init
 // ============================================================
-void soma_router_init(SomaRouterCtx *ctx) {
+void soma_router_init(SomaRouterCtx *ctx, Genomion *genomion) {
     if (!ctx) return;
-    ctx->confidence_threshold = 0.85f;
-    ctx->reflex_hit_rate      = 0.0f;
-    ctx->total_routed         = 0;
-    ctx->reflex_count         = 0;
-    ctx->internal_count       = 0;
-    ctx->external_count       = 0;
-    ctx->soma_model_ready     = 0;
-    ctx->external_model_ready = 0;
+    ctx->genomion = genomion;
+
+    /* Vomerion Primer Initialization */
+    ctx->vomerion_enabled = 1;
+    float curiosity = genomion ? genomion->curiosity_level : 1.0f;
+    ctx->saliency_threshold = 0.15f / curiosity; 
+    ctx->last_saliency = 0.0f;
+    for (int i = 0; i < SSM_MAX_D_INNER * SSM_MAX_D_STATE; i++) {
+        ctx->vomerion_state.h[i] = 0.0f;
+    }
+}
+
+void soma_vomerion_vital_bloom(SomaRouterCtx *ctx, SomaMindCtx *m, float *out_vector) {
+    if (!ctx || !m || !out_vector) return;
+    
+    // We encode internal metrics into the semantic space
+    // [0] = Energy level
+    // [1] = Repair activity (Morphion)
+    // [2] = Dreaming state (Mnemion)
+    // [3] = Market saliency
+    
+    out_vector[0] = m->energy_budget;
+    out_vector[1] = m->morphion ? (float)m->morphion->healing_active : 0.0f;
+    out_vector[2] = m->mnemion  ? (float)m->mnemion->is_dreaming : 0.0f;
+    out_vector[3] = ctx->last_saliency;
+    
+    // Fill the rest with the current mental state
+    for (int i = 4; i < 128; i++) {
+        out_vector[i] = ctx->vomerion_state.h[i];
+    }
 }
 
 // ============================================================
@@ -157,6 +180,46 @@ SomaDomain soma_classify_domain(const char *input, int len) {
     return best;
 }
 
+static float _soma_vomerion_pulse(SomaRouterCtx *ctx, const char *input, int len) {
+    if (!ctx || !input || len <= 0) return 0.0f;
+
+    float alpha = 0.1f; // Adaptation rate
+    float surprise = 0.0f;
+    
+    /* Simple Vomerion Projection: Hash input into state vectors */
+    for (int i = 0; i < len && i < SSM_MAX_D_INNER; i++) {
+        float x_t = (float)(uint8_t)input[i] / 255.0f;
+        int idx = i * SSM_MAX_D_STATE; // Use first state of each dimension
+        
+        float h_prev = ctx->vomerion_state.h[idx];
+        float h_new = (1.0f - alpha) * h_prev + alpha * x_t;
+        
+        float diff = h_new - h_prev;
+        surprise += (diff > 0) ? diff : -diff;
+        
+        ctx->thalamic_state.h[idx] = h_new;
+    }
+    
+    ctx->last_saliency = surprise / (float)len;
+    
+    // Phase 7: Bayesian Intuition
+    // If saliency is high and intuition is strong, prime the Soma early
+    SomaDNA *dna = (SomaDNA*)ctx->dna;
+    if (dna && ctx->last_saliency > ctx->saliency_threshold) {
+        if (dna->intuition_power > 0.6f) {
+            globule_t p;
+            p.type = GLOBULE_RED;
+            p.source_organ = ORGAN_SENSORY; // Thalamus acting as sensory gate
+            p.target_organ = ORGAN_SOMA;
+            p.payload_addr = (void*)input;
+            p.payload_size = (uint32_t)len;
+            united_bus_pump(p);
+        }
+    }
+
+    return ctx->last_saliency;
+}
+
 // ============================================================
 // soma_route
 // ============================================================
@@ -172,7 +235,25 @@ SomaRouteResult soma_route(SomaRouterCtx *ctx, const char *input, int len) {
 
     ctx->total_routed++;
 
-    // Phase 1: Check reflex table (O(1) response, no inference)
+    // Phase 0: Thalamic Gating (Saliency Detection)
+    if (ctx->thalamic_enabled) {
+        float saliency = _soma_thalamic_pulse(ctx, input, len);
+        
+        // Phase 6: Entropy-driven curiosity
+        // Perturb the threshold slightly based on hardware jitter
+        unsigned int jitter = oo_rdtsc_jitter_u32();
+        float curiosity = ((float)(jitter & 0xFF) / 255.0f - 0.5f) * 0.02f; // +/- 1%
+        float dynamic_threshold = ctx->saliency_threshold + curiosity;
+        
+        if (saliency < dynamic_threshold * 0.1f) {
+            // Signal is too weak or repetitive - suppress consciousness
+            r.route = SOMA_ROUTE_REFLEX;
+            r.confidence = 1.0f;
+            r.reflex_response = "..."; // Silent processing
+            r.reflex_response_len = 3;
+            return r;
+        }
+    }
     for (int i = 0; i < (int)REFLEX_COUNT; i++) {
         if (_soma_contains(input, len, REFLEX_TABLE[i].pattern)) {
             r.route = SOMA_ROUTE_REFLEX;
